@@ -1,26 +1,58 @@
 {% extends "meetalign/base.html" %}
+{% block title %}통합 회의록 · {{ meeting.title }}{% endblock %}
+
 {% block note %}<li>통합 회의록은 마크다운으로 저장하고 .md 로 다운로드할 수 있다.</li>{% endblock %}
+
+{% block breadcrumb %}{% include "meetalign/_meeting_crumbs.html" with here="통합 회의록" %}{% endblock %}
+
 {% block content %}
-<h1>{{ meeting.title }} 통합 회의록</h1>
-<p><a href="{% url 'meeting_detail' meeting.id %}">회의로 돌아가기</a></p>
+<div class="mb-6 flex flex-wrap items-end justify-between gap-3">
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight text-foreground">통합 회의록</h1>
+    <p class="mt-1 text-sm text-muted-foreground">
+      {{ meeting.title }} · {{ meeting.created_at|date:"Y년 n월 j일" }}
+    </p>
+  </div>
+  {% if meeting.minutes %}
+    <a class="btn min-h-11" data-variant="outline"
+       href="{% url 'minutes_download' meeting.id %}">.md 다운로드</a>
+  {% endif %}
+</div>
+
+{% include "meetalign/_meeting_tabs.html" with current="result" %}
 
 {% if meeting.minutes %}
-  <p><a href="{% url 'minutes_download' meeting.id %}">회의록 .md 다운로드</a></p>
-  <div class="minutes">{{ meeting.minutes }}</div>
+  {% include "meetalign/_minutes_sections.html" %}
 
-  <h2>다음 단계</h2>
-  <ul>
-  {% if is_host %}
-    <li><a href="{% url 'quiz_review' meeting.id %}">확인 문제 {{ meeting.quiz_items.count }}개 검토·승인</a>
-      {% if meeting.quiz_published %}(공개됨){% else %}(아직 공개 안 됨){% endif %}</li>
-    <li><a href="{% url 'quiz_stats' meeting.id %}">이해 엇갈림 집계 보기</a></li>
-  {% elif meeting.quiz_published %}
-    <li><a href="{% url 'understanding' meeting.id %}">확인 문제 풀기</a></li>
-  {% else %}
-    <li class="muted">확인 문제는 진행자가 검토한 뒤 공개됩니다.</li>
-  {% endif %}
-  </ul>
+  <div class="mt-8 rounded-lg border border-border bg-muted/40 p-4">
+    <h2 class="text-sm font-medium text-foreground">다음 단계</h2>
+    {% if is_host %}
+      <p class="mt-1 text-sm text-muted-foreground">
+        확인 문제 {{ meeting.quiz_items.count }}개를 검토하고 승인하면 참가자가 풀 수 있습니다.
+        {% if meeting.quiz_published %}현재 공개 상태입니다.{% endif %}
+      </p>
+      <div class="mt-4 flex flex-wrap gap-2">
+        <a class="btn min-h-11" href="{% url 'quiz_review' meeting.id %}">확인 문제 검토하기</a>
+        <a class="btn min-h-11" data-variant="outline"
+           href="{% url 'quiz_stats' meeting.id %}">이해 엇갈림 집계</a>
+      </div>
+    {% elif meeting.quiz_published %}
+      <p class="mt-1 text-sm text-muted-foreground">
+        회의록을 읽었다면 확인 문제를 풀어 서로의 이해가 같은지 맞춰 봅니다.
+      </p>
+      <div class="mt-4">
+        <a class="btn min-h-11" href="{% url 'understanding' meeting.id %}">확인 문제 풀기</a>
+      </div>
+    {% else %}
+      <p class="mt-1 text-sm text-muted-foreground">확인 문제는 진행자가 검토한 뒤 공개됩니다.</p>
+    {% endif %}
+  </div>
 {% else %}
-  <p class="muted">아직 회의록이 없습니다. 진행자가 녹음이나 전사 텍스트를 제출해야 합니다.</p>
+  <div class="rounded-lg border border-dashed border-border bg-card px-6 py-14 text-center">
+    <h2 class="text-base font-medium text-foreground">아직 회의록이 없습니다</h2>
+    <p class="mt-1 text-sm text-muted-foreground">진행자가 녹음이나 전사 텍스트를 제출해야 만들어집니다.</p>
+    <a class="btn mt-5 min-h-11" data-variant="outline"
+       href="{% url 'meeting_detail' meeting.id %}">입력 화면으로</a>
+  </div>
 {% endif %}
 {% endblock %}

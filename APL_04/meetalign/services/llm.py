@@ -58,7 +58,7 @@ def split_sentences(text):
 _SECTIONS = [
     ("결정된 사항", ("결정", "확정", "포함하기로", "제한합니다", "잡았습니다", "두기로")),
     ("아직 논의 중인 사항", ("논의 중", "미결", "다음 회의", "검토", "쟁점")),
-    ("담당", ("맡", "담당")),
+    ("해야 할 일", ("맡", "담당")),
     ("숫자와 기한", ("월 ", "일입니다", "명", "원", "%")),
     ("용어", ("정의", "뜻", "라고 부")),
 ]
@@ -70,7 +70,8 @@ def _mock_minutes(transcript, title):
         raise LlmError("전사 텍스트가 비어 있어 회의록을 만들 수 없습니다.")
 
     lines = ["# %s 통합 회의록" % (title or "회의"), ""]
-    lines.append("> mock 공급자로 만든 회의록입니다. 실제 LLM 연결은 Phase 2에서 합니다.")
+    lines.append("## 요약")
+    lines.extend("- %s" % s for s in sentences[:3])
     lines.append("")
     for heading, keywords in _SECTIONS:
         picked = [s for s in sentences if any(k in s for k in keywords)]

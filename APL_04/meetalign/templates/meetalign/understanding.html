@@ -1,39 +1,133 @@
 {% extends "meetalign/base.html" %}
+{% block title %}확인 문제 · {{ meeting.title }}{% endblock %}
+
 {% block note %}
 <li>참가자가 풀면 바로 자동 채점한다. 한 번만 풀 수 있다.</li>
 <li>개인 결과는 본인에게만 보이고, 진행자는 인원수 집계만 본다.</li>
 {% endblock %}
+
+{% block breadcrumb %}{% include "meetalign/_meeting_crumbs.html" with here="확인 문제" %}{% endblock %}
+
 {% block content %}
-<h1>{{ meeting.title }} 이해도 확인</h1>
-<p><a href="{% url 'meeting_detail' meeting.id %}">회의로 돌아가기</a></p>
+<div class="mb-6">
+  <h1 class="text-2xl font-semibold tracking-tight text-foreground">확인 문제</h1>
+  <p class="mt-1 text-sm text-muted-foreground">{{ meeting.title }}</p>
+</div>
+
+{% include "meetalign/_meeting_tabs.html" with current="quiz" %}
 
 {% if not meeting.quiz_published %}
-  <p class="muted">확인 문제가 아직 공개되지 않았습니다. 진행자의 검토를 기다려 주세요.</p>
+  <div class="alert border-amber-200 bg-amber-50 text-amber-800" role="status">
+    <strong data-title>아직 공개되지 않았습니다</strong>
+    <section><p>진행자가 문제를 검토하고 승인하면 풀 수 있습니다.</p></section>
+  </div>
+
 {% elif solved %}
-  <p>내 결과: <span class="count">{{ correct_count }}</span> / {{ graded|length }} 문항 일치</p>
+  <div class="card mb-4">
+    <section class="flex flex-wrap items-center gap-3">
+      <p class="text-base font-medium text-foreground">
+        <span class="count tabular-nums text-2xl font-semibold">{{ correct_count }}</span>
+        / {{ graded|length }} 문항 일치
+      </p>
+      <p class="text-sm text-muted-foreground">
+        다르게 이해한 문항은 회의 내용과 근거를 함께 보여 줍니다. 틀린 게 아니라 맞춰 보는 과정입니다.
+      </p>
+    </section>
+  </div>
+
+  <div class="space-y-4">
   {% for g in graded %}
-    <div class="card">
-      <p><b>{{ g.item.order }}번</b> {{ g.item.text }}</p>
-      <p>내 답: {{ g.selected }}. {{ g.selected_text }}
-        {% if g.is_correct %}(일치){% else %}<span class="error">(다르게 이해함)</span>{% endif %}</p>
-      {% if not g.is_correct %}
-        <p>회의 내용: {{ g.item.answer_index }}. {{ g.item.answer_text }}</p>
-      {% endif %}
-      <p class="muted">근거: {{ g.item.evidence }}</p>
-    </div>
+    <article class="card">
+      <header class="border-b">
+        <div class="flex flex-wrap items-center gap-2">
+          <span class="badge" data-variant="outline">{{ g.item.order }}번</span>
+          {% if g.is_correct %}
+            <span class="badge border-emerald-200 bg-emerald-50 text-emerald-700">회의 내용과 일치</span>
+          {% else %}
+            <span class="badge border-amber-200 bg-amber-50 text-amber-800">다르게 이해함</span>
+          {% endif %}
+        </div>
+        <h2 class="card-title mt-2 text-base font-medium leading-relaxed">{{ g.item.text }}</h2>
+      </header>
+
+      <section class="space-y-2 text-sm leading-relaxed">
+        <p><span class="text-muted-foreground">내가 고른 답</span>
+          {{ g.selected }}. {{ g.selected_text }}</p>
+        {% if not g.is_correct %}
+          <p class="rounded-md bg-amber-50 px-3 py-2 text-amber-900">
+            <span class="font-medium">회의 내용</span>
+            {{ g.item.answer_index }}. {{ g.item.answer_text }}</p>
+        {% endif %}
+        <blockquote class="border-l-2 border-border pl-3 text-muted-foreground">
+          {{ g.item.evidence|default:"근거 문장이 비어 있습니다." }}
+        </blockquote>
+      </section>
+    </article>
   {% endfor %}
-  <p><a href="{% url 'chat' meeting.id %}">궁금한 점 질문하기</a></p>
+  </div>
+
+  <div class="mt-8 rounded-lg border border-border bg-muted/40 p-4">
+    <h2 class="text-sm font-medium text-foreground">다르게 이해한 부분이 있었나요?</h2>
+    <p class="mt-1 text-sm text-muted-foreground">이름을 남기지 않고 물어볼 수 있습니다.</p>
+    <a class="btn mt-4 min-h-11" href="{% url 'chat' meeting.id %}">궁금한 점 질문하기</a>
+  </div>
+
 {% else %}
-  <form method="post">{% csrf_token %}
+  <form method="post" id="quiz-form">{% csrf_token %}
+    <div class="mb-4 rounded-lg border border-border bg-card px-4 py-3">
+      <p class="text-sm text-muted-foreground">
+        회의 내용과 같다고 생각하는 보기를 고르세요.
+        <span class="whitespace-nowrap font-medium text-foreground">
+          <span id="answered-count" class="tabular-nums">0</span> / {{ items|length }} 선택
+        </span>
+      </p>
+    </div>
+
+    <div class="space-y-4">
     {% for item in items %}
-      <div class="card">
-        <p><b>{{ item.order }}번</b> {{ item.text }}</p>
-        {% for n, text in item.choices %}
-          <p><label><input type="radio" name="item_{{ item.id }}" value="{{ n }}"> {{ n }}. {{ text }}</label></p>
-        {% endfor %}
-      </div>
+      <article class="card">
+        <header class="border-b">
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="badge" data-variant="outline">{{ item.order }}번</span>
+            <span class="badge" data-variant="secondary">{{ item.get_kind_display }}</span>
+          </div>
+          <h2 class="card-title mt-2 text-base font-medium leading-relaxed">{{ item.text }}</h2>
+        </header>
+
+        <section class="space-y-2">
+          {% for n, text in item.choices %}
+            <label class="flex min-h-11 cursor-pointer items-start gap-3 rounded-md border border-border
+                          px-3 py-2 text-sm leading-relaxed hover:bg-muted
+                          has-[:checked]:border-primary has-[:checked]:bg-primary/5">
+              <input type="radio" name="item_{{ item.id }}" value="{{ n }}"
+                     class="mt-1 size-4 shrink-0 accent-[var(--primary)]">
+              <span><span class="text-muted-foreground">{{ n }}.</span> {{ text }}</span>
+            </label>
+          {% endfor %}
+        </section>
+      </article>
     {% endfor %}
-    <button>제출</button>
+    </div>
+
+    <div class="sticky bottom-0 -mx-4 mt-6 flex flex-wrap items-center gap-3 border-t border-border
+                bg-background/95 px-4 py-3 backdrop-blur">
+      <button class="btn min-h-11 flex-1 sm:flex-none">제출하고 결과 보기</button>
+      <span class="text-sm text-muted-foreground">제출은 한 번만 할 수 있습니다.</span>
+    </div>
   </form>
+
+  <script>
+    // 몇 문항을 골랐는지만 세어 보여준다 (제출 내용에는 영향 없음).
+    var quizForm = document.getElementById("quiz-form");
+    if (quizForm) {
+      quizForm.addEventListener("change", function () {
+        var names = {};
+        quizForm.querySelectorAll('input[type="radio"]:checked').forEach(function (input) {
+          names[input.name] = true;
+        });
+        document.getElementById("answered-count").textContent = Object.keys(names).length;
+      });
+    }
+  </script>
 {% endif %}
 {% endblock %}
