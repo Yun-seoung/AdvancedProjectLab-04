@@ -44,7 +44,8 @@ python manage.py runserver
 ### 시연 순서
 
 1. `host` 로 로그인 → `4조` 회의 목록 → `스터디앱 1차 배포 준비` 회의 입장
-2. 오디오 파일을 올리거나 전사 텍스트를 붙여넣고 **제출**
+2. **오디오 파일** 탭에서 파일을 올리거나, **텍스트 붙여넣기** 탭에
+   `samples/demo_meeting.txt` 내용을 붙여넣고 **회의록과 확인 문제 만들기**
    - mock STT 는 파일 내용을 읽지 않고 가상 회의 전사를 돌려줍니다. 어떤 파일이든 됩니다.
    - 붙여넣기만으로도 끝까지 시연됩니다.
 3. 통합 회의록 확인 → `.md` 다운로드
@@ -73,6 +74,61 @@ cd APL_04
 python manage.py test
 ```
 
+## 화면 스타일 (CSS 빌드)
+
+빌드된 CSS(`APL_04/static/css/tailwind.css`)를 **커밋해 두었기 때문에, 화면만 볼 때는 아무것도 설치하지 않아도 됩니다.**
+템플릿의 클래스를 고쳤을 때만 아래 명령으로 다시 빌드합니다.
+
+```bash
+cd APL_04
+PYTHONUTF8=1 python manage.py tailwind build     # 한 번 빌드
+PYTHONUTF8=1 python manage.py tailwind watch     # 고치는 동안 자동 빌드
+```
+
+- **Windows 에서는 `PYTHONUTF8=1` 이 필요합니다.** 없으면 CLI 가 출력하는 이모지 때문에
+  `UnicodeEncodeError: 'cp949' codec` 이 납니다 (빌드 자체는 되지만 로그가 깨집니다).
+- Node 와 npm 은 쓰지 않습니다. `django-tailwind-cli` 가 Tailwind 공식 standalone 실행 파일을
+  `APL_04/.django_tailwind_cli/` 에 내려받아 씁니다(첫 빌드 때 자동, `.gitignore` 처리됨).
+- Basecoat 의 CSS/JS 는 `APL_04/static/vendor/` 에 내려받아 로컬로 서빙합니다.
+  **런타임에 외부 CDN 을 부르지 않으므로 네트워크가 끊겨도 화면이 그대로 나옵니다.**
+
+## UI 가이드
+
+### 쓰는 도구
+
+| 구분 | 무엇 | 어디서 고치나 |
+| --- | --- | --- |
+| 유틸리티 클래스 | Tailwind CSS 4 (`flex`, `mt-4`, `text-sm` …) | 템플릿에서 바로 |
+| 컴포넌트 클래스 | Basecoat 1.0.2 (`btn`, `card`, `badge`, `field`, `input`, `tabs`, `breadcrumb`, `alert`, `progress`) | 템플릿에서 바로 |
+| 디자인 토큰 | `APL_04/tailwind_src/input.css` 의 `:root` | 색·반경을 바꿀 때 여기 한 곳만 |
+
+`base.html` 에서 **Tailwind 를 먼저, Basecoat 을 나중에** 읽습니다.
+이 순서로 CSS 레이어가 잡혀서, 컴포넌트 기본 모양을 유틸리티 클래스로 덮어쓸 수 있습니다
+(예: 36px 인 `.btn` 에 `min-h-11` 을 더해 44px 터치 영역을 만듭니다).
+
+### 규칙
+
+- 흰 배경 + 얇은 회색 테두리(`--border: #e5e7eb`), 그림자는 거의 쓰지 않습니다. 반경 8px.
+- 본문 `#1f2937`, 보조 설명 `#6b7280`, 강조는 파랑 `#2563eb` 하나만 씁니다.
+- 빨강은 삭제·오류에만, 초록은 완료·정답에, 앰버는 주의와 **"다르게 이해함"** 에 씁니다.
+  참가자에게 "틀렸다"로 읽히지 않도록 빨강을 쓰지 않습니다.
+- 본문 영역은 가운데 정렬 800px 단일 컬럼(`max-w-[800px]`), 모바일에서 좌우 여백 16px.
+- 누르는 것은 최소 44px(`min-h-11`), 모든 입력에는 `<label>` 을 붙입니다.
+- 사람 이름은 집계 화면에 절대 쓰지 않습니다(문항별 인원수만).
+
+### 공용 템플릿 조각
+
+| 파일 | 용도 |
+| --- | --- |
+| `base.html` | 헤더, breadcrumb 블록, 본문 컨테이너, 접이식 "이 화면 안내" |
+| `_meeting_crumbs.html` | 회의 안 화면의 breadcrumb (`here` 로 현재 화면 이름을 넘김) |
+| `_meeting_tabs.html` | 회의 안 화면 이동 세그먼트 (`current` 로 현재 화면을 넘김) |
+| `_minutes_sections.html` | 저장된 회의록 마크다운을 섹션 카드로 그림 |
+| `templatetags/ui_extras.py` | 화면 표현만 돕는 필터 (`md_sections`, `top_wrong_index`, `percent`) |
+
+JavaScript 는 세 군데만 씁니다: 제출 버튼 로딩 표시, 입력 방식 탭(Basecoat), 문제 풀이의 선택 개수 표시.
+접었다 펴는 것은 모두 `<details>` 로 처리해 JS 가 없어도 동작합니다.
+
 ## 구조
 
 ```
@@ -87,7 +143,13 @@ APL_04/
       stt.py          # 음성 전사 (공급자: mock | gemini)
       llm.py          # 회의록/확인 문제 생성 (공급자: mock | gemini)
     management/commands/seed_demo.py
+    templatetags/ui_extras.py   # 화면 표현용 필터
     templates/meetalign/
+  tailwind_src/input.css        # 디자인 토큰 (색, 반경, 폰트)
+  static/
+    css/tailwind.css            # 빌드 결과물 (커밋함)
+    vendor/                     # Basecoat CSS/JS 로컬 사본
+samples/demo_meeting.txt        # 붙여넣기 시연용 전사 텍스트
 ```
 
 ## 범위 밖

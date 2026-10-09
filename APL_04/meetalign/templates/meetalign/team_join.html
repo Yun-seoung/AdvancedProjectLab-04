@@ -1,10 +1,26 @@
 {% extends "meetalign/base.html" %}
+{% block title %}팀 참여 · MeetAlign{% endblock %}
+
 {% block note %}<li>목업에서 이어받은 화면. 단일 팀을 가정하므로 팀 생성과 초대 코드는 만들지 않는다.</li>{% endblock %}
+
 {% block content %}
-<h1>팀 참여</h1>
-{% if error %}<p class="error">{{ error }}</p>{% endif %}
-<form method="post">{% csrf_token %}
-  <p><label>팀 이름 <input type="text" name="name" placeholder="예: 4조"></label></p>
-  <button>참여</button>
-</form>
+<div class="mx-auto max-w-sm pt-6">
+  <h1 class="text-2xl font-semibold tracking-tight text-foreground">팀 참여</h1>
+  <p class="mt-1 text-sm text-muted-foreground">이미 있는 팀의 이름을 입력하면 참여됩니다.</p>
+
+  {% if error %}
+    <div class="alert mt-5 border-destructive/30 bg-red-50 text-destructive" role="alert">
+      <strong data-title>참여하지 못했습니다</strong>
+      <section><p>{{ error }}</p></section>
+    </div>
+  {% endif %}
+
+  <form method="post" class="mt-6 space-y-5">{% csrf_token %}
+    <div class="field">
+      <label class="label" for="name">팀 이름</label>
+      <input class="input min-h-11" type="text" id="name" name="name" placeholder="예: 4조" autofocus>
+    </div>
+    <button class="btn min-h-11 w-full">참여</button>
+  </form>
+</div>
 {% endblock %}

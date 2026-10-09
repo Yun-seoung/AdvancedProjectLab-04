@@ -1,8 +1,21 @@
 {% extends "meetalign/base.html" %}
+{% block title %}회원가입 · MeetAlign{% endblock %}
+
 {% block note %}<li>목업에서 이어받은 화면. 프로토타입 범위에서 회원가입은 구현하지 않는다.</li>{% endblock %}
+
 {% block content %}
-<h1>회원가입</h1>
-<p>이 프로토타입은 회원가입을 구현하지 않습니다.
-   <code>python manage.py seed_demo</code> 로 만든 데모 계정으로
-   <a href="{% url 'login' %}">로그인</a>해 주세요.</p>
+<div class="mx-auto max-w-sm pt-6">
+  <h1 class="text-2xl font-semibold tracking-tight text-foreground">회원가입</h1>
+
+  <div class="alert mt-5" role="note">
+    <strong data-title>이 프로토타입은 회원가입을 구현하지 않습니다</strong>
+    <section>
+      <p>아래 명령으로 만든 데모 계정으로 로그인해 주세요.</p>
+    </section>
+  </div>
+
+  <pre class="mt-4 overflow-x-auto rounded-lg border border-border bg-muted/40 px-4 py-3 text-sm"><code>python manage.py seed_demo</code></pre>
+
+  <a class="btn mt-6 min-h-11 w-full" href="{% url 'login' %}">로그인 화면으로</a>
+</div>
 {% endblock %}
