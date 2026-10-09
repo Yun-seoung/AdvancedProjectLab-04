@@ -32,6 +32,21 @@ def md_sections(text):
 
 
 @register.filter
+def top_wrong_index(choices):
+    """집계에서 '가장 많이 선택된 오답'의 보기 번호를 돌려준다. 없으면 0.
+
+    choices 는 뷰가 넘기는 [{"index", "count", "is_answer", ...}] 목록이다.
+    """
+    best = None
+    for choice in choices or []:
+        if choice.get("is_answer") or not choice.get("count"):
+            continue
+        if best is None or choice["count"] > best["count"]:
+            best = choice
+    return best["index"] if best else 0
+
+
+@register.filter
 def percent(count, total):
     """집계 가로 막대의 길이(%)를 계산한다."""
     try:
