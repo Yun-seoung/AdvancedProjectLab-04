@@ -1,37 +1,43 @@
-<!doctype html>
+{% load static %}<!doctype html>
 <html lang="ko">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}MeetAlign{% endblock %}</title>
-<style>
-  body { font-family: system-ui, "Malgun Gothic", sans-serif; max-width: 840px;
-         margin: 24px auto; padding: 0 16px; line-height: 1.6; }
-  nav { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
-  nav form { margin: 0; }
-  .note { border: 1px solid #ccc; background: #f7f7f7; padding: 8px 12px; font-size: 13px; }
-  .note ul { margin: 4px 0 0 18px; padding: 0; }
-  .muted { color: #666; font-size: 13px; }
-  .error { color: #b00020; }
-  .card { border: 1px solid #ddd; padding: 12px; margin: 12px 0; }
-  .minutes { background: #f7f7f7; padding: 12px; white-space: pre-wrap; }
-  textarea { width: 100%; box-sizing: border-box; }
-  input[type=text] { width: 100%; box-sizing: border-box; }
-  .count { font-weight: bold; }
-</style>
+<link rel="stylesheet" href="{% static 'css/app.css' %}">
 </head>
 <body>
-<nav>
-  <a href="{% url 'index' %}">MeetAlign</a>
-  {% if user.is_authenticated %}
-    <span class="muted">{{ user.username }} 님</span>
-    <form method="post" action="{% url 'logout' %}">{% csrf_token %}<button>로그아웃</button></form>
-  {% else %}
-    <a href="{% url 'login' %}">로그인</a>
-  {% endif %}
-</nav>
-<div class="note"><b>설계 결정</b><ul>{% block note %}{% endblock %}</ul></div>
-<hr>
-{% block content %}{% endblock %}
+
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="{% url 'index' %}">MeetAlign</a>
+    <nav class="crumbs" aria-label="현재 위치">{% block crumbs %}{% endblock %}</nav>
+    <div class="topbar-user">
+      {% if user.is_authenticated %}
+        <span class="user-name">{{ user.username }}</span>
+        {% if user.hosted_meetings.exists %}
+          <span class="badge badge-blue">진행자</span>
+        {% else %}
+          <span class="badge badge-neutral">참가자</span>
+        {% endif %}
+        <form method="post" action="{% url 'logout' %}">{% csrf_token %}
+          <button class="btn btn-secondary btn-sm">로그아웃</button>
+        </form>
+      {% else %}
+        <a class="btn btn-secondary btn-sm" href="{% url 'login' %}">로그인</a>
+      {% endif %}
+    </div>
+  </div>
+</header>
+
+<main class="container">
+  {% block content %}{% endblock %}
+
+  <details class="guide">
+    <summary>이 화면 안내</summary>
+    <ul>{% block note %}{% endblock %}</ul>
+  </details>
+</main>
+
 </body>
 </html>

@@ -152,6 +152,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+STATICFILES_DIRS = [BASE_DIR / 'static']
 
 # 업로드된 회의 녹음을 잠깐 두는 곳. 처리가 끝나면 즉시 삭제한다.
 MEDIA_URL = 'media/'
