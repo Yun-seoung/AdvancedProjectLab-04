@@ -124,7 +124,7 @@ _QUIZ_PLAN = [
 ]
 
 
-def _shorten(sentence, limit=140):
+def _shorten(sentence, limit=44):
     return sentence if len(sentence) <= limit else sentence[: limit - 1] + "…"
 
 
@@ -173,7 +173,10 @@ def _find_evidence(sentences, used, patterns):
 
 
 def _build_item(kind, text, evidence, distractors, index):
-    """정답 위치를 1→2→3→4로 돌려가며 보기를 배치한다."""
+    """정답 위치를 1→2→3→4로 돌려가며 보기를 배치한다.
+
+    보기는 읽기 좋게 짧게 줄이고, 근거에는 원문 문장을 그대로 남긴다.
+    """
     answer_index = index % 4 + 1
     choices = list(distractors)
     choices.insert(answer_index - 1, _shorten(evidence))
