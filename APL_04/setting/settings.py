@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'django_tailwind_cli',
     'meetalign',
 ]
 
@@ -153,6 +154,12 @@ USE_TZ = True
 
 STATIC_URL = 'static/'
 STATICFILES_DIRS = [BASE_DIR / 'static']
+
+# Tailwind CSS 4 (django-tailwind-cli). Node 없이 standalone 바이너리를 쓴다.
+# 버전은 static/vendor/basecoat.css 가 컴파일된 Tailwind 버전과 맞춘다.
+TAILWIND_CLI_VERSION = '4.3.1'
+TAILWIND_CLI_SRC_CSS = str(BASE_DIR / 'tailwind_src' / 'input.css')
+TAILWIND_CLI_DIST_CSS = 'css/tailwind.css'
 
 # 업로드된 회의 녹음을 잠깐 두는 곳. 처리가 끝나면 즉시 삭제한다.
 MEDIA_URL = 'media/'
