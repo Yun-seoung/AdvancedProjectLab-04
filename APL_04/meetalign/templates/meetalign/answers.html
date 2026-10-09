@@ -1,5 +1,5 @@
 {% extends "meetalign/base.html" %}
-{% block note %}<li>회의 종료 후 이동하는 화면. 생성된 익명 질문에 답변을 직접 작성해 저장한다 (LLM 초안 없음).</li>{% endblock %}
+{% block note %}<li>회의 종료 후 이동하는 화면. 익명 질문에 답변을 직접 작성해 저장한다.</li>{% endblock %}
 {% block content %}
 <h1>{{ meeting.title }} 질문 답변</h1>
 <p><a href="{% url 'meeting_detail' meeting.id %}">회의로 돌아가기</a></p>

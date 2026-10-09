@@ -1,0 +1,40 @@
+{% extends "meetalign/base.html" %}
+{% block note %}
+<li>진행자가 문제·보기·정답·근거를 고친 뒤 승인하면 참가자에게 공개된다.</li>
+<li>공개 전에는 참가자가 문제를 볼 수 없다.</li>
+{% endblock %}
+{% block content %}
+<h1>{{ meeting.title }} 확인 문제 검토</h1>
+<p><a href="{% url 'meeting_detail' meeting.id %}">회의로 돌아가기</a>
+  | <a href="{% url 'meeting_result' meeting.id %}">통합 회의록</a></p>
+
+{% if message %}<p>{{ message }}</p>{% endif %}
+<p class="muted">상태: {% if meeting.quiz_published %}참가자에게 공개됨{% else %}아직 공개되지 않음{% endif %}</p>
+
+<form method="post">{% csrf_token %}
+{% for item in items %}
+  <div class="card">
+    <p><b>{{ item.order }}번</b> <span class="muted">({{ item.get_kind_display }})</span></p>
+    <p><label>문항<br><textarea name="text_{{ item.id }}" rows="2">{{ item.text }}</textarea></label></p>
+    {% for n, text in item.choices %}
+      <p>
+        <label>
+          <input type="radio" name="answer_{{ item.id }}" value="{{ n }}"
+                 {% if item.answer_index == n %}checked{% endif %}>
+          보기 {{ n }}
+        </label>
+        <input type="text" name="choice{{ n }}_{{ item.id }}" value="{{ text }}">
+      </p>
+    {% endfor %}
+    <p><label>근거 문장<br><textarea name="evidence_{{ item.id }}" rows="2">{{ item.evidence }}</textarea></label></p>
+  </div>
+{% empty %}
+  <p class="muted">확인 문제가 없습니다. 회의 상세에서 녹음이나 전사 텍스트를 먼저 제출해 주세요.</p>
+{% endfor %}
+
+{% if items %}
+  <button name="action" value="save">수정 저장</button>
+  <button name="action" value="publish">승인하고 참가자에게 공개</button>
+{% endif %}
+</form>
+{% endblock %}

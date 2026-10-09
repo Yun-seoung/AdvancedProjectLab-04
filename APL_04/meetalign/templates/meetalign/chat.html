@@ -1,7 +1,8 @@
 {% extends "meetalign/base.html" %}
 {% block note %}
 <li>회의마다 대화방이 있으며, 프로젝트 맥락은 각 회의 결과로만 유지한다 (대화 기록은 저장하지 않음).</li>
-<li>익명 질문은 작성자를 저장하지 않는다. LLM 응답은 고정된 가짜 문장이다.</li>
+<li>익명 질문은 작성자를 저장하지 않는다.</li>
+<li>AI에게 묻기(맥락을 이 회의 결과로만 한정, 근거 검증)는 Phase 3에서 구현한다.</li>
 {% endblock %}
 {% block content %}
 <h1>{{ meeting.title }} 대화창</h1>

@@ -1,20 +1,65 @@
 {% extends "meetalign/base.html" %}
 {% block note %}
-<li>녹음 입력은 파일 선택 UI만 제공하며 서버에 저장/처리하지 않는다.</li>
-<li>제출 → 회의록 생성 화면, 종료 → 질문 답변 화면(3.5)으로 이동한다.</li>
+<li>입력은 오디오 업로드와 전사 텍스트 붙여넣기 두 가지를 모두 지원한다 (STT 가 실패해도 시연된다).</li>
+<li>처리는 요청 안에서 동기로 하고 로딩 표시만 둔다. 녹음 원본은 전사 직후 삭제한다.</li>
+<li>녹음 제출과 회의 종료는 진행자만 할 수 있다.</li>
 {% endblock %}
 {% block content %}
 <h1>{{ meeting.title }}</h1>
-<a href="{% url 'meeting_list' meeting.team_id %}">회의 목록으로 돌아가기</a>
-<form method="post" enctype="multipart/form-data">{% csrf_token %}
-<p>회의 녹음: <input type="file" name="recording" accept="audio/*"></p>
-<button name="action" value="submit">제출</button>
-<button name="action" value="end">종료</button>
+<p><a href="{% url 'meeting_list' meeting.team_id %}">회의 목록으로 돌아가기</a></p>
+<p class="muted">진행자: {{ meeting.host.username|default:"(없음)" }}
+  / STT: {{ stt_provider }} / LLM: {{ llm_provider }}</p>
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+{% if is_host %}
+<div class="card">
+  <h2>회의 녹음 제출</h2>
+  <form method="post" enctype="multipart/form-data" id="submit-form">{% csrf_token %}
+    <p><label>오디오 파일 <input type="file" name="recording" accept="audio/*"></label></p>
+    <p><label>또는 전사 텍스트 붙여넣기<br>
+      <textarea name="transcript" rows="8" placeholder="회의 전사 텍스트를 붙여넣으세요."></textarea></label></p>
+    <button name="action" value="submit" id="submit-button">제출</button>
+    <span id="loading" class="muted" hidden>처리 중입니다. 통합 회의록과 확인 문제를 만들고 있습니다...</span>
+  </form>
+  <p class="muted">둘 다 넣으면 오디오 파일을 전사한 결과를 씁니다.</p>
+</div>
+
+<form method="post">{% csrf_token %}
+  <button name="action" value="end">회의 종료</button>
 </form>
+{% else %}
+<p class="muted">녹음 제출은 진행자({{ meeting.host.username|default:"미지정" }})만 할 수 있습니다.</p>
+{% endif %}
+
+<h2>이 회의의 화면</h2>
 <ul>
-<li><a href="{% url 'chat' meeting.id %}">대화창</a></li>
-<li><a href="{% url 'inbox' meeting.id %}">익명 질문함</a></li>
-<li><a href="{% url 'summary' meeting.id %}">회의 요약</a></li>
-<li><a href="{% url 'understanding' meeting.id %}">이해도 검증</a></li>
+  {% if meeting.minutes %}
+    <li><a href="{% url 'meeting_result' meeting.id %}">통합 회의록</a></li>
+  {% else %}
+    <li class="muted">통합 회의록 (아직 없음)</li>
+  {% endif %}
+  {% if is_host and meeting.quiz_items.exists %}
+    <li><a href="{% url 'quiz_review' meeting.id %}">확인 문제 검토·승인</a></li>
+    <li><a href="{% url 'quiz_stats' meeting.id %}">이해 엇갈림 집계</a></li>
+  {% endif %}
+  {% if meeting.quiz_published %}
+    <li><a href="{% url 'understanding' meeting.id %}">확인 문제 풀기</a></li>
+  {% else %}
+    <li class="muted">확인 문제 풀기 (아직 공개되지 않음)</li>
+  {% endif %}
+  <li><a href="{% url 'chat' meeting.id %}">대화창</a></li>
+  <li><a href="{% url 'inbox' meeting.id %}">익명 질문함</a></li>
+  <li><a href="{% url 'summary' meeting.id %}">회의 요약</a></li>
 </ul>
+
+<script>
+  var form = document.getElementById("submit-form");
+  if (form) {
+    form.addEventListener("submit", function () {
+      document.getElementById("submit-button").disabled = true;
+      document.getElementById("loading").hidden = false;
+    });
+  }
+</script>
 {% endblock %}

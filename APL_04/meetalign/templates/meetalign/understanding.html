@@ -1,11 +1,39 @@
 {% extends "meetalign/base.html" %}
-{% block note %}<li>개별 이해도 검증: 고정된 가짜 문항이며 채점/저장하지 않는다.</li>{% endblock %}
+{% block note %}
+<li>참가자가 풀면 바로 자동 채점한다. 한 번만 풀 수 있다.</li>
+<li>개인 결과는 본인에게만 보이고, 진행자는 인원수 집계만 본다.</li>
+{% endblock %}
 {% block content %}
-<h1>{{ meeting.title }} 이해도 검증</h1>
+<h1>{{ meeting.title }} 이해도 확인</h1>
 <p><a href="{% url 'meeting_detail' meeting.id %}">회의로 돌아가기</a></p>
-<form>
-<p>1. 이번 회의의 핵심 결정 사항은? <input name="q1"></p>
-<p>2. 내가 맡은 다음 할 일은? <input name="q2"></p>
-<button type="button">제출 (동작 안 함)</button>
-</form>
+
+{% if not meeting.quiz_published %}
+  <p class="muted">확인 문제가 아직 공개되지 않았습니다. 진행자의 검토를 기다려 주세요.</p>
+{% elif solved %}
+  <p>내 결과: <span class="count">{{ correct_count }}</span> / {{ graded|length }} 문항 일치</p>
+  {% for g in graded %}
+    <div class="card">
+      <p><b>{{ g.item.order }}번</b> {{ g.item.text }}</p>
+      <p>내 답: {{ g.selected }}. {{ g.selected_text }}
+        {% if g.is_correct %}(일치){% else %}<span class="error">(다르게 이해함)</span>{% endif %}</p>
+      {% if not g.is_correct %}
+        <p>회의 내용: {{ g.item.answer_index }}. {{ g.item.answer_text }}</p>
+      {% endif %}
+      <p class="muted">근거: {{ g.item.evidence }}</p>
+    </div>
+  {% endfor %}
+  <p><a href="{% url 'chat' meeting.id %}">궁금한 점 질문하기</a></p>
+{% else %}
+  <form method="post">{% csrf_token %}
+    {% for item in items %}
+      <div class="card">
+        <p><b>{{ item.order }}번</b> {{ item.text }}</p>
+        {% for n, text in item.choices %}
+          <p><label><input type="radio" name="item_{{ item.id }}" value="{{ n }}"> {{ n }}. {{ text }}</label></p>
+        {% endfor %}
+      </div>
+    {% endfor %}
+    <button>제출</button>
+  </form>
+{% endif %}
 {% endblock %}

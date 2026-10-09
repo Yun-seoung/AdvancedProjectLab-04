@@ -1,9 +1,26 @@
 {% extends "meetalign/base.html" %}
-{% block note %}<li>AI 통일 회의록 생성은 가짜 진행 바로 대체하고, 다운로드 버튼은 동작하지 않는다.</li>{% endblock %}
+{% block note %}<li>통합 회의록은 마크다운으로 저장하고 .md 로 다운로드할 수 있다.</li>{% endblock %}
 {% block content %}
-<h1>{{ meeting.title }} - 회의록 생성</h1>
+<h1>{{ meeting.title }} 통합 회의록</h1>
 <p><a href="{% url 'meeting_detail' meeting.id %}">회의로 돌아가기</a></p>
-<progress value="100" max="100"></progress> 100% (가짜)
-<p><button type="button">회의록 다운로드</button></p>
-<p><a href="{% url 'summary' meeting.id %}">회의 요약</a></p>
+
+{% if meeting.minutes %}
+  <p><a href="{% url 'minutes_download' meeting.id %}">회의록 .md 다운로드</a></p>
+  <div class="minutes">{{ meeting.minutes }}</div>
+
+  <h2>다음 단계</h2>
+  <ul>
+  {% if is_host %}
+    <li><a href="{% url 'quiz_review' meeting.id %}">확인 문제 {{ meeting.quiz_items.count }}개 검토·승인</a>
+      {% if meeting.quiz_published %}(공개됨){% else %}(아직 공개 안 됨){% endif %}</li>
+    <li><a href="{% url 'quiz_stats' meeting.id %}">이해 엇갈림 집계 보기</a></li>
+  {% elif meeting.quiz_published %}
+    <li><a href="{% url 'understanding' meeting.id %}">확인 문제 풀기</a></li>
+  {% else %}
+    <li class="muted">확인 문제는 진행자가 검토한 뒤 공개됩니다.</li>
+  {% endif %}
+  </ul>
+{% else %}
+  <p class="muted">아직 회의록이 없습니다. 진행자가 녹음이나 전사 텍스트를 제출해야 합니다.</p>
+{% endif %}
 {% endblock %}

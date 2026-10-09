@@ -1,9 +1,12 @@
 {% extends "meetalign/base.html" %}
-{% block note %}<li>프로토타입: 화면만 남기고 실제 인증은 하지 않는다. 제출하면 index로 이동한다.</li>{% endblock %}
+{% block note %}<li>django.contrib.auth 로 실제 로그인한다. 계정은 seed_demo 명령으로 만든다.</li>{% endblock %}
 {% block content %}
 <h1>로그인</h1>
+{% if form.errors %}<p class="error">아이디 또는 비밀번호가 올바르지 않습니다.</p>{% endif %}
 <form method="post">{% csrf_token %}
-<p>아이디 <input name="username"></p>
-<p>비밀번호 <input name="password" type="password"></p>
-<button>로그인</button></form>
+  <p><label>아이디 <input type="text" name="username" autofocus></label></p>
+  <p><label>비밀번호 <input type="password" name="password"></label></p>
+  <button>로그인</button>
+</form>
+<p class="muted">데모 계정: host(진행자), member1, member2 — 비밀번호는 README 참고</p>
 {% endblock %}

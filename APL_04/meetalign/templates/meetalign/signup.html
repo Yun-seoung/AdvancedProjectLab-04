@@ -1,10 +1,8 @@
 {% extends "meetalign/base.html" %}
-{% block note %}<li>프로토타입: 화면만 남기고 실제 가입은 하지 않는다. 제출하면 index로 이동한다.</li>{% endblock %}
+{% block note %}<li>목업에서 이어받은 화면. 프로토타입 범위에서 회원가입은 구현하지 않는다.</li>{% endblock %}
 {% block content %}
 <h1>회원가입</h1>
-<form method="post">{% csrf_token %}
-<p>아이디 <input name="username"></p>
-<p>비밀번호 <input name="password1" type="password"></p>
-<p>비밀번호 확인 <input name="password2" type="password"></p>
-<button>가입</button></form>
+<p>이 프로토타입은 회원가입을 구현하지 않습니다.
+   <code>python manage.py seed_demo</code> 로 만든 데모 계정으로
+   <a href="{% url 'login' %}">로그인</a>해 주세요.</p>
 {% endblock %}
