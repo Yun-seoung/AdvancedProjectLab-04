@@ -1,0 +1,47 @@
+{% extends "meetalign/base.html" %}
+{% block note %}<li>이해도 검증 결과(3.6): 팀원 답변이 서로 다른 질문을 보여준다. 차단하지 않고 참고용으로만 표시한다.</li>{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <div class="crumb"><a href="{% url 'understanding' meeting.id %}">질문 답변으로 돌아가기</a></div>
+    <h1>이해도 검증 결과</h1>
+  </div>
+</div>
+<div class="card elevated">
+  <div class="item-icon" style="margin-bottom:16px"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="12" r="6.5"/><circle cx="15" cy="12" r="6.5" opacity=".55"/></svg></div>
+  {% if total_slots %}
+  <div class="progress-row"><span>팀원 답변 현황</span><span>{{ answered_slots }} / {{ total_slots }} ({{ progress_pct }}%)</span></div>
+  <div class="progress-track" style="margin-bottom:22px"><div class="progress-fill" style="width:{{ progress_pct }}%"></div></div>
+  {% endif %}
+  {% if discrepancies %}
+    <div class="notice">팀원끼리 다르게 이해한 질문이 있습니다. 회의록을 함께 확인해 보세요.</div>
+    <ul class="plain">
+    {% for q, answers, explanation in discrepancies %}
+      <li class="item" style="display:block">
+        <div class="title">{{ q.text }}</div>
+        <ul class="plain" style="margin-top:8px">
+        {% for a in answers %}<li class="muted"><span style="color:var(--ink)">{{ a.user.username }}: {{ a.text }}</span></li>{% endfor %}
+        </ul>
+        {% if explanation %}<div class="bubble" style="margin-top:10px">{{ explanation }}</div>{% endif %}
+      </li>
+    {% endfor %}
+    </ul>
+  {% else %}
+    <div class="success">엇갈린 답변이 없습니다.</div>
+  {% endif %}
+  {% if pending %}
+    <div class="page-head" style="margin:26px 0 12px">
+      <h2 class="section-title" style="margin:0">아직 답하지 않은 팀원</h2>
+      <button type="button" class="btn sm secondary" onclick="navigator.clipboard.writeText('{{ reminder_text|escapejs }}').then(() => { this.textContent='복사됨'; setTimeout(() => this.textContent='복사해서 알리기', 1500); })">복사해서 알리기</button>
+    </div>
+    <ul class="plain">
+    {% for q, missing in pending %}
+      <li class="item" style="display:block">
+        <div class="title">{{ q.text }}</div>
+        <div class="meta">{% for member in missing %}{{ member.username }}{% if not forloop.last %}, {% endif %}{% endfor %}</div>
+      </li>
+    {% endfor %}
+    </ul>
+  {% endif %}
+</div>
+{% endblock %}

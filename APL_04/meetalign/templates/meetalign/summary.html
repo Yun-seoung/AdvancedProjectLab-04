@@ -1,32 +1,23 @@
 {% extends "meetalign/base.html" %}
-{% block title %}회의 요약 · {{ meeting.title }}{% endblock %}
-
-{% block note %}<li>통합 회의록을 다시 보는 화면. 내용은 제출 때 한 번 만들어 저장한 것이다.</li>{% endblock %}
-
-{% block breadcrumb %}{% include "meetalign/_meeting_crumbs.html" with here="회의 요약" %}{% endblock %}
-
+{% block note %}<li>회의록(record)은 로컬 LLM이 전사본을 정리한 요약이다. LLM이 꺼져 있으면 전사 원문이 그대로 들어간다.</li>{% endblock %}
 {% block content %}
-<div class="mb-6 flex flex-wrap items-end justify-between gap-3">
+<div class="page-head">
   <div>
-    <h1 class="text-2xl font-semibold tracking-tight text-foreground">회의 요약</h1>
-    <p class="mt-1 text-sm text-muted-foreground">
-      {{ meeting.title }} · {{ meeting.created_at|date:"Y년 n월 j일" }}
-    </p>
+    <div class="crumb"><a href="{% url 'meeting_detail' meeting.id %}">{{ meeting.title }}</a></div>
+    <h1>회의 요약</h1>
   </div>
-  {% if meeting.minutes %}
-    <a class="btn min-h-11" data-variant="outline"
-       href="{% url 'minutes_download' meeting.id %}">.md 다운로드</a>
-  {% endif %}
 </div>
-
-{% if meeting.minutes %}
-  {% include "meetalign/_minutes_sections.html" %}
-{% else %}
-  <div class="rounded-lg border border-dashed border-border bg-card px-6 py-14 text-center">
-    <h2 class="text-base font-medium text-foreground">아직 회의록이 없습니다</h2>
-    <p class="mt-1 text-sm text-muted-foreground">진행자가 녹음이나 전사 텍스트를 제출해야 만들어집니다.</p>
-    <a class="btn mt-5 min-h-11" data-variant="outline"
-       href="{% url 'meeting_detail' meeting.id %}">입력 화면으로</a>
-  </div>
-{% endif %}
+<div class="card elevated">
+  <div class="item-icon" style="margin-bottom:16px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg></div>
+  {% if meeting.record %}
+    <div class="record">{{ meeting.record }}</div>
+    <div class="row" style="margin-top:12px"><a class="btn secondary" href="{% url 'record_file' meeting.id %}">회의록 다운로드</a></div>
+  {% else %}
+    <div class="empty">아직 생성된 회의록이 없습니다.</div>
+  {% endif %}
+  {% if meeting.transcript %}
+    <details><summary>전사 원문 보기</summary><div class="record" style="margin-top:8px">{{ meeting.transcript }}</div></details>
+  {% endif %}
+  <p class="muted" style="margin-top:18px"><a href="{% url 'understanding' meeting.id %}">이해도 질문에 답하기</a></p>
+</div>
 {% endblock %}

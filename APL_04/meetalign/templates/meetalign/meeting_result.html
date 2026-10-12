@@ -1,58 +1,28 @@
 {% extends "meetalign/base.html" %}
-{% block title %}통합 회의록 · {{ meeting.title }}{% endblock %}
-
-{% block note %}<li>통합 회의록은 마크다운으로 저장하고 .md 로 다운로드할 수 있다.</li>{% endblock %}
-
-{% block breadcrumb %}{% include "meetalign/_meeting_crumbs.html" with here="통합 회의록" %}{% endblock %}
-
+{% block note %}<li>녹음 전사와 회의록 생성은 백그라운드에서 진행된다. 진행 중이면 5초마다 자동으로 새로고침한다.</li>{% endblock %}
+{% block head %}{% if meeting.processing_status == "processing" %}<meta http-equiv="refresh" content="5">{% endif %}{% endblock %}
 {% block content %}
-<div class="mb-6 flex flex-wrap items-end justify-between gap-3">
+<div class="page-head">
   <div>
-    <h1 class="text-2xl font-semibold tracking-tight text-foreground">통합 회의록</h1>
-    <p class="mt-1 text-sm text-muted-foreground">
-      {{ meeting.title }} · {{ meeting.created_at|date:"Y년 n월 j일" }}
-    </p>
+    <div class="crumb"><a href="{% url 'meeting_detail' meeting.id %}">{{ meeting.title }}</a></div>
+    <h1>회의록 생성</h1>
   </div>
-  {% if meeting.minutes %}
-    <a class="btn min-h-11" data-variant="outline"
-       href="{% url 'minutes_download' meeting.id %}">.md 다운로드</a>
+</div>
+<div class="card elevated">
+  <div class="item-icon" style="margin-bottom:16px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2"/></svg></div>
+  {% if meeting.processing_status == "processing" %}
+    <div class="notice"><span class="spinner"></span> &nbsp;녹음을 전사하고 회의록을 만드는 중입니다. 길이에 따라 몇 분 걸릴 수 있습니다. 이 화면은 자동으로 갱신됩니다.</div>
+  {% elif meeting.processing_status == "done" %}
+    <div class="success">회의록 생성이 완료되었습니다.</div>
+    <div class="row">
+      <a class="btn" href="{% url 'record_file' meeting.id %}">회의록 다운로드</a>
+      <a class="btn secondary" href="{% url 'summary' meeting.id %}">회의 요약 보기</a>
+    </div>
+  {% elif meeting.processing_status == "failed" %}
+    <div class="error">녹음 처리에 실패했습니다. 파일을 다시 올려 주세요.</div>
+    <a class="btn secondary" href="{% url 'meeting_detail' meeting.id %}">회의로 돌아가기</a>
+  {% else %}
+    <div class="empty"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11V6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v5"/><path d="M4 11h4.5a1 1 0 0 1 .9.55L10.5 14h3l1.1-2.45a1 1 0 0 1 .9-.55H20"/><path d="M4 11v6a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6"/></svg>아직 처리할 녹음이 없습니다. 회의 화면에서 녹음을 올려 주세요.</div>
   {% endif %}
 </div>
-
-{% include "meetalign/_meeting_tabs.html" with current="result" %}
-
-{% if meeting.minutes %}
-  {% include "meetalign/_minutes_sections.html" %}
-
-  <div class="mt-8 rounded-lg border border-border bg-muted/40 p-4">
-    <h2 class="text-sm font-medium text-foreground">다음 단계</h2>
-    {% if is_host %}
-      <p class="mt-1 text-sm text-muted-foreground">
-        확인 문제 {{ meeting.quiz_items.count }}개를 검토하고 승인하면 참가자가 풀 수 있습니다.
-        {% if meeting.quiz_published %}현재 공개 상태입니다.{% endif %}
-      </p>
-      <div class="mt-4 flex flex-wrap gap-2">
-        <a class="btn min-h-11" href="{% url 'quiz_review' meeting.id %}">확인 문제 검토하기</a>
-        <a class="btn min-h-11" data-variant="outline"
-           href="{% url 'quiz_stats' meeting.id %}">이해 엇갈림 집계</a>
-      </div>
-    {% elif meeting.quiz_published %}
-      <p class="mt-1 text-sm text-muted-foreground">
-        회의록을 읽었다면 확인 문제를 풀어 서로의 이해가 같은지 맞춰 봅니다.
-      </p>
-      <div class="mt-4">
-        <a class="btn min-h-11" href="{% url 'understanding' meeting.id %}">확인 문제 풀기</a>
-      </div>
-    {% else %}
-      <p class="mt-1 text-sm text-muted-foreground">확인 문제는 진행자가 검토한 뒤 공개됩니다.</p>
-    {% endif %}
-  </div>
-{% else %}
-  <div class="rounded-lg border border-dashed border-border bg-card px-6 py-14 text-center">
-    <h2 class="text-base font-medium text-foreground">아직 회의록이 없습니다</h2>
-    <p class="mt-1 text-sm text-muted-foreground">진행자가 녹음이나 전사 텍스트를 제출해야 만들어집니다.</p>
-    <a class="btn mt-5 min-h-11" data-variant="outline"
-       href="{% url 'meeting_detail' meeting.id %}">입력 화면으로</a>
-  </div>
-{% endif %}
 {% endblock %}

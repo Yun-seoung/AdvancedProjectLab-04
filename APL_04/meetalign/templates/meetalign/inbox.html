@@ -1,42 +1,24 @@
 {% extends "meetalign/base.html" %}
-{% block title %}익명 질문함 · {{ meeting.title }}{% endblock %}
-
-{% block note %}<li>팀원 누구나 익명 질문을 볼 수 있고, 답변은 3.5 화면에서 한다.</li>{% endblock %}
-
-{% block breadcrumb %}{% include "meetalign/_meeting_crumbs.html" with here="익명 질문함" %}{% endblock %}
-
+{% block note %}<li>주최자(팀장)만 익명 질문을 보고 답할 수 있다.</li>{% endblock %}
 {% block content %}
-<div class="mb-6 flex flex-wrap items-end justify-between gap-3">
+<div class="page-head">
   <div>
-    <h1 class="text-2xl font-semibold tracking-tight text-foreground">익명 질문함</h1>
-    <p class="mt-1 text-sm text-muted-foreground">{{ meeting.title }} · 작성자는 저장하지 않습니다.</p>
+    <div class="crumb"><a href="{% url 'meeting_detail' meeting.id %}">{{ meeting.title }}</a></div>
+    <h1>익명 질문함</h1>
   </div>
-  <a class="btn min-h-11" data-variant="outline" href="{% url 'answers' meeting.id %}">질문에 답변하기</a>
 </div>
-
-{% if questions %}
-  <div class="space-y-3">
-    {% for q in questions %}
-      <article class="card">
-        <section class="space-y-3">
-          <p class="text-sm leading-relaxed text-foreground">{{ q.text }}</p>
-          {% if q.answer %}
-            <div class="rounded-md bg-muted/60 px-3 py-2">
-              <p class="text-xs font-medium text-muted-foreground">답변</p>
-              <p class="mt-1 text-sm leading-relaxed">{{ q.answer }}</p>
-            </div>
-          {% else %}
-            <span class="badge" data-variant="outline">답변 대기</span>
-          {% endif %}
-        </section>
-      </article>
-    {% endfor %}
-  </div>
-{% else %}
-  <div class="rounded-lg border border-dashed border-border bg-card px-6 py-14 text-center">
-    <h2 class="text-base font-medium text-foreground">아직 질문이 없습니다</h2>
-    <p class="mt-1 text-sm text-muted-foreground">대화창에서 익명으로 질문을 보낼 수 있습니다.</p>
-    <a class="btn mt-5 min-h-11" data-variant="outline" href="{% url 'chat' meeting.id %}">대화창으로</a>
-  </div>
-{% endif %}
+<div class="card elevated">
+  <div class="item-icon" style="margin-bottom:16px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg></div>
+  <ul class="plain">
+  {% for q in questions %}
+    <li class="item" style="display:block">
+      <div class="title">{{ q.text }}</div>
+      {% if q.answer %}<div class="bubble" style="margin-top:8px">답변: {{ q.answer }}</div>{% else %}<span class="badge processing" style="margin-top:6px">아직 답변 전</span>{% endif %}
+    </li>
+  {% empty %}
+    <li class="empty"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11V6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v5"/><path d="M4 11h4.5a1 1 0 0 1 .9.55L10.5 14h3l1.1-2.45a1 1 0 0 1 .9-.55H20"/><path d="M4 11v6a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6"/></svg>받은 익명 질문이 없습니다.</li>
+  {% endfor %}
+  </ul>
+  <div class="row" style="margin-top:16px"><a class="btn" href="{% url 'answers' meeting.id %}">질문에 답변하기</a></div>
+</div>
 {% endblock %}

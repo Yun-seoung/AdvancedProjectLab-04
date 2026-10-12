@@ -1,68 +1,47 @@
 {% extends "meetalign/base.html" %}
-{% block title %}대화창 · {{ meeting.title }}{% endblock %}
-
 {% block note %}
-<li>회의마다 대화방이 있으며, 프로젝트 맥락은 각 회의 결과로만 유지한다 (대화 기록은 저장하지 않음).</li>
-<li>익명 질문은 작성자를 저장하지 않는다.</li>
-<li>AI에게 묻기(맥락을 이 회의 결과로만 한정, 근거 검증)는 Phase 3에서 구현한다.</li>
+<li>회의 내용 질문 대화는 사용자별로 저장되어, 다음 질문을 할 때 이전 대화를 참고해 답한다.</li>
+<li>익명 질문은 작성자를 저장하지 않는다. 로컬 LLM이 꺼져 있으면 가짜 응답이 나온다.</li>
 {% endblock %}
-
-{% block breadcrumb %}{% include "meetalign/_meeting_crumbs.html" with here="대화창" %}{% endblock %}
-
 {% block content %}
-<div class="mb-6">
-  <h1 class="text-2xl font-semibold tracking-tight text-foreground">대화창</h1>
-  <p class="mt-1 text-sm text-muted-foreground">{{ meeting.title }}</p>
+<div class="page-head">
+  <div>
+    <div class="crumb"><a href="{% url 'meeting_detail' meeting.id %}">{{ meeting.title }}</a></div>
+    <h1>대화창</h1>
+  </div>
 </div>
-
-{# 모드 전환은 쿼리스트링으로만 한다 (?mode=llm / ?mode=anon). #}
-<nav class="mb-6 flex gap-1 rounded-lg bg-muted p-[3px]" aria-label="대화 모드">
-  <a href="?mode=llm"
-     class="flex min-h-11 flex-1 items-center justify-center rounded-md px-3 text-sm font-medium
-            {% if mode != 'anon' %}bg-background text-foreground shadow-sm{% else %}text-muted-foreground hover:text-foreground{% endif %}"
-     {% if mode != 'anon' %}aria-current="page"{% endif %}>AI에게 묻기</a>
-  <a href="?mode=anon"
-     class="flex min-h-11 flex-1 items-center justify-center rounded-md px-3 text-sm font-medium
-            {% if mode == 'anon' %}bg-background text-foreground shadow-sm{% else %}text-muted-foreground hover:text-foreground{% endif %}"
-     {% if mode == 'anon' %}aria-current="page"{% endif %}>익명으로 질문</a>
-</nav>
-
-{% if mode == "anon" %}
-  <div class="alert mb-6" role="note">
-    <strong data-title>작성자를 저장하지 않습니다</strong>
-    <section><p>보낸 질문은 익명 질문함에 내용만 남습니다.</p></section>
+<div class="card elevated">
+  <div class="item-icon" style="margin-bottom:16px"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.4 8.4 0 0 1-8.9 8.4 8.6 8.6 0 0 1-3.7-.8L3 20l1-5a8.5 8.5 0 0 1-1-4.1A8.4 8.4 0 0 1 11.9 2a8.4 8.4 0 0 1 9 8.4Z"/></svg></div>
+  <div class="tabs">
+    <a href="?mode=llm" class="{% if mode != 'anon' %}on{% endif %}">회의 내용에 대해 질문</a>
+    <a href="?mode=anon" class="{% if mode == 'anon' %}on{% endif %}">주최자에게 익명 질문</a>
   </div>
-{% endif %}
-
-<form method="post" class="space-y-4">{% csrf_token %}
-  <input type="hidden" name="mode" value="{{ mode }}">
-  <div class="field">
-    <label class="label" for="text">
-      {% if mode == "anon" %}진행자에게 익명으로 물어볼 내용{% else %}이 회의에 대해 묻고 싶은 것{% endif %}
-    </label>
-    <textarea class="textarea" id="text" name="text" rows="3"
-              placeholder="예: 출석률은 무엇을 기준으로 세는 건가요?"></textarea>
-  </div>
-  <button class="btn min-h-11">{% if mode == "anon" %}익명으로 보내기{% else %}묻기{% endif %}</button>
-</form>
-
-{% if reply %}
-  <div class="card mt-6">
-    <header class="border-b">
-      <h2 class="card-title text-base">답변</h2>
-    </header>
-    <section><p class="text-sm leading-relaxed">{{ reply }}</p></section>
-  </div>
-{% endif %}
-
-{% if mode == "anon" and request.method == "POST" %}
-  <div class="alert mt-6 border-emerald-200 bg-emerald-50 text-emerald-800" role="status">
-    <strong data-title>익명 질문을 보냈습니다</strong>
-    <section><p>질문함에서 답변을 확인할 수 있습니다.</p></section>
-  </div>
-{% endif %}
-
-<p class="mt-8 text-sm">
-  <a class="text-primary hover:underline" href="{% url 'inbox' meeting.id %}">익명 질문함 보기 →</a>
-</p>
+  {% if mode == "anon" %}<p class="muted">질문은 작성자 이름 없이 주최자에게 전달됩니다.</p>
+  {% else %}<p class="muted">회의록 내용만 근거로 답합니다. 회의록에 없는 내용은 답하지 않습니다.</p>{% endif %}
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="post">{% csrf_token %}
+    <input type="hidden" name="mode" value="{{ mode }}">
+    <div class="row">
+      <input name="text" placeholder="{% if mode == 'anon' %}주최자에게 보낼 질문{% else %}회의 내용에 대해 물어보기{% endif %}" style="flex:1">
+      <button>보내기</button>
+    </div>
+  </form>
+  {% if mode != "anon" %}
+    {% if messages %}
+    <div style="margin-top:16px;display:flex;flex-direction:column;gap:10px">
+      {% for msg in messages %}
+        {% if msg.role == "user" %}
+          <div class="muted" style="align-self:flex-end;max-width:85%;text-align:right"><b style="color:var(--ink)">나:</b> {{ msg.text }}</div>
+        {% else %}
+          <div class="bubble" style="align-self:flex-start;max-width:85%;margin-top:0">{{ msg.text }}</div>
+        {% endif %}
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty" style="margin-top:16px"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-8.9 8.4 8.6 8.6 0 0 1-3.7-.8L3 20l1-5a8.5 8.5 0 0 1-1-4.1A8.4 8.4 0 0 1 11.9 2a8.4 8.4 0 0 1 9 8.4Z"/></svg>아직 대화가 없습니다. 회의 내용에 대해 물어보세요.</div>
+    {% endif %}
+  {% endif %}
+  {% if mode == "anon" and request.method == "POST" and not error %}<div class="success" style="margin-top:12px">익명 질문이 전송되었습니다.</div>{% endif %}
+  <p style="margin-top:18px"><a href="{% url 'inbox' meeting.id %}">익명 질문 받는 화면 (주최자)</a></p>
+</div>
 {% endblock %}

@@ -1,54 +1,365 @@
-{% load static tailwind_cli %}<!doctype html>
+<!doctype html>
 <html lang="ko">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>(function(){try{var t=localStorage.getItem("theme");if(!t)t=window.matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";document.documentElement.setAttribute("data-theme",t);}catch(e){}})();</script>
 <title>{% block title %}MeetAlign{% endblock %}</title>
-{# 순서 중요: Tailwind 를 먼저 읽어 레이어 순서를 잡은 뒤 Basecoat 컴포넌트를 얹는다. #}
-{% tailwind_css %}
-<link rel="stylesheet" href="{% static 'vendor/basecoat.css' %}">
-<script src="{% static 'vendor/js/all.min.js' %}" defer></script>
-</head>
-<body class="min-h-screen bg-background text-foreground">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect x='2' y='3' width='14' height='14' rx='5' fill='%230f766e'/%3E%3Crect x='8' y='7' width='14' height='14' rx='5' fill='%23ea580c' fill-opacity='.88'/%3E%3C/svg%3E">
+<meta name="description" content="회의 녹음으로 회의록을 만들고, 팀원 간 이해 차이를 짚어주는 서비스">
+<link rel="stylesheet" as="style" crossorigin
+  href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.css">
+{% block head %}{% endblock %}
+<style>
+  :root {
+    --ink:#1c1917; --ink-soft:#44403c; --muted:#8a8178; --line:#e9e3d9; --line-strong:#d8cfc0;
+    --bg:#fbf8f3; --surface:#ffffff; --surface-sunken:#f4efe6;
+    --brand:#0f766e; --brand-ink:#ffffff; --brand-dark:#0b5a53; --brand-soft:#e3f4f1;
+    --accent:#ea580c; --accent-soft:#fdead9;
+    --danger:#c0392b; --danger-soft:#fbe9e7;
+    --success:#1f7a4d; --success-soft:#e5f5eb;
+    --radius-sm:9px; --radius:14px; --radius-lg:20px;
+    --shadow-sm:0 1px 2px rgba(28,25,23,.05);
+    --shadow:0 10px 30px -14px rgba(28,25,23,.18), 0 2px 6px rgba(28,25,23,.05);
+    --topbar-bg:rgba(251,248,243,.85);
+    --font: "Pretendard", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Malgun Gothic", system-ui, sans-serif;
+  }
+  :root[data-theme="dark"] {
+    --ink:#f2efe9; --ink-soft:#d6d1c7; --muted:#9a9186; --line:#36322b; --line-strong:#49443b;
+    --bg:#17150f; --surface:#211e18; --surface-sunken:#191712;
+    --brand:#2dd4bf; --brand-ink:#0b1f1c; --brand-dark:#14b8a6; --brand-soft:#15302c;
+    --accent:#fb923c; --accent-soft:#3a2614;
+    --danger:#f87171; --danger-soft:#3a1e1c;
+    --success:#4ade80; --success-soft:#15301f;
+    --shadow-sm:0 1px 2px rgba(0,0,0,.3);
+    --shadow:0 14px 34px -14px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.35);
+    --topbar-bg:rgba(23,21,15,.85);
+  }
+  * { box-sizing:border-box; transition:background-color .25s ease, border-color .25s ease, color .25s ease; }
+  html { background:var(--bg); }
+  body {
+    margin:0; font-family:var(--font); color:var(--ink); background:var(--bg);
+    line-height:1.6; font-size:15.5px; -webkit-font-smoothing:antialiased;
+  }
+  a { color:var(--brand); text-decoration:none; }
+  a.plain-link:hover, .card a:not(.btn):hover { text-decoration:underline; }
+  h1,h2,h3 { font-weight:700; letter-spacing:-.02em; margin:0; }
+  p { margin:8px 0; }
 
-<header class="sticky top-0 z-30 border-b border-border bg-background">
-  <div class="mx-auto flex h-14 max-w-[800px] items-center gap-3 px-4">
-    <a href="{% url 'index' %}"
-       class="font-semibold tracking-tight text-foreground hover:text-primary">MeetAlign</a>
-    <div class="ml-auto flex items-center gap-2">
-      {% if user.is_authenticated %}
-        <span class="text-sm text-muted-foreground">{{ user.username }}</span>
-        {% if user.hosted_meetings.exists %}
-          <span class="badge" data-variant="secondary">진행자</span>
-        {% else %}
-          <span class="badge" data-variant="outline">참가자</span>
-        {% endif %}
-        <form method="post" action="{% url 'logout' %}">{% csrf_token %}
-          <button class="btn min-h-11" data-variant="ghost">로그아웃</button>
-        </form>
-      {% else %}
-        <a href="{% url 'login' %}" class="btn min-h-11" data-variant="ghost">로그인</a>
-      {% endif %}
+  /* ---- Brand mark ---- */
+  .brand-mark { display:inline-flex; align-items:center; gap:9px; }
+  .brand-mark svg { display:block; }
+  .brand-wordmark { font-weight:800; font-size:1.08rem; letter-spacing:-.02em; color:var(--ink); }
+
+  /* ---- Top bar ---- */
+  header.topbar {
+    position:sticky; top:0; z-index:10; display:flex; align-items:center; justify-content:space-between;
+    gap:12px; padding:14px 28px; background:var(--topbar-bg); backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--line);
+  }
+  header.topbar nav { display:flex; gap:18px; align-items:center; font-size:.92rem; color:var(--ink-soft); }
+  header.topbar nav .user-chip {
+    display:inline-flex; align-items:center; gap:7px; background:var(--surface-sunken);
+    padding:5px 12px 5px 6px; border-radius:999px; font-weight:600; color:var(--ink);
+  }
+  header.topbar nav .user-chip .dot {
+    width:22px; height:22px; border-radius:50%; background:var(--brand); color:#fff;
+    display:inline-flex; align-items:center; justify-content:center; font-size:.72rem; font-weight:700;
+  }
+  header.topbar nav a { color:var(--muted); font-weight:600; }
+  header.topbar nav a:hover { color:var(--ink); }
+
+  #theme-toggle {
+    display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px;
+    padding:0; border:1px solid var(--line); border-radius:50%; background:var(--surface); color:var(--ink-soft);
+    cursor:pointer;
+  }
+  #theme-toggle:hover { background:var(--surface-sunken); filter:none; }
+  :root[data-theme="light"] #theme-toggle .sun { display:none; }
+  :root[data-theme="dark"] #theme-toggle .moon { display:none; }
+
+  main.container { max-width:800px; margin:0 auto; padding:40px 20px 64px; }
+  main.container.wide { max-width:880px; }
+  main.container.narrow { max-width:440px; }
+
+  .card {
+    background:var(--surface); border:1px solid var(--line); border-radius:var(--radius);
+    padding:26px; margin-bottom:18px; box-shadow:var(--shadow-sm);
+  }
+  .card.elevated { box-shadow:var(--shadow); }
+  .card.flush { padding:0; overflow:hidden; }
+
+  .page-head { margin:2px 0 20px; display:flex; align-items:flex-start; justify-content:space-between; gap:16px; flex-wrap:wrap; }
+  .page-head .crumb { font-size:.82rem; color:var(--muted); margin-bottom:4px; font-weight:600; }
+  .page-head .crumb a { color:var(--muted); }
+  .page-head h1 { font-size:1.55rem; display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .page-head .sub { color:var(--muted); font-size:.92rem; margin-top:4px; }
+
+  h2.section-title { font-size:1rem; margin:26px 0 12px; color:var(--ink-soft); font-weight:700; }
+  h2.section-title:first-child { margin-top:0; }
+
+  ul.plain { list-style:none; padding:0; margin:0; }
+  ul.plain > li + li { margin-top:10px; }
+
+  .item {
+    display:flex; justify-content:space-between; align-items:center; gap:14px; padding:16px 18px;
+    border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--surface);
+    transition:border-color .15s ease, transform .15s ease;
+  }
+  .item:hover { border-color:var(--line-strong); transform:translateY(-1px); box-shadow:var(--shadow-sm); }
+  .item .title { font-weight:700; color:var(--ink); }
+  .item .meta { font-size:.84rem; color:var(--muted); margin-top:2px; }
+  .item-icon {
+    width:40px; height:40px; border-radius:11px; background:var(--brand-soft); color:var(--brand);
+    display:inline-flex; align-items:center; justify-content:center; flex:0 0 auto;
+  }
+  .item-main { display:flex; align-items:center; gap:14px; min-width:0; }
+  .item-text { min-width:0; }
+
+  .muted { color:var(--muted); font-size:.9rem; }
+  .empty {
+    text-align:center; color:var(--muted); padding:36px 16px; border:1.5px dashed var(--line-strong);
+    border-radius:var(--radius); background:var(--surface-sunken);
+    display:flex; flex-direction:column; align-items:center; gap:10px;
+  }
+  .empty svg { opacity:.4; }
+  .empty .btn, .empty button { margin-top:4px; }
+
+  input:focus-visible, a:focus-visible, button:focus-visible { outline:2px solid var(--brand); outline-offset:2px; }
+
+  .badge {
+    display:inline-flex; align-items:center; gap:4px; font-size:.72rem; font-weight:700;
+    padding:3px 9px; border-radius:999px; vertical-align:middle; line-height:1.5;
+  }
+  .badge.ended { background:var(--surface-sunken); color:var(--ink-soft); }
+  .badge.due { background:var(--accent-soft); color:var(--accent); }
+  .badge.processing { background:var(--brand-soft); color:var(--brand); }
+  .badge.done { background:var(--success-soft); color:var(--success); }
+  .badge.failed { background:var(--danger-soft); color:var(--danger); }
+
+  .notice, .error {
+    padding:13px 16px; border-radius:var(--radius-sm); margin:14px 0; font-size:.92rem;
+    display:flex; align-items:flex-start; gap:10px;
+  }
+  .notice { background:var(--accent-soft); color:#9a3f12; border:1px solid #f6c9a0; }
+  .error { background:var(--danger-soft); color:var(--danger); border:1px solid #f0c3bd; }
+  .success {
+    background:var(--success-soft); color:var(--success); border:1px solid #bfe6cd;
+    padding:13px 16px; border-radius:var(--radius-sm); margin:14px 0; font-size:.92rem;
+  }
+  :root[data-theme="dark"] .notice { color:#ffd8ad; border-color:#5a3418; }
+  :root[data-theme="dark"] .error { border-color:#5a2b27; }
+  :root[data-theme="dark"] .success { border-color:#235c37; }
+
+  .field { display:flex; flex-direction:column; gap:7px; margin:16px 0; }
+  .field label, .field > span.label { font-size:.86rem; font-weight:700; color:var(--ink-soft); }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+
+  input[type=text], input:not([type]), input[type=password], input[type=date], input[type=file] {
+    padding:11px 13px; border:1.5px solid var(--line-strong); border-radius:var(--radius-sm);
+    font-size:.96rem; width:100%; max-width:100%; background:var(--surface); font-family:inherit; color:var(--ink);
+    transition:border-color .15s ease, box-shadow .15s ease;
+  }
+  input[type=file] { padding:9px; color:var(--muted); font-size:.88rem; }
+  input[type=file]::file-selector-button {
+    padding:9px 16px; margin-right:12px; border:1.5px solid var(--brand); border-radius:999px;
+    background:var(--surface); color:var(--brand); font-weight:700; font-size:.86rem;
+    font-family:inherit; cursor:pointer; transition:filter .15s ease, background-color .15s ease;
+  }
+  input[type=file]::file-selector-button:hover { background:var(--brand-soft); }
+  input:focus { outline:none; border-color:var(--brand); box-shadow:0 0 0 4px var(--brand-soft); }
+  input::placeholder { color:#b7ada0; }
+
+  .pw-wrap { position:relative; }
+  .pw-wrap input { padding-right:44px; }
+  .pw-toggle {
+    position:absolute; right:4px; top:50%; transform:translateY(-50%);
+    display:inline-flex; align-items:center; justify-content:center;
+    width:34px; height:34px; padding:0; border:none; border-radius:50%;
+    background:transparent; color:var(--muted); cursor:pointer;
+  }
+  .pw-toggle:hover { background:var(--surface-sunken); color:var(--ink-soft); filter:none; }
+  .pw-toggle svg.eye-off { display:none; }
+  .pw-toggle.on svg.eye { display:none; }
+  .pw-toggle.on svg.eye-off { display:block; }
+
+  .btn, button {
+    display:inline-flex; align-items:center; justify-content:center; gap:7px; padding:10px 18px;
+    border:1.5px solid var(--brand); background:var(--brand); color:#fff; border-radius:999px;
+    font-size:.92rem; font-weight:700; cursor:pointer; font-family:inherit; text-decoration:none;
+    transition:filter .15s ease, transform .05s ease;
+  }
+  .btn:hover, button:hover { filter:brightness(1.08); text-decoration:none; }
+  .btn:active, button:active { transform:scale(.98); }
+  .btn.secondary, button.secondary { background:var(--surface); color:var(--brand); }
+  .btn.ghost, button.ghost { background:transparent; color:var(--muted); border-color:transparent; padding:8px 10px; }
+  .btn.danger, button.danger { background:#fff; color:var(--danger); border-color:#eec3bc; }
+  .btn.block { width:100%; }
+  .btn.sm { padding:7px 14px; font-size:.84rem; }
+
+  .tabs { display:inline-flex; background:var(--surface-sunken); border-radius:11px; padding:4px; gap:3px; margin:10px 0 16px; }
+  .tabs a { padding:7px 16px; border-radius:8px; font-size:.88rem; color:var(--muted); font-weight:600; }
+  .tabs a.on { background:var(--surface); color:var(--ink); box-shadow:var(--shadow-sm); text-decoration:none; }
+
+  .bubble { padding:14px 16px; border-radius:var(--radius-sm); background:var(--brand-soft); color:var(--brand-dark); margin-top:14px; white-space:pre-wrap; font-size:.94rem; }
+  .record { white-space:pre-wrap; background:var(--surface-sunken); border:1px solid var(--line); border-radius:var(--radius-sm); padding:16px 18px; font-size:.95rem; }
+
+  details { margin-top:14px; }
+  details summary { cursor:pointer; color:var(--muted); font-size:.88rem; font-weight:600; }
+  details.devnote { margin:0 0 18px; color:var(--muted); font-size:.78rem; }
+  details.devnote summary { list-style:none; }
+  details.devnote ul { margin:8px 0 0; padding-left:18px; }
+
+  .spinner {
+    width:15px; height:15px; border:2.5px solid var(--accent-soft); border-top-color:var(--accent);
+    border-radius:50%; display:inline-block; animation:spin .8s linear infinite; flex:0 0 auto;
+  }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  /* ---- Motion ---- */
+  @keyframes fadeInUp { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
+  .card.elevated, .hero, .auth-shell { animation:fadeInUp .5s cubic-bezier(.16,1,.3,1) both; }
+  @media (prefers-reduced-motion: reduce) {
+    .card.elevated, .hero, .auth-shell { animation:none; }
+  }
+
+  /* ---- Progress bar ---- */
+  .progress-track {
+    width:100%; height:8px; border-radius:999px; background:var(--surface-sunken);
+    overflow:hidden; border:1px solid var(--line);
+  }
+  .progress-fill {
+    height:100%; border-radius:999px; background:linear-gradient(90deg, var(--brand), var(--brand-dark));
+    transition:width .5s cubic-bezier(.16,1,.3,1);
+  }
+  .progress-row { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; font-size:.86rem; color:var(--ink-soft); font-weight:600; }
+
+  /* ---- Hero (logged-out landing) ---- */
+  .hero { max-width:640px; margin:70px auto; text-align:center; padding:0 20px; position:relative; }
+  .hero::before {
+    content:""; position:absolute; z-index:-1; inset:-60px -40px auto -40px; height:360px; pointer-events:none;
+    background:radial-gradient(circle at 28% 35%, var(--brand) 0%, transparent 60%),
+               radial-gradient(circle at 72% 55%, var(--accent) 0%, transparent 55%);
+    opacity:.16; filter:blur(60px);
+  }
+  :root[data-theme="dark"] .hero::before { opacity:.3; }
+  .hero .mark { margin:0 auto 22px; }
+  .hero h1 { font-size:2.1rem; line-height:1.25; }
+  .hero p.lede { color:var(--muted); font-size:1.05rem; margin-top:14px; }
+  .hero .cta-row { margin-top:28px; display:flex; gap:10px; justify-content:center; }
+
+  /* ---- Auth split layout ---- */
+  .auth-shell { max-width:860px; margin:48px auto; display:grid; grid-template-columns:1.05fr 1fr; border-radius:var(--radius-lg); overflow:hidden; box-shadow:var(--shadow); }
+  .auth-panel {
+    position:relative; overflow:hidden; background:linear-gradient(160deg, var(--brand) 0%, var(--brand-dark) 100%);
+    color:#fff; padding:44px 38px; display:flex; flex-direction:column; justify-content:space-between;
+  }
+  .auth-panel::before, .auth-panel::after {
+    content:""; position:absolute; border-radius:50%; filter:blur(50px); pointer-events:none;
+  }
+  .auth-panel::before { width:280px; height:280px; background:var(--accent); opacity:.35; top:-90px; right:-90px; }
+  .auth-panel::after { width:220px; height:220px; background:#fff; opacity:.12; bottom:-70px; left:-50px; }
+  .auth-panel > * { position:relative; z-index:1; }
+  .auth-panel .brand-wordmark { color:#fff; }
+  .auth-panel h2 { font-size:1.35rem; line-height:1.4; margin-top:26px; }
+  .auth-panel p { color:rgba(255,255,255,.82); font-size:.92rem; }
+  .auth-form { background:var(--surface); padding:44px 38px; }
+  .auth-form h1 { font-size:1.4rem; margin-bottom:22px; }
+  @media (max-width:680px) {
+    .auth-shell { grid-template-columns:1fr; margin:0; border-radius:0; box-shadow:none; }
+    .auth-panel { display:none; }
+    .auth-form { padding:32px 20px; }
+  }
+
+  @media (max-width:560px) {
+    header.topbar { padding:12px 16px; }
+    main.container { padding:26px 16px 48px; }
+    .card { padding:18px; }
+    .item { flex-direction:column; align-items:stretch; }
+    .hero { margin:40px auto; }
+  }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <a class="brand-mark" href="{% url 'index' %}">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+      <rect x="2" y="3" width="14" height="14" rx="5" fill="#0f766e"/>
+      <rect x="8" y="7" width="14" height="14" rx="5" fill="#ea580c" opacity=".88"/>
+    </svg>
+    <span class="brand-wordmark">MeetAlign</span>
+  </a>
+  <nav>
+    <button type="button" id="theme-toggle" aria-label="다크 모드 전환">
+      <svg class="sun" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.5"/><path d="M12 2v2.5M12 19.5V22M4.2 4.2l1.8 1.8M18 18l1.8 1.8M2 12h2.5M19.5 12H22M4.2 19.8 6 18M18 6l1.8-1.8"/></svg>
+      <svg class="moon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 14.5A8.5 8.5 0 1 1 9.5 3.5a7 7 0 0 0 11 11Z"/></svg>
+    </button>
+    {% if user.is_authenticated %}
+      <span class="user-chip"><span class="dot">{{ user.username|slice:":1"|upper }}</span>{{ user.username }}</span>
+      <a href="{% url 'logout' %}">로그아웃</a>
+    {% else %}
+      <a href="{% url 'login' %}">로그인</a>
+      <a href="{% url 'signup' %}">회원가입</a>
+    {% endif %}
+  </nav>
+</header>
+<main class="container{% block container_class %}{% endblock %}">
+  {% if due_soon %}
+  <div class="notice" style="border-color:var(--danger);background:var(--danger-soft);color:var(--danger)">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;margin-top:1px"><path d="M12 9v4M12 17h.01M10.3 3.86 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.86a2 2 0 0 0-3.4 0Z"/></svg>
+    <div>
+      <b>내일 마감인 회의가 있습니다.</b>
+      <ul class="plain" style="margin-top:8px">
+      {% for m in due_soon %}<li>[D-1 마감] {{ m.team.name }} · <a href="{% url 'meeting_detail' m.id %}">{{ m.title }}</a></li>{% endfor %}
+      </ul>
     </div>
   </div>
-</header>
-
-<main class="mx-auto max-w-[800px] px-4 pb-20 pt-6">
-  {% block breadcrumb %}{% endblock %}
-  {% block content %}{% endblock %}
-
-  <details class="group mt-14 rounded-lg border border-border bg-card">
-    <summary class="flex min-h-11 cursor-pointer list-none items-center gap-2 px-4 py-2
-                    text-sm font-medium text-muted-foreground hover:text-foreground
-                    [&::-webkit-details-marker]:hidden">
-      <span class="text-xs transition-transform group-open:rotate-90">▶</span>
-      이 화면 안내
-    </summary>
-    <ul class="list-disc space-y-1 px-4 pb-4 pl-9 text-sm text-muted-foreground">
-      {% block note %}{% endblock %}
-    </ul>
+  {% endif %}
+  <details class="devnote">
+    <summary>설계 메모</summary>
+    <ul>{% block note %}{% endblock %}</ul>
   </details>
+  {% block content %}{% endblock %}
 </main>
+<script>
+  document.addEventListener("submit", function (e) {
+    var form = e.target;
+    if (!(form instanceof HTMLFormElement)) return;
+    var submitter = e.submitter;
+    form.querySelectorAll('button[type="submit"], button:not([type])').forEach(function (btn) {
+      if (btn.disabled) return;
+      // 버튼을 비활성화하면 브라우저가 그 버튼의 name/value를 제출 데이터에서 빼버린다
+      // (disabled 요소는 폼 데이터에서 제외됨). 클릭된 버튼(submitter)이라면 같은
+      // name/value를 가진 hidden input으로 미리 남겨둬서 서버가 받는 값이 바뀌지 않게 한다.
+      if (btn === submitter && btn.name) {
+        var hidden = document.createElement("input");
+        hidden.type = "hidden";
+        hidden.name = btn.name;
+        hidden.value = btn.value;
+        form.appendChild(hidden);
+      }
+      btn.disabled = true;
+      btn.dataset.originalHtml = btn.innerHTML;
+      btn.innerHTML = '<span class="spinner" style="border-color:currentColor;border-top-color:transparent;opacity:.85"></span> 처리 중...';
+    });
+  }, true);
 
+  document.addEventListener("click", function (e) {
+    var btn = e.target.closest(".pw-toggle");
+    if (!btn) return;
+    var input = btn.parentElement.querySelector("input");
+    if (!input) return;
+    input.type = input.type === "password" ? "text" : "password";
+    btn.classList.toggle("on", input.type === "text");
+  });
+
+  document.addEventListener("click", function (e) {
+    if (!e.target.closest("#theme-toggle")) return;
+    var current = document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+    var next = current === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try { localStorage.setItem("theme", next); } catch (err) {}
+  });
+</script>
 </body>
 </html>

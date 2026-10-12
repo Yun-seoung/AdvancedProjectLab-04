@@ -24,7 +24,6 @@ staticfiles/
 # Environment variables / secrets
 .env
 .env.*
-!.env.example
 
 # Testing / coverage
 .pytest_cache/
@@ -39,12 +38,3 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
-
-# OMC 작업 상태
-.omc/
-
-# 업로드된 회의 녹음 (처리 후 삭제하지만 흔적도 커밋하지 않는다)
-APL_04/media/
-
-# Tailwind standalone CLI 바이너리 (빌드된 CSS 는 커밋한다)
-.django_tailwind_cli/
