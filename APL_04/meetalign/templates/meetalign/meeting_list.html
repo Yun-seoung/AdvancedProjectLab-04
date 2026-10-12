@@ -1,51 +1,48 @@
 {% extends "meetalign/base.html" %}
-{% block title %}{{ team.name }} 회의 목록 · MeetAlign{% endblock %}
-
 {% block note %}<li>회의방은 팀 단위이며, 회의를 선택해 입장한다.</li>{% endblock %}
-
-{% block breadcrumb %}
-<nav class="breadcrumb mb-4 text-muted-foreground" aria-label="현재 위치">
-  <ol>
-    <li><a href="{% url 'index' %}">MeetAlign</a></li>
-    <li aria-hidden="true"><span>/</span></li>
-    <li><span aria-current="page">{{ team.name }} 회의 목록</span></li>
-  </ol>
-</nav>
-{% endblock %}
-
 {% block content %}
-<div class="mb-6 flex flex-wrap items-end justify-between gap-3">
+<div class="page-head">
   <div>
-    <h1 class="text-2xl font-semibold tracking-tight text-foreground">회의 목록</h1>
-    <p class="mt-1 text-sm text-muted-foreground">{{ team.name }}</p>
+    <div class="crumb"><a href="{% url 'index' %}">홈</a></div>
+    <h1>{{ team.name }}</h1>
   </div>
-  <a class="btn min-h-11" href="{% url 'meeting_create' team.id %}">회의 만들기</a>
+  <a class="btn" href="{% url 'meeting_create' team.id %}">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+    회의 만들기
+  </a>
 </div>
-
-{% if meetings %}
-  <ul class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
-    {% for m in meetings %}
-      <li>
-        <a class="flex min-h-11 flex-wrap items-center gap-2 px-4 py-3 text-sm hover:bg-muted"
-           href="{% url 'meeting_detail' m.id %}">
-          <span class="font-medium text-foreground">{{ m.title }}</span>
-          {% if m.ended %}<span class="badge" data-variant="secondary">종료</span>{% endif %}
-          {% if m.quiz_published %}
-            <span class="badge border-emerald-200 bg-emerald-50 text-emerald-700">문제 공개됨</span>
-          {% elif m.minutes %}
-            <span class="badge" data-variant="outline">회의록 있음</span>
-          {% endif %}
-          <span class="ml-auto whitespace-nowrap text-muted-foreground">
-            {{ m.created_at|date:"n월 j일" }}</span>
-        </a>
-      </li>
-    {% endfor %}
-  </ul>
-{% else %}
-  <div class="rounded-lg border border-dashed border-border bg-card px-6 py-14 text-center">
-    <h2 class="text-base font-medium text-foreground">아직 회의가 없습니다</h2>
-    <p class="mt-1 text-sm text-muted-foreground">회의를 만들고 녹음이나 전사 텍스트를 올려 보세요.</p>
-    <a class="btn mt-5 min-h-11" href="{% url 'meeting_create' team.id %}">회의 만들기</a>
-  </div>
+<div class="notice" id="invite-code-notice" style="align-items:center;flex-wrap:wrap">
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M3 9.5 12 14l9-4.5"/></svg>
+  <span style="flex:1 1 200px">초대 코드: <b id="invite-code-text">{{ team.invite_code }}</b> — 팀원에게 공유해서 참여시키세요.</span>
+  <button type="button" class="btn sm secondary" style="flex:0 0 auto;white-space:nowrap;margin-left:auto" onclick="navigator.clipboard.writeText('{{ team.invite_code }}').then(() => { this.textContent='복사됨'; setTimeout(() => this.textContent='복사', 1500); })">복사</button>
+</div>
+<ul class="plain">
+{% for m in meetings %}
+  <li class="item">
+    <div class="item-main">
+      <span class="item-icon">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="15" rx="3"/><path d="M8 3v4M16 3v4M3 10h18"/></svg>
+      </span>
+      <div class="item-text">
+        <a class="title" href="{% url 'meeting_detail' m.id %}">{{ m.title }}</a>
+        {% if m.ended %}<span class="badge ended">종료</span>{% endif %}
+        {% if m.is_due_tomorrow %}<span class="badge due">[D-1 마감]</span>{% endif %}
+        <div class="meta">{{ m.created_at|date:"Y.m.d" }}{% if m.deadline %} · 마감 {{ m.deadline|date:"Y.m.d" }}{% endif %}</div>
+      </div>
+    </div>
+    <a class="btn sm secondary" href="{% url 'meeting_detail' m.id %}">입장</a>
+  </li>
+{% empty %}
+  <li class="empty"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11V6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v5"/><path d="M4 11h4.5a1 1 0 0 1 .9.55L10.5 14h3l1.1-2.45a1 1 0 0 1 .9-.55H20"/><path d="M4 11v6a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6"/></svg>아직 회의가 없습니다. 첫 회의를 만들어 보세요.</li>
+{% endfor %}
+</ul>
+{% if team.created_by_id == user.id %}
+<form method="post" style="margin-top:28px">{% csrf_token %}
+  <button name="action" value="delete_team" class="btn ghost" style="color:var(--danger)"
+    onclick="return confirm('팀 \'{{ team.name }}\'을(를) 삭제할까요? 팀의 모든 회의와 기록이 함께 삭제되며 되돌릴 수 없습니다.');">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>
+    팀 삭제
+  </button>
+</form>
 {% endif %}
 {% endblock %}

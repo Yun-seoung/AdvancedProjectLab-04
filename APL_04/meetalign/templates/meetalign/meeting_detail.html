@@ -1,140 +1,203 @@
 {% extends "meetalign/base.html" %}
-{% block title %}{{ meeting.title }} · MeetAlign{% endblock %}
-
 {% block note %}
-<li>입력은 오디오 업로드와 전사 텍스트 붙여넣기 두 가지를 모두 지원한다 (STT 가 실패해도 시연된다).</li>
-<li>처리는 요청 안에서 동기로 하고 로딩 표시만 둔다. 녹음 원본은 전사 직후 삭제한다.</li>
-<li>녹음 제출과 회의 종료는 진행자만 할 수 있다.</li>
+<li>녹음 파일은 실제로 서버에 저장되고, 로그인한 회의 멤버만 받을 수 있다.</li>
+<li>제출 → 회의록 생성 화면, 종료 → 이해도 질문 답변 화면(3.5)으로 이동한다.</li>
 {% endblock %}
-
-{% block breadcrumb %}{% include "meetalign/_meeting_crumbs.html" %}{% endblock %}
-
 {% block content %}
-<div class="mb-6">
-  <h1 class="text-2xl font-semibold tracking-tight text-foreground">{{ meeting.title }}</h1>
-  <p class="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-    <span>진행자 {{ meeting.host.username|default:"미지정" }}</span>
-    <span aria-hidden="true">·</span>
-    <span>{{ meeting.created_at|date:"Y년 n월 j일" }}</span>
-    <span aria-hidden="true">·</span>
-    <span class="badge" data-variant="outline">STT {{ stt_provider }}</span>
-    <span class="badge" data-variant="outline">LLM {{ llm_provider }}</span>
-  </p>
-</div>
-
-{% include "meetalign/_meeting_tabs.html" with current="detail" %}
-
-{% if error %}
-  <div class="alert mb-6 border-destructive/30 bg-red-50 text-destructive" role="alert">
-    <strong data-title>제출하지 못했습니다</strong>
-    <section><p>{{ error }}</p></section>
+<div class="page-head">
+  <div>
+    <div class="crumb"><a href="{% url 'meeting_list' meeting.team_id %}">회의 목록</a></div>
+    <h1>{{ meeting.title }}
+      {% if meeting.ended %}<span class="badge ended">종료</span>{% endif %}
+      {% if meeting.is_due_tomorrow %}<span class="badge due">마감 D-1</span>{% endif %}
+    </h1>
+    {% if meeting.deadline %}<div class="sub">마감 {{ meeting.deadline|date:"Y년 m월 d일" }}</div>{% endif %}
   </div>
-{% endif %}
-
-{% if is_host %}
-<section class="card">
-  <header class="border-b">
-    <h2 class="card-title">회의 녹음 제출</h2>
-    <p class="text-sm text-muted-foreground">
-      올린 녹음은 전사 직후 삭제합니다. 둘 다 넣으면 오디오 파일을 전사한 결과를 씁니다.
-    </p>
-  </header>
-
-  <form method="post" enctype="multipart/form-data" id="submit-form">{% csrf_token %}
-    <section>
-      {# 입력 방식 전환. Basecoat .tabs 가 aria-controls 로 패널을 바꾼다 (vendor JS). #}
-      <div class="tabs">
-        <nav role="tablist" aria-orientation="horizontal" class="h-11 w-full" aria-label="입력 방식">
-          <button type="button" role="tab" id="tab-audio" aria-controls="panel-audio"
-                  aria-selected="true">오디오 파일</button>
-          <button type="button" role="tab" id="tab-text" aria-controls="panel-text"
-                  aria-selected="false">텍스트 붙여넣기</button>
-        </nav>
-
-        <div id="panel-audio" role="tabpanel" aria-labelledby="tab-audio" class="pt-2">
-          <div class="field">
-            <label class="label" for="recording">녹음 파일</label>
-            <input class="input min-h-11 py-2" type="file" id="recording" name="recording" accept="audio/*">
-            <p class="text-sm text-muted-foreground">m4a, mp3, wav 등 오디오 파일</p>
-          </div>
-        </div>
-
-        <div id="panel-text" role="tabpanel" aria-labelledby="tab-text" class="pt-2">
-          <div class="field">
-            <label class="label" for="transcript">전사 텍스트</label>
-            <textarea class="textarea" id="transcript" name="transcript" rows="8"
-                      placeholder="회의 전사 텍스트를 붙여넣으세요."></textarea>
-            <p class="text-sm text-muted-foreground">samples/demo_meeting.txt 의 내용을 붙여넣어 시연할 수 있습니다.</p>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <footer class="flex flex-wrap items-center gap-3 border-t">
-      <button class="btn min-h-11" name="action" value="submit" id="submit-button">
-        회의록과 확인 문제 만들기
-      </button>
-      <span id="loading" class="flex items-center gap-2 text-sm text-muted-foreground" hidden>
-        처리 중입니다. 통합 회의록과 확인 문제를 만들고 있습니다...
-      </span>
-    </footer>
-  </form>
-</section>
-
-<form method="post" class="mt-4">{% csrf_token %}
-  <button class="btn min-h-11" data-variant="outline" name="action" value="end">회의 종료</button>
-</form>
-{% else %}
-<div class="alert" role="note">
-  <strong data-title>녹음 제출은 진행자만 할 수 있습니다</strong>
-  <section>
-    <p>진행자({{ meeting.host.username|default:"미지정" }})가 회의록을 만들면 확인 문제를 풀 수 있습니다.</p>
-  </section>
 </div>
-{% endif %}
 
-<section class="mt-8">
-  <h2 class="mb-3 text-sm font-medium text-muted-foreground">이 회의의 다른 화면</h2>
-  <ul class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
-    {% if meeting.minutes %}
-      <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
-             href="{% url 'meeting_result' meeting.id %}">통합 회의록</a></li>
-    {% else %}
-      <li class="flex min-h-11 items-center px-4 py-2 text-sm text-muted-foreground">
-        통합 회의록 <span class="ml-2 badge" data-variant="outline">아직 없음</span></li>
-    {% endif %}
+<div class="card elevated">
+  {% if meeting.is_due_tomorrow %}
+  <div class="notice">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;margin-top:1px"><path d="M12 9v4M12 17h.01M10.3 3.86 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.86a2 2 0 0 0-3.4 0Z"/></svg>
+    <span><b>마감 D-1:</b> 내일 마감입니다.</span>
+  </div>
+  {% endif %}
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
-    {% if is_host and meeting.quiz_items.exists %}
-      <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
-             href="{% url 'quiz_review' meeting.id %}">확인 문제 검토·승인</a></li>
-      <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
-             href="{% url 'quiz_stats' meeting.id %}">이해 엇갈림 집계</a></li>
-    {% endif %}
+  {% if meeting.recordings.all %}
+    <h2 class="section-title">업로드된 녹음 ({{ meeting.recordings.count }})</h2>
+    <ul class="plain" style="margin-bottom:8px">
+    {% for rec in meeting.recordings.all %}
+      <li class="item" style="flex-direction:column;align-items:stretch;gap:12px">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap">
+          <div class="item-main">
+            <span class="item-icon">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v4M9 21h6"/></svg>
+            </span>
+            <div class="item-text">
+              <span class="title">{{ rec.filename }}</span>
+              {% if rec.status == "processing" %}<span class="badge processing">전사 중</span>
+              {% elif rec.status == "done" %}<span class="badge done">완료</span>
+              {% else %}<span class="badge failed">실패</span>{% endif %}
+              <div class="meta">{{ rec.created_at|date:"Y.m.d H:i" }}</div>
+              {% if rec.status == "failed" and rec.error_message %}<div class="meta" style="color:var(--danger)">사유: {{ rec.error_message }}</div>{% endif %}
+            </div>
+          </div>
+          <div class="row" style="gap:6px">
+            {% if rec.status == "failed" %}
+            <form method="post" action="{% url 'recording_retry' meeting.id rec.id %}">{% csrf_token %}
+              <button type="submit" class="btn sm secondary">다시 시도</button>
+            </form>
+            {% endif %}
+            <a class="btn sm secondary" href="{% url 'recording_file' meeting.id rec.id %}">받기</a>
+          </div>
+        </div>
+        <audio controls preload="metadata" style="width:100%;height:36px" src="{% url 'recording_file' meeting.id rec.id %}"></audio>
+      </li>
+    {% endfor %}
+    </ul>
+  {% endif %}
 
-    {% if meeting.quiz_published %}
-      <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
-             href="{% url 'understanding' meeting.id %}">확인 문제 풀기</a></li>
-    {% else %}
-      <li class="flex min-h-11 items-center px-4 py-2 text-sm text-muted-foreground">
-        확인 문제 풀기 <span class="ml-2 badge" data-variant="outline">공개 전</span></li>
-    {% endif %}
+  {% if meeting.ended %}
+    <div class="notice" style="background:var(--surface-sunken);color:var(--ink-soft);border-color:var(--line)">
+      회의가 종료되었습니다. 녹음 업로드와 익명 질문은 더 이상 받지 않습니다. 이해도 질문에 답해 주세요.
+    </div>
+    <a class="btn" href="{% url 'understanding' meeting.id %}">이해도 질문 답하기</a>
+  {% else %}
+  <h2 class="section-title">{% if meeting.recordings.all %}녹음 추가 업로드{% else %}회의 녹음{% endif %}</h2>
+  <form method="post" enctype="multipart/form-data">{% csrf_token %}
+    <div class="field">
+      <label for="recording">회의 녹음 파일</label>
+      <div class="row" style="margin-bottom:8px">
+        <button type="button" id="record-toggle" class="btn sm secondary">
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>
+          마이크로 녹음하기
+        </button>
+        <span id="record-timer" class="muted" style="display:none">0:00</span>
+      </div>
+      <audio id="record-preview" controls style="display:none;width:100%;margin-bottom:10px"></audio>
+      <input id="recording" type="file" name="recording" accept="audio/*">
+      <p class="muted" style="margin:4px 0 0">마이크 녹음은 이 기기(localhost)에서 직접 열었을 때만 동작합니다. 다른 기기에서 접속했다면 파일을 올려 주세요.</p>
+    </div>
+    <div class="row">
+      <button name="action" value="submit">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h12M13 6l6 6-6 6"/></svg>
+        녹음 제출하고 회의록 만들기
+      </button>
+      <button name="action" value="end" class="secondary"
+        onclick="return confirm('회의를 종료할까요? 종료 후에는 녹음 업로드와 익명 질문이 막힙니다.');">회의 종료</button>
+    </div>
+  </form>
+  <script>
+  (function () {
+    var toggleBtn = document.getElementById("record-toggle");
+    var timerEl = document.getElementById("record-timer");
+    var preview = document.getElementById("record-preview");
+    var fileInput = document.getElementById("recording");
+    if (!toggleBtn || !navigator.mediaDevices || !window.MediaRecorder) {
+      if (toggleBtn) toggleBtn.style.display = "none";
+      return;
+    }
 
-    <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
-           href="{% url 'chat' meeting.id %}">대화창</a></li>
-    <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
-           href="{% url 'inbox' meeting.id %}">익명 질문함</a></li>
-    <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
-           href="{% url 'summary' meeting.id %}">회의 요약</a></li>
-  </ul>
-</section>
+    var mediaRecorder = null;
+    var chunks = [];
 
-<script>
-  var form = document.getElementById("submit-form");
-  if (form) {
-    form.addEventListener("submit", function () {
-      document.getElementById("submit-button").disabled = true;
-      document.getElementById("loading").hidden = false;
+    function formatTime(totalSeconds) {
+      var m = Math.floor(totalSeconds / 60);
+      var s = totalSeconds % 60;
+      return m + ":" + (s < 10 ? "0" : "") + s;
+    }
+
+    toggleBtn.addEventListener("click", function () {
+      if (mediaRecorder && mediaRecorder.state === "recording") {
+        mediaRecorder.stop();
+        return;
+      }
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+        chunks = [];
+        mediaRecorder = new MediaRecorder(stream);
+        var startTime = Date.now();
+        var timerInterval = setInterval(function () {
+          timerEl.textContent = formatTime(Math.floor((Date.now() - startTime) / 1000));
+        }, 1000);
+
+        mediaRecorder.addEventListener("dataavailable", function (e) {
+          if (e.data.size > 0) chunks.push(e.data);
+        });
+        mediaRecorder.addEventListener("stop", function () {
+          stream.getTracks().forEach(function (track) { track.stop(); });
+          clearInterval(timerInterval);
+          timerEl.style.display = "none";
+          var blob = new Blob(chunks, { type: mediaRecorder.mimeType || "audio/webm" });
+          var file = new File([blob], "recording.webm", { type: blob.type });
+          var dataTransfer = new DataTransfer();
+          dataTransfer.items.add(file);
+          fileInput.files = dataTransfer.files;
+          preview.src = URL.createObjectURL(blob);
+          preview.style.display = "block";
+          toggleBtn.textContent = "다시 녹음하기";
+        });
+
+        mediaRecorder.start();
+        timerEl.textContent = "0:00";
+        timerEl.style.display = "inline";
+        toggleBtn.textContent = "■ 녹음 중지";
+        preview.style.display = "none";
+      }).catch(function (err) {
+        alert("마이크 접근 권한이 필요합니다: " + err.message);
+      });
     });
-  }
-</script>
+  })();
+  </script>
+  {% endif %}
+</div>
+
+<h2 class="section-title">이 회의 둘러보기</h2>
+<ul class="plain">
+  <li class="item">
+    <div class="item-main">
+      <span class="item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.4 8.4 0 0 1-8.9 8.4 8.6 8.6 0 0 1-3.7-.8L3 20l1-5a8.5 8.5 0 0 1-1-4.1A8.4 8.4 0 0 1 11.9 2a8.4 8.4 0 0 1 9 8.4Z"/></svg></span>
+      <div class="item-text">
+        <span class="title">대화창</span>
+        <div class="meta">회의 내용 질문 또는 주최자에게 익명 질문 보내기</div>
+      </div>
+    </div>
+    <a class="btn sm secondary" href="{% url 'chat' meeting.id %}">열기</a>
+  </li>
+  {% if meeting.host_id == user.id %}
+  <li class="item">
+    <div class="item-main">
+      <span class="item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/></svg></span>
+      <div class="item-text">
+        <span class="title">익명 질문함</span>
+        <div class="meta">팀원이 보낸 익명 질문을 확인하고 답합니다 (주최자 전용)</div>
+      </div>
+    </div>
+    <a class="btn sm secondary" href="{% url 'inbox' meeting.id %}">열기</a>
+  </li>
+  {% endif %}
+  <li class="item">
+    <div class="item-main">
+      <span class="item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg></span>
+      <span class="title">회의 요약</span>
+    </div>
+    <a class="btn sm secondary" href="{% url 'summary' meeting.id %}">보기</a>
+  </li>
+  <li class="item">
+    <div class="item-main">
+      <span class="item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 12 2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg></span>
+      <span class="title">이해도 검증</span>
+    </div>
+    <a class="btn sm secondary" href="{% url 'understanding' meeting.id %}">답하기</a>
+  </li>
+</ul>
+{% if meeting.host_id == user.id %}
+<form method="post" style="margin-top:28px">{% csrf_token %}
+  <button name="action" value="delete_meeting" class="btn ghost" style="color:var(--danger)"
+    onclick="return confirm('회의 \'{{ meeting.title }}\'를 삭제할까요? 녹음, 회의록, 답변이 모두 함께 삭제되며 되돌릴 수 없습니다.');">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>
+    회의 삭제
+  </button>
+</form>
+{% endif %}
 {% endblock %}
