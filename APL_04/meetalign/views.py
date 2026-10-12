@@ -8,13 +8,17 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.http import url_has_allowed_host_and_scheme
 
 from . import services, tasks
 from .models import Answer, ChatMessage, CheckQuestion, Meeting, Question, Recording, Team
 
-ALLOWED_RECORDING_EXTENSIONS = {".mp3", ".m4a", ".wav", ".ogg", ".webm", ".mp4", ".flac"}
+ALLOWED_RECORDING_EXTENSIONS = {
+    ".mp3", ".m4a", ".wav", ".ogg", ".webm", ".mp4", ".flac",
+    ".aac", ".wma", ".opus", ".amr", ".caf", ".avi", ".mov", ".mkv", ".3gp",
+}
 MAX_RECORDING_BYTES = 500 * 1024 * 1024
 
 
@@ -104,12 +108,14 @@ def _parse_deadline(raw):
         parsed = None
     if parsed is None:
         return None, "마감일 형식이 올바르지 않습니다."
+    if parsed < timezone.localdate():
+        return None, "마감일은 오늘 이후 날짜로 설정해주세요."
     return parsed, None
 
 
 def _recording_error(recording):
     if os.path.splitext(recording.name)[1].lower() not in ALLOWED_RECORDING_EXTENSIONS:
-        return "지원하지 않는 녹음 형식입니다 (mp3, m4a, wav, ogg, webm, mp4, flac)."
+        return "지원하지 않는 녹음 형식입니다 (" + ", ".join(sorted(ext.lstrip(".") for ext in ALLOWED_RECORDING_EXTENSIONS)) + ")."
     if recording.size > MAX_RECORDING_BYTES:
         return "녹음 파일이 너무 큽니다 (500MB 이하만 가능)."
     return None
@@ -260,7 +266,7 @@ def question_review(request, meeting_id):
     """주최자가 AI가 낸 객관식 문제를 검토·수정하고, 준비되면 참가자에게 공개한다."""
     meeting = _meeting(request, meeting_id)
     _require_host(meeting, request.user)
-    if meeting.record and not meeting.check_questions.exists():
+    if meeting.transcript and not meeting.check_questions.exists():
         for order, q in enumerate(services.generate_check_questions(meeting)):
             try:
                 with transaction.atomic():

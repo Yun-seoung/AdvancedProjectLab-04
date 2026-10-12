@@ -59,9 +59,15 @@ def _generate_clean(prompt, retries=1, temperature=None):
     return None
 
 
-def _parse_mcq_json(raw):
+def _normalize_for_match(text):
+    return re.sub(r"\s+", "", text)
+
+
+def _parse_mcq_json(raw, source_text=None):
     """LLM이 낸 JSON 배열을 파싱한다. 코드블록 표시나 설명이 섞여 나와도 JSON 배열
-    부분만 추출을 시도한다. 형식이 안 맞는 문항은 버리고, 하나도 없으면 빈 리스트를 반환한다."""
+    부분만 추출을 시도한다. 형식이 안 맞는 문항은 버리고, 하나도 없으면 빈 리스트를 반환한다.
+    source_text가 주어지면 evidence가 실제로 그 원문에 등장하는지 검증해서, 근거를 지어낸
+    문항(환각)은 버린다."""
     match = re.search(r"\[.*\]", raw, re.DOTALL)
     if not match:
         return []
@@ -71,6 +77,7 @@ def _parse_mcq_json(raw):
         return []
     if not isinstance(data, list):
         return []
+    normalized_source = _normalize_for_match(source_text) if source_text is not None else None
     questions = []
     for item in data:
         try:
@@ -82,6 +89,8 @@ def _parse_mcq_json(raw):
             continue
         if not text or len(choices) != 4 or any(not c for c in choices) or not (0 <= correct_choice < 4):
             continue
+        if normalized_source is not None and evidence and _normalize_for_match(evidence) not in normalized_source:
+            continue
         questions.append({"text": text, "choices": choices, "correct_choice": correct_choice, "evidence": evidence})
     return questions
 
@@ -89,20 +98,24 @@ def _parse_mcq_json(raw):
 def generate_check_questions(meeting):
     """회의록에서 사람마다 다르게 해석할 수 있는 모호한 표현(애매한 기한, 불분명한 범위,
     담당자 불명확 등)을 찾아, 그 부분을 올바르게 이해했는지 확인하는 객관식 문제를 만든다.
-    문항 개수는 고정이 아니라 실제로 찾은 모호한 표현 개수만큼(최대 5개)."""
-    if not (_enabled() and meeting.record):
+    문항 개수는 고정이 아니라 실제로 찾은 모호한 표현 개수만큼(최대 5개).
+    LLM이 요약본(meeting.record)이 아니라 전사 원문(meeting.transcript)을 보고 문제를 내게 해서,
+    요약 과정에서 맥락(담당자/기한 등)이 뒤섞여 엉뚱하게 연결되는 환각을 줄인다."""
+    source = meeting.transcript
+    if not (_enabled() and source):
         return list(FAKE_CHECK_QUESTIONS)
     prompt = (
-        "다음은 회의록이다. 이 회의록에서 사람마다 다르게 해석할 수 있는 모호한 표현을 최대 5개 찾아라 "
-        "(예: 애매한 기한, 범위가 불분명한 지시, 담당자가 명확하지 않은 할 일, 조건부로만 설명된 내용 등). "
-        "각 모호한 표현마다 그 부분을 올바르게 이해했는지 확인하는 객관식 문제를 하나씩 만들어라. "
-        "보기는 반드시 4개이고, 그중 하나만 회의록 내용과 정확히 일치하는 정답이며, 나머지 3개는 "
-        "그럴듯하지만 틀린, 흔히 오해하기 쉬운 해석으로 만들어라. evidence에는 정답의 근거가 되는 "
-        "회의록 원문 문장을 그대로 써라.\n\n"
+        "다음은 회의 녹음의 전사 원문이다. 이 전사본에서 사람마다 다르게 해석할 수 있는 모호한 표현을 "
+        "최대 5개 찾아라 (예: 애매한 기한, 범위가 불분명한 지시, 담당자가 명확하지 않은 할 일, 조건부로만 "
+        "설명된 내용 등). 각 모호한 표현마다 그 부분을 올바르게 이해했는지 확인하는 객관식 문제를 하나씩 "
+        "만들어라. 반드시 전사본에 실제로 나온 내용에 대해서만 질문하고, 서로 다른 발언을 임의로 연결하거나 "
+        "추측하지 마라. 보기는 반드시 4개이고, 그중 하나만 전사본 내용과 정확히 일치하는 정답이며, 나머지 "
+        "3개는 그럴듯하지만 틀린, 흔히 오해하기 쉬운 해석으로 만들어라. evidence에는 정답의 근거가 되는 "
+        "전사본 원문 문장을 토씨 하나 틀리지 않고 그대로 복사해서 써라.\n\n"
         "반드시 아래 JSON 배열 형식으로만 답하라. 설명이나 코드블록 표시 없이 JSON만 출력하라:\n"
         '[{"question": "질문", "choices": ["보기1", "보기2", "보기3", "보기4"], '
         '"answer_index": 0, "evidence": "근거 문장"}]\n\n'
-        "회의록:\n" + meeting.record
+        "전사본:\n" + source
     )
     try:
         raw = _generate_clean(prompt, temperature=0.3)
@@ -110,7 +123,7 @@ def generate_check_questions(meeting):
         return list(FAKE_CHECK_QUESTIONS)
     if raw is None:
         return list(FAKE_CHECK_QUESTIONS)
-    questions = _parse_mcq_json(raw)
+    questions = _parse_mcq_json(raw, source_text=source)
     return questions[:5] if questions else list(FAKE_CHECK_QUESTIONS)
 
 

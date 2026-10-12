@@ -63,7 +63,7 @@ class PrototypeFlowTests(TestCase):
         self.client.force_login(self.user)
         self.team = Team.objects.create(name="t")
         self.team.members.add(self.user)
-        self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.user, record="회의록 내용")
+        self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.user, record="회의록 내용", transcript="전사본 내용")
 
     def test_index_public(self):
         self.assertEqual(self.client.get(reverse("index")).status_code, 200)
@@ -378,7 +378,10 @@ class LocalLLMTests(TestCase):
         self.user = User.objects.create_user("a", password="pw12345!")
         self.team = Team.objects.create(name="t")
         self.team.members.add(self.user)
-        self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.user, record="결정: A안으로 진행")
+        self.meeting = Meeting.objects.create(
+            team=self.team, title="m", host=self.user,
+            record="결정: A안으로 진행", transcript="오늘 회의에서 A안으로 진행하기로 결정했습니다.",
+        )
 
     def test_disabled_without_model_env_keeps_fake_behavior(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -407,7 +410,7 @@ class LocalLLMTests(TestCase):
 
     def _mcq_json(self, n=2):
         items = [
-            {"question": "질문%d" % i, "choices": ["a", "b", "c", "d"], "answer_index": i % 4, "evidence": "근거%d" % i}
+            {"question": "질문%d" % i, "choices": ["a", "b", "c", "d"], "answer_index": i % 4, "evidence": ""}
             for i in range(n)
         ]
         return json.dumps(items, ensure_ascii=False)
@@ -419,7 +422,7 @@ class LocalLLMTests(TestCase):
         self.assertEqual(result[0]["text"], "질문0")
         self.assertEqual(result[0]["choices"], ["a", "b", "c", "d"])
         self.assertEqual(result[0]["correct_choice"], 0)
-        self.assertEqual(result[0]["evidence"], "근거0")
+        self.assertEqual(result[0]["evidence"], "")
 
     def test_generate_check_questions_caps_at_five(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=self._mcq_json(8)):
@@ -431,8 +434,8 @@ class LocalLLMTests(TestCase):
             self.assertIn("LLM 연결 실패", services.chat_reply(self.meeting, "q"))
             self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
 
-    def test_no_record_uses_fake_even_when_enabled(self):
-        self.meeting.record = ""
+    def test_no_transcript_uses_fake_even_when_enabled(self):
+        self.meeting.transcript = ""
         self.meeting.save()
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate") as gen:
             self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
@@ -458,13 +461,30 @@ class LocalLLMTests(TestCase):
         result = services._parse_mcq_json(raw)
         self.assertEqual(len(result), 1)
 
+    def test_parse_mcq_json_drops_items_with_hallucinated_evidence(self):
+        raw = json.dumps([
+            {"question": "진짜 근거", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": "A안으로 진행하기로"},
+            {"question": "지어낸 근거", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": "전사본에 없는 문장"},
+        ], ensure_ascii=False)
+        result = services._parse_mcq_json(raw, source_text="오늘 회의에서 A안으로 진행하기로 결정했습니다.")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["text"], "진짜 근거")
+
+    def test_generate_check_questions_uses_transcript_not_record_as_source(self):
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=self._mcq_json(1)) as gen:
+            services.generate_check_questions(self.meeting)
+        self.assertIn(self.meeting.transcript, gen.call_args[0][0])
+
 
 class LanguageFilterTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("a", password="pw12345!")
         self.team = Team.objects.create(name="t")
         self.team.members.add(self.user)
-        self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.user, record="결정: A안으로 진행")
+        self.meeting = Meeting.objects.create(
+            team=self.team, title="m", host=self.user,
+            record="결정: A안으로 진행", transcript="오늘 회의에서 A안으로 진행하기로 결정했습니다.",
+        )
 
     def test_allows_korean_and_english(self):
         self.assertTrue(services._is_korean_or_english("What is the 결정 사항?"))
@@ -568,6 +588,18 @@ class SecurityFixTests(TestCase):
             self.assertContains(r, "마감일 형식이 올바르지 않습니다.")
         self.assertFalse(Meeting.objects.filter(title="bad").exists())
 
+    def test_past_deadline_is_rejected_with_message(self):
+        past = (timezone.localdate() - timedelta(days=1)).isoformat()
+        r = self.client.post(reverse("meeting_create", args=[self.team.id]), {"title": "bad", "deadline": past})
+        self.assertEqual(r.status_code, 200)
+        self.assertContains(r, "마감일은 오늘 이후 날짜로 설정해주세요.")
+        self.assertFalse(Meeting.objects.filter(title="bad").exists())
+
+    def test_todays_date_is_accepted_as_deadline(self):
+        today = timezone.localdate().isoformat()
+        self.client.post(reverse("meeting_create", args=[self.team.id]), {"title": "due-today", "deadline": today})
+        self.assertEqual(str(Meeting.objects.get(title="due-today").deadline), today)
+
     @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
     def test_unsupported_recording_format_is_rejected(self):
         file = SimpleUploadedFile("evil.exe", b"MZ", content_type="application/octet-stream")
@@ -575,6 +607,13 @@ class SecurityFixTests(TestCase):
         self.assertContains(r, "지원하지 않는 녹음 형식")
         self.meeting.refresh_from_db()
         self.assertFalse(Recording.objects.filter(meeting=self.meeting).exists())
+
+    @override_settings(MEDIA_ROOT=tempfile.mkdtemp(), BACKGROUND_RECORDING=False)
+    def test_additional_audio_video_formats_are_accepted(self):
+        for name in ["a.aac", "a.wma", "a.opus", "a.amr", "a.caf", "a.avi", "a.mov", "a.mkv", "a.3gp"]:
+            file = SimpleUploadedFile(name, b"data", content_type="application/octet-stream")
+            r = self.client.post(reverse("meeting_detail", args=[self.meeting.id]), {"action": "submit", "recording": file})
+            self.assertEqual(r.status_code, 302, name)
 
     @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
     def test_oversized_recording_is_rejected(self):
@@ -701,13 +740,13 @@ class QuestionTimingTests(TestCase):
         self.team.members.add(self.user)
         self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.user)
 
-    def test_no_questions_are_created_before_record_exists(self):
+    def test_no_questions_are_created_before_transcript_exists(self):
         r = self.client.get(reverse("question_review", args=[self.meeting.id]))
         self.assertEqual(CheckQuestion.objects.filter(meeting=self.meeting).count(), 0)
         self.assertContains(r, "아직 문제가 없습니다")
 
-    def test_questions_are_created_once_record_exists(self):
-        self.meeting.record = "결정: A안"
+    def test_questions_are_created_once_transcript_exists(self):
+        self.meeting.transcript = "오늘 회의에서 A안으로 진행하기로 결정했습니다."
         self.meeting.save()
         raw = json.dumps([
             {"question": "질문1", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""},
