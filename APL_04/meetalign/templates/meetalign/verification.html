@@ -3,8 +3,7 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <div class="crumb"><a href="{% url 'understanding' meeting.id %}">질문 답변으로 돌아가기</a></div>
-    <h1>이해도 검증 결과</h1>
+    <h1><a href="{% url 'understanding' meeting.id %}" class="crumb-link">질문 답변</a> <span class="crumb-sep">/</span> 이해도 검증 결과</h1>
   </div>
 </div>
 <div class="card elevated">
@@ -37,7 +36,6 @@
   {% if pending %}
     <div class="page-head" style="margin:26px 0 12px">
       <h2 class="section-title" style="margin:0">아직 답하지 않은 팀원</h2>
-      <button type="button" class="btn sm secondary" onclick="navigator.clipboard.writeText('{{ reminder_text|escapejs }}').then(() => { this.textContent='복사됨'; setTimeout(() => this.textContent='복사해서 알리기', 1500); })">복사해서 알리기</button>
     </div>
     <ul class="plain">
     {% for q, missing in pending %}

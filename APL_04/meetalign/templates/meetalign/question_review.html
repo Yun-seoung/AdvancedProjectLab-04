@@ -3,8 +3,7 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <div class="crumb"><a href="{% url 'meeting_detail' meeting.id %}">{{ meeting.title }}</a></div>
-    <h1>문제 검토
+    <h1><a href="{% url 'meeting_detail' meeting.id %}" class="crumb-link">{{ meeting.title }}</a> <span class="crumb-sep">/</span> 문제 검토
       {% if all_published %}<span class="badge done">참가자에게 공개됨</span>{% elif questions %}<span class="badge processing">검토 중</span>{% endif %}
     </h1>
   </div>
@@ -22,31 +21,32 @@
 </div>
 {% endif %}
 
+{% if questions %}
+<form method="post">{% csrf_token %}
 {% for q in questions %}
 <div class="card elevated">
   <div class="row" style="justify-content:space-between;margin-bottom:12px">
     <span class="muted">{{ forloop.counter }}번</span>
     {% if q.status == "published" %}<span class="badge done">공개됨</span>{% else %}<span class="badge processing">초안</span>{% endif %}
   </div>
-  <form method="post">{% csrf_token %}
-    <input type="hidden" name="question_id" value="{{ q.id }}">
-    <div class="field"><label>문항</label>
-      <textarea name="text" rows="2">{{ q.text }}</textarea>
+  <div class="field"><label>문항</label>
+    <textarea name="text_{{ q.id }}" rows="2">{{ q.text }}</textarea>
+  </div>
+  <div class="field"><span class="label">보기 — 라디오를 눌러 정답을 지정합니다</span>
+    {% for choice in q.choices %}
+    <div class="row" style="gap:10px">
+      <input type="radio" name="correct_choice_{{ q.id }}" value="{{ forloop.counter0 }}" {% if forloop.counter0 == q.correct_choice %}checked{% endif %} style="width:auto">
+      <input name="choice_{{ q.id }}_{{ forloop.counter0 }}" value="{{ choice }}" style="flex:1">
     </div>
-    <div class="field"><span class="label">보기 — 라디오를 눌러 정답을 지정합니다</span>
-      {% for choice in q.choices %}
-      <div class="row" style="gap:10px">
-        <input type="radio" name="correct_choice" value="{{ forloop.counter0 }}" {% if forloop.counter0 == q.correct_choice %}checked{% endif %} style="width:auto">
-        <input name="choice_{{ forloop.counter0 }}" value="{{ choice }}" style="flex:1">
-      </div>
-      {% endfor %}
-    </div>
-    <div class="field"><label>근거 문장</label>
-      <textarea name="evidence" rows="2">{{ q.evidence }}</textarea>
-      <p class="muted" style="margin:2px 0 0">회의 전사에서 근거가 되는 문장을 그대로 둡니다.</p>
-    </div>
-    <button type="submit" class="secondary sm">수정 저장</button>
-  </form>
+    {% endfor %}
+  </div>
+  <div class="field"><label>근거 문장</label>
+    <textarea name="evidence_{{ q.id }}" rows="2">{{ q.evidence }}</textarea>
+    <p class="muted" style="margin:2px 0 0">회의 전사에서 근거가 되는 문장을 그대로 둡니다.</p>
+  </div>
 </div>
 {% endfor %}
+<button type="submit" class="secondary">전체 수정 저장</button>
+</form>
+{% endif %}
 {% endblock %}

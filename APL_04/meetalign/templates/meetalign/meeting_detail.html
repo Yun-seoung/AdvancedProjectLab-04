@@ -6,8 +6,7 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <div class="crumb"><a href="{% url 'meeting_list' meeting.team_id %}">회의 목록</a></div>
-    <h1>{{ meeting.title }}
+    <h1><a href="{% url 'meeting_list' meeting.team_id %}" class="crumb-link">회의 목록</a> <span class="crumb-sep">/</span> {{ meeting.title }}
       {% if meeting.ended %}<span class="badge ended">종료</span>{% endif %}
       {% if meeting.is_due_tomorrow %}<span class="badge due">마감 D-1</span>{% endif %}
     </h1>

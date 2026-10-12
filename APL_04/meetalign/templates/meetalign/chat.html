@@ -6,8 +6,7 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <div class="crumb"><a href="{% url 'meeting_detail' meeting.id %}">{{ meeting.title }}</a></div>
-    <h1>대화창</h1>
+    <h1><a href="{% url 'meeting_detail' meeting.id %}" class="crumb-link">{{ meeting.title }}</a> <span class="crumb-sep">/</span> 대화창</h1>
   </div>
 </div>
 <div class="card elevated">

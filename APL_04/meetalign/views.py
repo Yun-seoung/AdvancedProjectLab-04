@@ -280,20 +280,20 @@ def question_review(request, meeting_id):
         if request.POST.get("action") == "publish":
             meeting.check_questions.filter(status=CheckQuestion.STATUS_DRAFT).update(status=CheckQuestion.STATUS_PUBLISHED)
         else:
-            question = get_object_or_404(CheckQuestion, pk=request.POST.get("question_id"), meeting=meeting)
-            text = request.POST.get("text", "").strip()
-            choices = [request.POST.get("choice_%d" % i, "").strip() for i in range(4)]
-            evidence = request.POST.get("evidence", "").strip()
-            try:
-                correct_choice = int(request.POST.get("correct_choice", question.correct_choice))
-            except ValueError:
-                correct_choice = question.correct_choice
-            if text and all(choices) and 0 <= correct_choice < 4:
-                question.text = text
-                question.choices = choices
-                question.correct_choice = correct_choice
-                question.evidence = evidence
-                question.save()
+            for question in meeting.check_questions.all():
+                text = request.POST.get("text_%d" % question.id, "").strip()
+                choices = [request.POST.get("choice_%d_%d" % (question.id, i), "").strip() for i in range(4)]
+                evidence = request.POST.get("evidence_%d" % question.id, "").strip()
+                try:
+                    correct_choice = int(request.POST.get("correct_choice_%d" % question.id, question.correct_choice))
+                except ValueError:
+                    correct_choice = question.correct_choice
+                if text and all(choices) and 0 <= correct_choice < 4:
+                    question.text = text
+                    question.choices = choices
+                    question.correct_choice = correct_choice
+                    question.evidence = evidence
+                    question.save()
         return redirect("question_review", meeting_id=meeting.id)
     questions = list(meeting.check_questions.all())
     all_published = bool(questions) and all(q.status == CheckQuestion.STATUS_PUBLISHED for q in questions)
@@ -338,17 +338,10 @@ def verification(request, meeting_id):
         if missing:
             pending.append((question, missing))
     total_slots = len(members) * len(questions)
-    pending_usernames = sorted({member.username for _, missing in pending for member in missing})
-    reminder_text = ""
-    if pending_usernames:
-        reminder_text = "[%s] 이해도 질문에 아직 답변 안 하신 분: %s — 확인 부탁드려요!" % (
-            meeting.title, ", ".join(pending_usernames),
-        )
     return render(request, "meetalign/verification.html", {
         "meeting": meeting,
         "discrepancies": _find_discrepancies(meeting),
         "pending": pending,
-        "reminder_text": reminder_text,
         "answered_slots": answered_slots,
         "total_slots": total_slots,
         "progress_pct": round(answered_slots * 100 / total_slots) if total_slots else 0,
