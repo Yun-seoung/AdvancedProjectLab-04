@@ -2,7 +2,7 @@
 {% block note %}<li>팀은 이름으로 생성한다. 참여는 팀의 초대 코드를 아는 사람만 가능하다.</li>{% endblock %}
 {% block container_class %} narrow{% endblock %}
 {% block content %}
-<div class="page-head"><div class="crumb"><a href="{% url 'index' %}">홈</a></div><h1>팀 생성 / 참여</h1></div>
+<div class="page-head"><h1><a href="{% url 'index' %}" class="crumb-link">홈</a> <span class="crumb-sep">/</span> 팀 생성 / 참여</h1></div>
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
 <h2 class="section-title">새 팀 만들기</h2>

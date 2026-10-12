@@ -3,8 +3,7 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <div class="crumb"><a href="{% url 'inbox' meeting.id %}">익명 질문함</a></div>
-    <h1>질문에 답변하기</h1>
+    <h1><a href="{% url 'inbox' meeting.id %}" class="crumb-link">익명 질문함</a> <span class="crumb-sep">/</span> 질문에 답변하기</h1>
   </div>
 </div>
 <div class="card elevated">

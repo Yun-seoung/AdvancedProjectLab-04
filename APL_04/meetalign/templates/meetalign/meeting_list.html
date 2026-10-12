@@ -3,8 +3,7 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <div class="crumb"><a href="{% url 'index' %}">홈</a></div>
-    <h1>{{ team.name }}</h1>
+    <h1><a href="{% url 'index' %}" class="crumb-link">홈</a> <span class="crumb-sep">/</span> {{ team.name }}</h1>
   </div>
   <a class="btn" href="{% url 'meeting_create' team.id %}">
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>

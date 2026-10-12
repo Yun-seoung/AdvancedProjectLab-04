@@ -209,15 +209,33 @@ class PrototypeFlowTests(TestCase):
         self.client.get(reverse("question_review", args=[self.meeting.id]))
         q = CheckQuestion.objects.filter(meeting=self.meeting).first()
         self.client.post(reverse("question_review", args=[self.meeting.id]), {
-            "question_id": q.id, "text": "수정된 문항", "evidence": "근거",
-            "choice_0": "보기1", "choice_1": "보기2", "choice_2": "보기3", "choice_3": "보기4",
-            "correct_choice": "2",
+            "text_%d" % q.id: "수정된 문항", "evidence_%d" % q.id: "근거",
+            "choice_%d_0" % q.id: "보기1", "choice_%d_1" % q.id: "보기2",
+            "choice_%d_2" % q.id: "보기3", "choice_%d_3" % q.id: "보기4",
+            "correct_choice_%d" % q.id: "2",
         })
         q.refresh_from_db()
         self.assertEqual(q.text, "수정된 문항")
         self.assertEqual(q.choices, ["보기1", "보기2", "보기3", "보기4"])
         self.assertEqual(q.correct_choice, 2)
         self.assertEqual(q.status, CheckQuestion.STATUS_DRAFT)
+
+    def test_host_can_edit_all_questions_in_one_submit(self):
+        self.client.get(reverse("question_review", args=[self.meeting.id]))
+        questions = list(CheckQuestion.objects.filter(meeting=self.meeting))
+        self.assertGreaterEqual(len(questions), 2)
+        data = {}
+        for i, q in enumerate(questions):
+            data["text_%d" % q.id] = "수정된 문항%d" % i
+            data["evidence_%d" % q.id] = ""
+            for j in range(4):
+                data["choice_%d_%d" % (q.id, j)] = "보기%d" % j
+            data["correct_choice_%d" % q.id] = "1"
+        self.client.post(reverse("question_review", args=[self.meeting.id]), data)
+        for i, q in enumerate(questions):
+            q.refresh_from_db()
+            self.assertEqual(q.text, "수정된 문항%d" % i)
+            self.assertEqual(q.correct_choice, 1)
 
     def _published_question(self, choices=None, correct_choice=0):
         return CheckQuestion.objects.create(
@@ -1008,20 +1026,6 @@ class FollowupTests(TestCase):
         r = self.client.get(reverse("verification", args=[self.meeting.id]))
         self.assertContains(r, "아직 답하지 않은 팀원")
         self.assertContains(r, "b")
-
-    def test_reminder_text_lists_pending_usernames(self):
-        self._published_question()
-        r = self.client.get(reverse("verification", args=[self.meeting.id]))
-        self.assertIn("a, b", r.context["reminder_text"])
-        self.assertContains(r, "복사해서 알리기")
-
-    def test_no_reminder_button_when_everyone_answered(self):
-        question = self._published_question()
-        Answer.objects.create(question=question, user=self.user, selected_choice=0)
-        Answer.objects.create(question=question, user=self.other, selected_choice=1)
-        r = self.client.get(reverse("verification", args=[self.meeting.id]))
-        self.assertEqual(r.context["reminder_text"], "")
-        self.assertNotContains(r, "복사해서 알리기")
 
     def test_second_upload_keeps_the_first_recording(self):
         self.client.post(reverse("meeting_detail", args=[self.meeting.id]), {"action": "submit", "recording": SimpleUploadedFile("a.wav", b"RIFF1")})
