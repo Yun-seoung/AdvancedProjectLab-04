@@ -474,6 +474,15 @@ class LocalLLMTests(TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["text"], "좋은 질문")
 
+    def test_parse_mcq_json_drops_items_with_duplicate_choices(self):
+        raw = json.dumps([
+            {"question": "보기 중복", "choices": ["같은 문장입니다.", "같은 문장입니다.", "다른 보기", "같은 문장입니다."], "answer_index": 0, "evidence": ""},
+            {"question": "보기 전부 다름", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""},
+        ], ensure_ascii=False)
+        result = services._parse_mcq_json(raw)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["text"], "보기 전부 다름")
+
     def test_parse_mcq_json_extracts_array_even_with_surrounding_prose(self):
         raw = "물론입니다! 요청하신 문제는 다음과 같습니다:\n```json\n%s\n```\n참고하세요." % self._mcq_json(1)
         result = services._parse_mcq_json(raw)
