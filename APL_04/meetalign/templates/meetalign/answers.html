@@ -1,14 +1,46 @@
 {% extends "meetalign/base.html" %}
-{% block note %}<li>회의 종료 후 이동하는 화면. 생성된 익명 질문에 답변을 직접 작성해 저장한다 (LLM 초안 없음).</li>{% endblock %}
+{% block title %}질문 답변 · {{ meeting.title }}{% endblock %}
+
+{% block note %}<li>회의 종료 후 이동하는 화면. 익명 질문에 답변을 직접 작성해 저장한다.</li>{% endblock %}
+
+{% block breadcrumb %}{% include "meetalign/_meeting_crumbs.html" with here="질문 답변" %}{% endblock %}
+
 {% block content %}
-<h1>{{ meeting.title }} 질문 답변</h1>
-<p><a href="{% url 'meeting_detail' meeting.id %}">회의로 돌아가기</a></p>
-{% for q in questions %}
-<form method="post">{% csrf_token %}
-<p>Q. {{ q.text }}</p>
-<input type="hidden" name="question_id" value="{{ q.id }}">
-<input name="answer" value="{{ q.answer }}"><button>답변 저장</button>
-</form>
-{% empty %}<p>질문이 없습니다.</p>{% endfor %}
-<p><a href="{% url 'summary' meeting.id %}">회의 요약</a> | <a href="{% url 'understanding' meeting.id %}">이해도 검증</a></p>
+<div class="mb-6">
+  <h1 class="text-2xl font-semibold tracking-tight text-foreground">질문 답변</h1>
+  <p class="mt-1 text-sm text-muted-foreground">{{ meeting.title }} · 답변은 질문함에 함께 보입니다.</p>
+</div>
+
+{% if questions %}
+  <div class="space-y-3">
+    {% for q in questions %}
+      <article class="card">
+        <header class="border-b">
+          <p class="text-sm leading-relaxed text-foreground">{{ q.text }}</p>
+        </header>
+        <form method="post">{% csrf_token %}
+          <section class="space-y-3">
+            <input type="hidden" name="question_id" value="{{ q.id }}">
+            <div class="field">
+              <label class="label" for="answer_{{ q.id }}">답변</label>
+              <input class="input min-h-11" type="text" id="answer_{{ q.id }}" name="answer"
+                     value="{{ q.answer }}" placeholder="회의 내용을 근거로 짧게 답해 주세요.">
+            </div>
+            <button class="btn min-h-11" data-variant="outline">답변 저장</button>
+          </section>
+        </form>
+      </article>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="rounded-lg border border-dashed border-border bg-card px-6 py-14 text-center">
+    <h2 class="text-base font-medium text-foreground">답변할 질문이 없습니다</h2>
+    <p class="mt-1 text-sm text-muted-foreground">익명 질문이 들어오면 여기에서 답할 수 있습니다.</p>
+  </div>
+{% endif %}
+
+<div class="mt-8 flex flex-wrap gap-2">
+  <a class="btn min-h-11" data-variant="outline" href="{% url 'summary' meeting.id %}">회의 요약</a>
+  <a class="btn min-h-11" data-variant="ghost" href="{% url 'understanding' meeting.id %}">확인 문제</a>
+</div>
 {% endblock %}

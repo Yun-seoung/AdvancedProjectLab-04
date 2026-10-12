@@ -1,11 +1,42 @@
 {% extends "meetalign/base.html" %}
+{% block title %}익명 질문함 · {{ meeting.title }}{% endblock %}
+
 {% block note %}<li>팀원 누구나 익명 질문을 볼 수 있고, 답변은 3.5 화면에서 한다.</li>{% endblock %}
+
+{% block breadcrumb %}{% include "meetalign/_meeting_crumbs.html" with here="익명 질문함" %}{% endblock %}
+
 {% block content %}
-<h1>{{ meeting.title }} 익명 질문함</h1>
-<p><a href="{% url 'meeting_detail' meeting.id %}">회의로 돌아가기</a></p>
-<ul>
-{% for q in questions %}<li>{{ q.text }}{% if q.answer %} → 답변: {{ q.answer }}{% endif %}</li>
-{% empty %}<li>질문이 없습니다.</li>{% endfor %}
-</ul>
-<p><a href="{% url 'answers' meeting.id %}">질문에 답변하기</a></p>
+<div class="mb-6 flex flex-wrap items-end justify-between gap-3">
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight text-foreground">익명 질문함</h1>
+    <p class="mt-1 text-sm text-muted-foreground">{{ meeting.title }} · 작성자는 저장하지 않습니다.</p>
+  </div>
+  <a class="btn min-h-11" data-variant="outline" href="{% url 'answers' meeting.id %}">질문에 답변하기</a>
+</div>
+
+{% if questions %}
+  <div class="space-y-3">
+    {% for q in questions %}
+      <article class="card">
+        <section class="space-y-3">
+          <p class="text-sm leading-relaxed text-foreground">{{ q.text }}</p>
+          {% if q.answer %}
+            <div class="rounded-md bg-muted/60 px-3 py-2">
+              <p class="text-xs font-medium text-muted-foreground">답변</p>
+              <p class="mt-1 text-sm leading-relaxed">{{ q.answer }}</p>
+            </div>
+          {% else %}
+            <span class="badge" data-variant="outline">답변 대기</span>
+          {% endif %}
+        </section>
+      </article>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="rounded-lg border border-dashed border-border bg-card px-6 py-14 text-center">
+    <h2 class="text-base font-medium text-foreground">아직 질문이 없습니다</h2>
+    <p class="mt-1 text-sm text-muted-foreground">대화창에서 익명으로 질문을 보낼 수 있습니다.</p>
+    <a class="btn mt-5 min-h-11" data-variant="outline" href="{% url 'chat' meeting.id %}">대화창으로</a>
+  </div>
+{% endif %}
 {% endblock %}

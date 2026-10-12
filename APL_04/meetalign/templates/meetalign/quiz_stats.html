@@ -1,0 +1,114 @@
+{% extends "meetalign/base.html" %}
+{% load ui_extras %}
+{% block title %}이해 집계 · {{ meeting.title }}{% endblock %}
+
+{% block note %}
+<li>진행자는 문항별 인원수 집계만 본다. 누가 어떻게 답했는지는 보여주지 않는다.</li>
+<li>"다르게 이해한 인원"은 회의 내용과 다른 보기를 고른 사람 수다.</li>
+{% endblock %}
+
+{% block breadcrumb %}{% include "meetalign/_meeting_crumbs.html" with here="이해 집계" %}{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-2xl font-semibold tracking-tight text-foreground">이해 엇갈림 집계</h1>
+  <p class="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+    <span>{{ meeting.title }}</span>
+    <span aria-hidden="true">·</span>
+    {% if meeting.quiz_published %}
+      <span class="badge" data-variant="secondary">공개됨</span>
+    {% else %}
+      <span class="badge" data-variant="outline">공개 전</span>
+    {% endif %}
+    <span aria-hidden="true">·</span>
+    <span>{{ meeting.created_at|date:"Y년 n월 j일" }}</span>
+  </p>
+</div>
+
+{% include "meetalign/_meeting_tabs.html" with current="stats" %}
+
+{% if not meeting.quiz_published %}
+  <div class="alert mb-6 border-amber-200 bg-amber-50 text-amber-800">
+    <strong data-title>아직 참가자에게 공개하지 않았습니다</strong>
+    <section>
+      <p>문제 검토 화면에서 승인하면 참가자가 풀 수 있고, 여기에 집계가 쌓입니다.</p>
+    </section>
+  </div>
+{% endif %}
+
+<div class="space-y-4">
+{% for row in rows %}
+  {% with top=row.choices|top_wrong_index %}
+  <article class="card">
+    <header class="border-b">
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="badge" data-variant="outline">{{ row.item.order }}번</span>
+        <span class="badge" data-variant="secondary">{{ row.item.get_kind_display }}</span>
+        <span class="ml-auto badge
+                     {% if row.different %}border-amber-200 bg-amber-50 text-amber-800
+                     {% else %}border-emerald-200 bg-emerald-50 text-emerald-700{% endif %}">
+          응답 {{ row.total }}명 중 {{ row.different }}명이 다르게 이해
+        </span>
+      </div>
+      <h2 class="card-title mt-2 text-base font-medium leading-relaxed">{{ row.item.text }}</h2>
+    </header>
+
+    <section class="space-y-3">
+      {% for choice in row.choices %}
+        {% with pct=choice.count|percent:row.total %}
+        <div>
+          <div class="mb-1 flex items-start gap-2 text-sm">
+            <span class="shrink-0 font-medium text-muted-foreground">{{ choice.index }}.</span>
+
+            {# 보기가 길면 2줄에서 자르고, 눌러서 펼친다 (JS 없음) #}
+            <details class="group min-w-0 flex-1">
+              <summary class="cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+                <span class="line-clamp-2 group-open:line-clamp-none
+                             {% if choice.is_answer %}text-foreground{% else %}text-muted-foreground{% endif %}">
+                  {{ choice.text }}
+                </span>
+              </summary>
+            </details>
+
+            {% if choice.is_answer %}
+              <span class="badge shrink-0 border-emerald-200 bg-emerald-50 text-emerald-700">정답</span>
+            {% endif %}
+            <span class="shrink-0 tabular-nums text-muted-foreground">{{ choice.count }}명 · {{ pct }}%</span>
+          </div>
+
+          <div class="progress h-2" role="progressbar" aria-label="보기 {{ choice.index }} 선택 비율"
+               aria-valuenow="{{ pct }}" aria-valuemin="0" aria-valuemax="100">
+            <span class="{% if choice.is_answer %}bg-emerald-600
+                         {% elif choice.index == top %}bg-amber-500
+                         {% else %}bg-gray-300{% endif %}"
+                  style="width: {{ pct }}%"></span>
+          </div>
+        </div>
+        {% endwith %}
+      {% endfor %}
+    </section>
+
+    <footer class="border-t">
+      <details class="group w-full">
+        <summary class="flex min-h-11 cursor-pointer list-none items-center gap-2 text-sm
+                        text-muted-foreground hover:text-foreground
+                        [&::-webkit-details-marker]:hidden">
+          <span class="text-xs transition-transform group-open:rotate-90">▶</span>
+          근거 보기
+        </summary>
+        <blockquote class="mt-1 border-l-2 border-border pl-3 text-sm leading-relaxed text-muted-foreground">
+          {{ row.item.evidence|default:"근거 문장이 비어 있습니다." }}
+        </blockquote>
+      </details>
+    </footer>
+  </article>
+  {% endwith %}
+{% empty %}
+  <div class="rounded-lg border border-dashed border-border bg-card px-6 py-14 text-center">
+    <h2 class="text-base font-medium text-foreground">아직 확인 문제가 없습니다</h2>
+    <p class="mt-1 text-sm text-muted-foreground">회의 상세에서 녹음이나 전사 텍스트를 먼저 제출해 주세요.</p>
+    <a href="{% url 'meeting_detail' meeting.id %}" class="btn mt-5 min-h-11">입력 화면으로</a>
+  </div>
+{% endfor %}
+</div>
+{% endblock %}

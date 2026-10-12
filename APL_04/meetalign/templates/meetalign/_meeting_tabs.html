@@ -1,0 +1,37 @@
+{% comment %}
+같은 회의 안의 화면 이동. 쓰는 쪽에서 current 를 넘긴다.
+  {% include "meetalign/_meeting_tabs.html" with current="stats" %}
+Basecoat 의 .tabs 는 JS 로 패널을 바꾸는 용도라, 페이지 이동에는 링크 세그먼트를 쓴다.
+보이는 항목은 이미 context 에 있는 meeting 상태와 진행자 여부로만 판단한다.
+{% endcomment %}
+<nav class="mb-6 flex gap-1 overflow-x-auto rounded-lg bg-muted p-[3px]" aria-label="회의 화면">
+  <a href="{% url 'meeting_detail' meeting.id %}"
+     class="flex min-h-11 flex-1 items-center justify-center whitespace-nowrap rounded-md px-3 text-sm font-medium
+            {% if current == 'detail' %}bg-background text-foreground shadow-sm{% else %}text-muted-foreground hover:text-foreground{% endif %}"
+     {% if current == 'detail' %}aria-current="page"{% endif %}>입력</a>
+
+  {% if meeting.minutes %}
+    <a href="{% url 'meeting_result' meeting.id %}"
+       class="flex min-h-11 flex-1 items-center justify-center whitespace-nowrap rounded-md px-3 text-sm font-medium
+              {% if current == 'result' %}bg-background text-foreground shadow-sm{% else %}text-muted-foreground hover:text-foreground{% endif %}"
+       {% if current == 'result' %}aria-current="page"{% endif %}>통합 회의록</a>
+  {% endif %}
+
+  {% if meeting.host_id == user.id %}
+    {% if meeting.quiz_items.exists %}
+      <a href="{% url 'quiz_review' meeting.id %}"
+         class="flex min-h-11 flex-1 items-center justify-center whitespace-nowrap rounded-md px-3 text-sm font-medium
+                {% if current == 'review' %}bg-background text-foreground shadow-sm{% else %}text-muted-foreground hover:text-foreground{% endif %}"
+         {% if current == 'review' %}aria-current="page"{% endif %}>문제 검토</a>
+      <a href="{% url 'quiz_stats' meeting.id %}"
+         class="flex min-h-11 flex-1 items-center justify-center whitespace-nowrap rounded-md px-3 text-sm font-medium
+                {% if current == 'stats' %}bg-background text-foreground shadow-sm{% else %}text-muted-foreground hover:text-foreground{% endif %}"
+         {% if current == 'stats' %}aria-current="page"{% endif %}>이해 집계</a>
+    {% endif %}
+  {% elif meeting.quiz_published %}
+    <a href="{% url 'understanding' meeting.id %}"
+       class="flex min-h-11 flex-1 items-center justify-center whitespace-nowrap rounded-md px-3 text-sm font-medium
+              {% if current == 'quiz' %}bg-background text-foreground shadow-sm{% else %}text-muted-foreground hover:text-foreground{% endif %}"
+       {% if current == 'quiz' %}aria-current="page"{% endif %}>확인 문제</a>
+  {% endif %}
+</nav>

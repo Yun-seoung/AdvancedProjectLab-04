@@ -1,0 +1,98 @@
+{% extends "meetalign/base.html" %}
+{% block title %}확인 문제 검토 · {{ meeting.title }}{% endblock %}
+
+{% block note %}
+<li>진행자가 문제·보기·정답·근거를 고친 뒤 승인하면 참가자에게 공개된다.</li>
+<li>공개 전에는 참가자가 문제를 볼 수 없다.</li>
+{% endblock %}
+
+{% block breadcrumb %}{% include "meetalign/_meeting_crumbs.html" with here="문제 검토" %}{% endblock %}
+
+{% block content %}
+<div class="mb-6">
+  <h1 class="text-2xl font-semibold tracking-tight text-foreground">확인 문제 검토</h1>
+  <p class="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+    <span>{{ meeting.title }}</span>
+    <span aria-hidden="true">·</span>
+    {% if meeting.quiz_published %}
+      <span class="badge border-emerald-200 bg-emerald-50 text-emerald-700">참가자에게 공개됨</span>
+    {% else %}
+      <span class="badge" data-variant="outline">아직 공개되지 않음</span>
+    {% endif %}
+  </p>
+</div>
+
+{% include "meetalign/_meeting_tabs.html" with current="review" %}
+
+{% if message %}
+  <div class="alert mb-6 border-emerald-200 bg-emerald-50 text-emerald-800" role="status">
+    <strong data-title>{{ message }}</strong>
+    <section><p>아직 공개 전이라면 아래 버튼으로 승인해 주세요.</p></section>
+  </div>
+{% endif %}
+
+<form method="post">{% csrf_token %}
+<div class="space-y-4">
+{% for item in items %}
+  <article class="card">
+    <header class="border-b">
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="badge" data-variant="outline">{{ item.order }}번</span>
+        <span class="badge" data-variant="secondary">{{ item.get_kind_display }}</span>
+      </div>
+    </header>
+
+    <section class="space-y-5">
+      <div class="field">
+        <label class="label" for="text_{{ item.id }}">문항</label>
+        <textarea class="textarea" id="text_{{ item.id }}" name="text_{{ item.id }}"
+                  rows="2">{{ item.text }}</textarea>
+      </div>
+
+      <fieldset class="space-y-2">
+        <legend class="label mb-2">보기 — 라디오를 눌러 정답을 지정합니다</legend>
+        {% for n, text in item.choices %}
+          <div class="flex items-center gap-3 rounded-md border border-transparent px-2 py-1
+                      has-[:checked]:border-primary/40 has-[:checked]:bg-primary/5">
+            <label class="flex min-h-11 shrink-0 cursor-pointer items-center gap-2 text-sm font-medium
+                          text-muted-foreground">
+              <input type="radio" name="answer_{{ item.id }}" value="{{ n }}"
+                     class="size-4 accent-[var(--primary)]"
+                     {% if item.answer_index == n %}checked{% endif %}>
+              <span>{{ n }}</span>
+              <span class="sr-only">번 보기를 정답으로 지정</span>
+            </label>
+            <input class="input min-h-11" type="text" name="choice{{ n }}_{{ item.id }}"
+                   value="{{ text }}" aria-label="{{ n }}번 보기 내용">
+          </div>
+        {% endfor %}
+      </fieldset>
+
+      <div class="field">
+        <label class="label" for="evidence_{{ item.id }}">근거 문장</label>
+        <textarea class="textarea" id="evidence_{{ item.id }}" name="evidence_{{ item.id }}"
+                  rows="2">{{ item.evidence }}</textarea>
+        <p class="text-sm text-muted-foreground">회의 전사에서 근거가 되는 문장을 그대로 둡니다.</p>
+      </div>
+    </section>
+  </article>
+{% empty %}
+  <div class="rounded-lg border border-dashed border-border bg-card px-6 py-14 text-center">
+    <h2 class="text-base font-medium text-foreground">확인 문제가 없습니다</h2>
+    <p class="mt-1 text-sm text-muted-foreground">회의 상세에서 녹음이나 전사 텍스트를 먼저 제출해 주세요.</p>
+    <a class="btn mt-5 min-h-11" data-variant="outline"
+       href="{% url 'meeting_detail' meeting.id %}">입력 화면으로</a>
+  </div>
+{% endfor %}
+</div>
+
+{% if items %}
+  <div class="sticky bottom-0 -mx-4 mt-6 flex flex-wrap items-center gap-2 border-t border-border
+              bg-background/95 px-4 py-3 backdrop-blur">
+    <button class="btn min-h-11" data-variant="outline" name="action" value="save">수정 저장</button>
+    <button class="btn min-h-11" name="action" value="publish">승인하고 참가자에게 공개</button>
+    <span class="text-sm text-muted-foreground">공개하면 참가자가 바로 풀 수 있습니다.</span>
+  </div>
+{% endif %}
+</form>
+{% endblock %}

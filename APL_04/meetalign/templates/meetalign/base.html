@@ -1,13 +1,54 @@
-<!doctype html>
+{% load static tailwind_cli %}<!doctype html>
 <html lang="ko">
-<head><meta charset="utf-8"><title>{% block title %}MeetAlign{% endblock %}</title></head>
-<body>
-<p><a href="{% url 'index' %}">[index]</a></p>
-<div style="border:1px solid #000">
-<b>설계 결정</b>
-<ul>{% block note %}{% endblock %}</ul>
-</div>
-<hr>
-{% block content %}{% endblock %}
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}MeetAlign{% endblock %}</title>
+{# 순서 중요: Tailwind 를 먼저 읽어 레이어 순서를 잡은 뒤 Basecoat 컴포넌트를 얹는다. #}
+{% tailwind_css %}
+<link rel="stylesheet" href="{% static 'vendor/basecoat.css' %}">
+<script src="{% static 'vendor/js/all.min.js' %}" defer></script>
+</head>
+<body class="min-h-screen bg-background text-foreground">
+
+<header class="sticky top-0 z-30 border-b border-border bg-background">
+  <div class="mx-auto flex h-14 max-w-[800px] items-center gap-3 px-4">
+    <a href="{% url 'index' %}"
+       class="font-semibold tracking-tight text-foreground hover:text-primary">MeetAlign</a>
+    <div class="ml-auto flex items-center gap-2">
+      {% if user.is_authenticated %}
+        <span class="text-sm text-muted-foreground">{{ user.username }}</span>
+        {% if user.hosted_meetings.exists %}
+          <span class="badge" data-variant="secondary">진행자</span>
+        {% else %}
+          <span class="badge" data-variant="outline">참가자</span>
+        {% endif %}
+        <form method="post" action="{% url 'logout' %}">{% csrf_token %}
+          <button class="btn min-h-11" data-variant="ghost">로그아웃</button>
+        </form>
+      {% else %}
+        <a href="{% url 'login' %}" class="btn min-h-11" data-variant="ghost">로그인</a>
+      {% endif %}
+    </div>
+  </div>
+</header>
+
+<main class="mx-auto max-w-[800px] px-4 pb-20 pt-6">
+  {% block breadcrumb %}{% endblock %}
+  {% block content %}{% endblock %}
+
+  <details class="group mt-14 rounded-lg border border-border bg-card">
+    <summary class="flex min-h-11 cursor-pointer list-none items-center gap-2 px-4 py-2
+                    text-sm font-medium text-muted-foreground hover:text-foreground
+                    [&::-webkit-details-marker]:hidden">
+      <span class="text-xs transition-transform group-open:rotate-90">▶</span>
+      이 화면 안내
+    </summary>
+    <ul class="list-disc space-y-1 px-4 pb-4 pl-9 text-sm text-muted-foreground">
+      {% block note %}{% endblock %}
+    </ul>
+  </details>
+</main>
+
 </body>
 </html>

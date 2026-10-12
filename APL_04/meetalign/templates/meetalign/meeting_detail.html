@@ -1,20 +1,140 @@
 {% extends "meetalign/base.html" %}
+{% block title %}{{ meeting.title }} · MeetAlign{% endblock %}
+
 {% block note %}
-<li>녹음 입력은 파일 선택 UI만 제공하며 서버에 저장/처리하지 않는다.</li>
-<li>제출 → 회의록 생성 화면, 종료 → 질문 답변 화면(3.5)으로 이동한다.</li>
+<li>입력은 오디오 업로드와 전사 텍스트 붙여넣기 두 가지를 모두 지원한다 (STT 가 실패해도 시연된다).</li>
+<li>처리는 요청 안에서 동기로 하고 로딩 표시만 둔다. 녹음 원본은 전사 직후 삭제한다.</li>
+<li>녹음 제출과 회의 종료는 진행자만 할 수 있다.</li>
 {% endblock %}
+
+{% block breadcrumb %}{% include "meetalign/_meeting_crumbs.html" %}{% endblock %}
+
 {% block content %}
-<h1>{{ meeting.title }}</h1>
-<a href="{% url 'meeting_list' meeting.team_id %}">회의 목록으로 돌아가기</a>
-<form method="post" enctype="multipart/form-data">{% csrf_token %}
-<p>회의 녹음: <input type="file" name="recording" accept="audio/*"></p>
-<button name="action" value="submit">제출</button>
-<button name="action" value="end">종료</button>
+<div class="mb-6">
+  <h1 class="text-2xl font-semibold tracking-tight text-foreground">{{ meeting.title }}</h1>
+  <p class="mt-1 flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+    <span>진행자 {{ meeting.host.username|default:"미지정" }}</span>
+    <span aria-hidden="true">·</span>
+    <span>{{ meeting.created_at|date:"Y년 n월 j일" }}</span>
+    <span aria-hidden="true">·</span>
+    <span class="badge" data-variant="outline">STT {{ stt_provider }}</span>
+    <span class="badge" data-variant="outline">LLM {{ llm_provider }}</span>
+  </p>
+</div>
+
+{% include "meetalign/_meeting_tabs.html" with current="detail" %}
+
+{% if error %}
+  <div class="alert mb-6 border-destructive/30 bg-red-50 text-destructive" role="alert">
+    <strong data-title>제출하지 못했습니다</strong>
+    <section><p>{{ error }}</p></section>
+  </div>
+{% endif %}
+
+{% if is_host %}
+<section class="card">
+  <header class="border-b">
+    <h2 class="card-title">회의 녹음 제출</h2>
+    <p class="text-sm text-muted-foreground">
+      올린 녹음은 전사 직후 삭제합니다. 둘 다 넣으면 오디오 파일을 전사한 결과를 씁니다.
+    </p>
+  </header>
+
+  <form method="post" enctype="multipart/form-data" id="submit-form">{% csrf_token %}
+    <section>
+      {# 입력 방식 전환. Basecoat .tabs 가 aria-controls 로 패널을 바꾼다 (vendor JS). #}
+      <div class="tabs">
+        <nav role="tablist" aria-orientation="horizontal" class="h-11 w-full" aria-label="입력 방식">
+          <button type="button" role="tab" id="tab-audio" aria-controls="panel-audio"
+                  aria-selected="true">오디오 파일</button>
+          <button type="button" role="tab" id="tab-text" aria-controls="panel-text"
+                  aria-selected="false">텍스트 붙여넣기</button>
+        </nav>
+
+        <div id="panel-audio" role="tabpanel" aria-labelledby="tab-audio" class="pt-2">
+          <div class="field">
+            <label class="label" for="recording">녹음 파일</label>
+            <input class="input min-h-11 py-2" type="file" id="recording" name="recording" accept="audio/*">
+            <p class="text-sm text-muted-foreground">m4a, mp3, wav 등 오디오 파일</p>
+          </div>
+        </div>
+
+        <div id="panel-text" role="tabpanel" aria-labelledby="tab-text" class="pt-2">
+          <div class="field">
+            <label class="label" for="transcript">전사 텍스트</label>
+            <textarea class="textarea" id="transcript" name="transcript" rows="8"
+                      placeholder="회의 전사 텍스트를 붙여넣으세요."></textarea>
+            <p class="text-sm text-muted-foreground">samples/demo_meeting.txt 의 내용을 붙여넣어 시연할 수 있습니다.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <footer class="flex flex-wrap items-center gap-3 border-t">
+      <button class="btn min-h-11" name="action" value="submit" id="submit-button">
+        회의록과 확인 문제 만들기
+      </button>
+      <span id="loading" class="flex items-center gap-2 text-sm text-muted-foreground" hidden>
+        처리 중입니다. 통합 회의록과 확인 문제를 만들고 있습니다...
+      </span>
+    </footer>
+  </form>
+</section>
+
+<form method="post" class="mt-4">{% csrf_token %}
+  <button class="btn min-h-11" data-variant="outline" name="action" value="end">회의 종료</button>
 </form>
-<ul>
-<li><a href="{% url 'chat' meeting.id %}">대화창</a></li>
-<li><a href="{% url 'inbox' meeting.id %}">익명 질문함</a></li>
-<li><a href="{% url 'summary' meeting.id %}">회의 요약</a></li>
-<li><a href="{% url 'understanding' meeting.id %}">이해도 검증</a></li>
-</ul>
+{% else %}
+<div class="alert" role="note">
+  <strong data-title>녹음 제출은 진행자만 할 수 있습니다</strong>
+  <section>
+    <p>진행자({{ meeting.host.username|default:"미지정" }})가 회의록을 만들면 확인 문제를 풀 수 있습니다.</p>
+  </section>
+</div>
+{% endif %}
+
+<section class="mt-8">
+  <h2 class="mb-3 text-sm font-medium text-muted-foreground">이 회의의 다른 화면</h2>
+  <ul class="divide-y divide-border overflow-hidden rounded-lg border border-border bg-card">
+    {% if meeting.minutes %}
+      <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
+             href="{% url 'meeting_result' meeting.id %}">통합 회의록</a></li>
+    {% else %}
+      <li class="flex min-h-11 items-center px-4 py-2 text-sm text-muted-foreground">
+        통합 회의록 <span class="ml-2 badge" data-variant="outline">아직 없음</span></li>
+    {% endif %}
+
+    {% if is_host and meeting.quiz_items.exists %}
+      <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
+             href="{% url 'quiz_review' meeting.id %}">확인 문제 검토·승인</a></li>
+      <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
+             href="{% url 'quiz_stats' meeting.id %}">이해 엇갈림 집계</a></li>
+    {% endif %}
+
+    {% if meeting.quiz_published %}
+      <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
+             href="{% url 'understanding' meeting.id %}">확인 문제 풀기</a></li>
+    {% else %}
+      <li class="flex min-h-11 items-center px-4 py-2 text-sm text-muted-foreground">
+        확인 문제 풀기 <span class="ml-2 badge" data-variant="outline">공개 전</span></li>
+    {% endif %}
+
+    <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
+           href="{% url 'chat' meeting.id %}">대화창</a></li>
+    <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
+           href="{% url 'inbox' meeting.id %}">익명 질문함</a></li>
+    <li><a class="flex min-h-11 items-center px-4 py-2 text-sm hover:bg-muted"
+           href="{% url 'summary' meeting.id %}">회의 요약</a></li>
+  </ul>
+</section>
+
+<script>
+  var form = document.getElementById("submit-form");
+  if (form) {
+    form.addEventListener("submit", function () {
+      document.getElementById("submit-button").disabled = true;
+      document.getElementById("loading").hidden = false;
+    });
+  }
+</script>
 {% endblock %}

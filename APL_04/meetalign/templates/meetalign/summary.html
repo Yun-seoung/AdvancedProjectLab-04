@@ -1,8 +1,32 @@
 {% extends "meetalign/base.html" %}
-{% block note %}<li>LLM 요약은 고정된 가짜 텍스트이다.</li>{% endblock %}
+{% block title %}회의 요약 · {{ meeting.title }}{% endblock %}
+
+{% block note %}<li>통합 회의록을 다시 보는 화면. 내용은 제출 때 한 번 만들어 저장한 것이다.</li>{% endblock %}
+
+{% block breadcrumb %}{% include "meetalign/_meeting_crumbs.html" with here="회의 요약" %}{% endblock %}
+
 {% block content %}
-<h1>{{ meeting.title }} 회의 요약</h1>
-<p><a href="{% url 'meeting_detail' meeting.id %}">회의로 돌아가기</a></p>
-<p>(가짜 요약) 안건 논의, 결정 사항, 다음 할 일이 여기에 표시됩니다.</p>
-<p><a href="{% url 'understanding' meeting.id %}">이해도 검증</a></p>
+<div class="mb-6 flex flex-wrap items-end justify-between gap-3">
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight text-foreground">회의 요약</h1>
+    <p class="mt-1 text-sm text-muted-foreground">
+      {{ meeting.title }} · {{ meeting.created_at|date:"Y년 n월 j일" }}
+    </p>
+  </div>
+  {% if meeting.minutes %}
+    <a class="btn min-h-11" data-variant="outline"
+       href="{% url 'minutes_download' meeting.id %}">.md 다운로드</a>
+  {% endif %}
+</div>
+
+{% if meeting.minutes %}
+  {% include "meetalign/_minutes_sections.html" %}
+{% else %}
+  <div class="rounded-lg border border-dashed border-border bg-card px-6 py-14 text-center">
+    <h2 class="text-base font-medium text-foreground">아직 회의록이 없습니다</h2>
+    <p class="mt-1 text-sm text-muted-foreground">진행자가 녹음이나 전사 텍스트를 제출해야 만들어집니다.</p>
+    <a class="btn mt-5 min-h-11" data-variant="outline"
+       href="{% url 'meeting_detail' meeting.id %}">입력 화면으로</a>
+  </div>
+{% endif %}
 {% endblock %}
