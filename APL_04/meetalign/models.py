@@ -92,8 +92,10 @@ class ChatMessage(models.Model):
 
 
 class Question(models.Model):
-    """회의별 대화방의 익명 질문. 작성자는 저장하지 않는다."""
+    """회의별 대화방의 익명 질문. 주최자와 다른 팀원에게는 작성자를 보여주지 않지만,
+    답변을 본인만 볼 수 있도록 내부적으로는 작성자를 저장한다."""
     meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE, related_name="questions")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True, related_name="questions")
     text = models.TextField()
     answer = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -103,9 +105,17 @@ class Question(models.Model):
 
 
 class CheckQuestion(models.Model):
-    """이해도 검증을 위해 (LLM이) 낸 질문. 회의당 여러 개이며 팀원 전원이 각자 답한다."""
+    """이해도 검증을 위해 (LLM이) 낸 객관식 질문. 회의당 여러 개이며 팀원 전원이 각자 답한다.
+    주최자가 검토/수정 후 공개(published)해야 팀원에게 보인다."""
+    STATUS_DRAFT = "draft"
+    STATUS_PUBLISHED = "published"
+
     meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE, related_name="check_questions")
     text = models.TextField()
+    choices = models.JSONField(default=list)
+    correct_choice = models.PositiveSmallIntegerField(default=0)
+    evidence = models.TextField(blank=True, default="")
+    status = models.CharField(max_length=10, choices=[(STATUS_DRAFT, "draft"), (STATUS_PUBLISHED, "published")], default=STATUS_DRAFT)
     order = models.PositiveSmallIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -118,16 +128,20 @@ class CheckQuestion(models.Model):
 
 
 class Answer(models.Model):
-    """CheckQuestion에 대한 팀원별 답변. 같은 질문이라도 사람마다 따로 저장되어야
-    "누구와 누구가 다르게 이해했는지" 비교가 가능하다."""
+    """CheckQuestion에 대한 팀원별 답변(선택한 보기 번호). 같은 질문이라도 사람마다 따로
+    저장되어야 "누구와 누구가 다르게 이해했는지" 비교가 가능하다."""
     question = models.ForeignKey(CheckQuestion, on_delete=models.CASCADE, related_name="answers")
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="check_answers")
-    text = models.TextField()
+    selected_choice = models.PositiveSmallIntegerField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         unique_together = ("question", "user")
+
+    @property
+    def is_correct(self):
+        return self.selected_choice == self.question.correct_choice
 
     def __str__(self):
         return "%s - %s" % (self.user, self.question_id)

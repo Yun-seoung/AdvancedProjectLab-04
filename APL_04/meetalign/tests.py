@@ -103,9 +103,18 @@ class PrototypeFlowTests(TestCase):
         self.assertRedirects(self.client.post(url, {"action": "submit"}),
                              reverse("meeting_result", args=[self.meeting.id]))
         self.assertRedirects(self.client.post(url, {"action": "end"}),
-                             reverse("understanding", args=[self.meeting.id]))
+                             reverse("question_review", args=[self.meeting.id]))
         self.meeting.refresh_from_db()
         self.assertTrue(self.meeting.ended)
+
+    def test_non_host_redirected_to_understanding_after_end(self):
+        other = User.objects.create_user("b", password="pw12345!")
+        self.team.members.add(other)
+        member = Client()
+        member.force_login(other)
+        url = reverse("meeting_detail", args=[self.meeting.id])
+        self.assertRedirects(member.post(url, {"action": "end"}),
+                             reverse("understanding", args=[self.meeting.id]))
 
     @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
     def test_recording_upload_is_saved(self):
@@ -177,52 +186,82 @@ class PrototypeFlowTests(TestCase):
             r = self.client.get(reverse(name, args=[self.meeting.id]))
             self.assertContains(r, back, msg_prefix=name)
 
-    def test_understanding_creates_fixed_questions_once(self):
-        self.client.get(reverse("understanding", args=[self.meeting.id]))
-        self.client.get(reverse("understanding", args=[self.meeting.id]))
+    def test_question_review_creates_draft_questions_once(self):
+        self.client.get(reverse("question_review", args=[self.meeting.id]))
+        self.client.get(reverse("question_review", args=[self.meeting.id]))
         self.assertEqual(CheckQuestion.objects.filter(meeting=self.meeting).count(), 2)
+        self.assertTrue(all(q.status == CheckQuestion.STATUS_DRAFT for q in CheckQuestion.objects.filter(meeting=self.meeting)))
+
+    def test_questions_hidden_from_participants_until_published(self):
+        self.client.get(reverse("question_review", args=[self.meeting.id]))
+        r = self.client.get(reverse("understanding", args=[self.meeting.id]))
+        self.assertContains(r, "아직 질문이 공개되지 않았습니다")
+
+    def test_publish_makes_questions_visible_to_participants(self):
+        self.client.get(reverse("question_review", args=[self.meeting.id]))
+        self.client.post(reverse("question_review", args=[self.meeting.id]), {"action": "publish"})
+        q = CheckQuestion.objects.filter(meeting=self.meeting).first()
+        self.assertEqual(q.status, CheckQuestion.STATUS_PUBLISHED)
+        r = self.client.get(reverse("understanding", args=[self.meeting.id]))
+        self.assertContains(r, q.text)
+
+    def test_host_can_edit_question_before_publishing(self):
+        self.client.get(reverse("question_review", args=[self.meeting.id]))
+        q = CheckQuestion.objects.filter(meeting=self.meeting).first()
+        self.client.post(reverse("question_review", args=[self.meeting.id]), {
+            "question_id": q.id, "text": "수정된 문항", "evidence": "근거",
+            "choice_0": "보기1", "choice_1": "보기2", "choice_2": "보기3", "choice_3": "보기4",
+            "correct_choice": "2",
+        })
+        q.refresh_from_db()
+        self.assertEqual(q.text, "수정된 문항")
+        self.assertEqual(q.choices, ["보기1", "보기2", "보기3", "보기4"])
+        self.assertEqual(q.correct_choice, 2)
+        self.assertEqual(q.status, CheckQuestion.STATUS_DRAFT)
+
+    def _published_question(self, choices=None, correct_choice=0):
+        return CheckQuestion.objects.create(
+            meeting=self.meeting, text="Q", choices=choices or ["맞음", "틀림1", "틀림2", "틀림3"],
+            correct_choice=correct_choice, status=CheckQuestion.STATUS_PUBLISHED,
+        )
 
     def test_understanding_saves_and_prefills_answer(self):
-        self.client.get(reverse("understanding", args=[self.meeting.id]))
-        q = CheckQuestion.objects.filter(meeting=self.meeting).first()
-        self.client.post(reverse("understanding", args=[self.meeting.id]), {"q%d" % q.id: "내 답변"})
-        self.assertEqual(Answer.objects.get(question=q, user=self.user).text, "내 답변")
+        q = self._published_question()
+        self.client.post(reverse("understanding", args=[self.meeting.id]), {"q%d" % q.id: "0"})
+        self.assertEqual(Answer.objects.get(question=q, user=self.user).selected_choice, 0)
         r = self.client.get(reverse("understanding", args=[self.meeting.id]))
-        self.assertContains(r, "내 답변")
+        self.assertContains(r, "checked")
 
     def test_understanding_resubmit_updates_not_duplicates(self):
-        self.client.get(reverse("understanding", args=[self.meeting.id]))
-        q = CheckQuestion.objects.filter(meeting=self.meeting).first()
-        self.client.post(reverse("understanding", args=[self.meeting.id]), {"q%d" % q.id: "첫 답변"})
-        self.client.post(reverse("understanding", args=[self.meeting.id]), {"q%d" % q.id: "수정된 답변"})
+        q = self._published_question()
+        self.client.post(reverse("understanding", args=[self.meeting.id]), {"q%d" % q.id: "0"})
+        self.client.post(reverse("understanding", args=[self.meeting.id]), {"q%d" % q.id: "1"})
         self.assertEqual(Answer.objects.filter(question=q, user=self.user).count(), 1)
-        self.assertEqual(Answer.objects.get(question=q, user=self.user).text, "수정된 답변")
+        self.assertEqual(Answer.objects.get(question=q, user=self.user).selected_choice, 1)
 
     def test_same_question_can_hold_different_users_answers(self):
         # 핵심 검증: 같은 질문에 팀원마다 답이 따로 저장돼야 이해도 비교가 가능하다.
         other = User.objects.create_user("b")
-        question = CheckQuestion.objects.create(meeting=self.meeting, text="Q")
-        Answer.objects.create(question=question, user=self.user, text="A의 이해")
-        Answer.objects.create(question=question, user=other, text="B의 이해")
+        question = self._published_question()
+        Answer.objects.create(question=question, user=self.user, selected_choice=0)
+        Answer.objects.create(question=question, user=other, selected_choice=1)
         self.assertEqual(question.answers.count(), 2)
 
-    def test_discrepancy_flagged_when_answers_differ(self):
-        self.client.get(reverse("understanding", args=[self.meeting.id]))
+    def test_discrepancy_flagged_when_someone_picks_wrong_answer(self):
         other = User.objects.create_user("b")
-        question = CheckQuestion.objects.filter(meeting=self.meeting).first()
-        Answer.objects.create(question=question, user=self.user, text="A안")
-        Answer.objects.create(question=question, user=other, text="B안")
+        question = self._published_question()
+        Answer.objects.create(question=question, user=self.user, selected_choice=0)
+        Answer.objects.create(question=question, user=other, selected_choice=1)
         r = self.client.get(reverse("verification", args=[self.meeting.id]))
-        self.assertContains(r, "b: B안")
-        self.assertContains(r, "a: A안")
+        self.assertContains(r, "a: 맞음")
+        self.assertContains(r, "b: 틀림1")
         self.assertNotContains(r, "엇갈린 답변이 없습니다.")
 
-    def test_no_discrepancy_when_answers_match(self):
-        self.client.get(reverse("understanding", args=[self.meeting.id]))
+    def test_no_discrepancy_when_everyone_picks_correct_answer(self):
         other = User.objects.create_user("b")
-        question = CheckQuestion.objects.filter(meeting=self.meeting).first()
-        Answer.objects.create(question=question, user=self.user, text="같은 답")
-        Answer.objects.create(question=question, user=other, text="같은 답")
+        question = self._published_question()
+        Answer.objects.create(question=question, user=self.user, selected_choice=0)
+        Answer.objects.create(question=question, user=other, selected_choice=0)
         r = self.client.get(reverse("verification", args=[self.meeting.id]))
         self.assertContains(r, "엇갈린 답변이 없습니다.")
 
@@ -258,14 +297,43 @@ class PrototypeFlowTests(TestCase):
         self.client.post(reverse("meeting_create", args=[self.team.id]), {"title": "h"})
         self.assertEqual(Meeting.objects.get(title="h").host, self.user)
 
-    def test_non_host_cannot_open_inbox_or_answer(self):
+    def test_non_host_can_view_inbox_but_not_answer(self):
         member = self._member_client()
-        self.assertEqual(member.get(reverse("inbox", args=[self.meeting.id])).status_code, 403)
+        self.assertEqual(member.get(reverse("inbox", args=[self.meeting.id])).status_code, 200)
         q = Question.objects.create(meeting=self.meeting, text="why?")
         r = member.post(reverse("answers", args=[self.meeting.id]), {"question_id": q.id, "answer": "x"})
         self.assertEqual(r.status_code, 403)
         q.refresh_from_db()
         self.assertEqual(q.answer, "")
+
+    def test_asker_sees_only_their_own_question_and_answer(self):
+        member_user = User.objects.create_user("member", password="pw12345!")
+        self.team.members.add(member_user)
+        member = Client()
+        member.force_login(member_user)
+
+        other_user = User.objects.create_user("c", password="pw12345!")
+        self.team.members.add(other_user)
+        other = Client()
+        other.force_login(other_user)
+
+        Question.objects.create(meeting=self.meeting, text="내 질문", answer="주최자 답변", user=member_user)
+        Question.objects.create(meeting=self.meeting, text="다른 사람 질문", answer="다른 답변", user=other_user)
+
+        r = member.get(reverse("inbox", args=[self.meeting.id]))
+        self.assertContains(r, "내 질문")
+        self.assertContains(r, "주최자 답변")
+        self.assertNotContains(r, "다른 사람 질문")
+
+        r2 = other.get(reverse("inbox", args=[self.meeting.id]))
+        self.assertContains(r2, "다른 사람 질문")
+        self.assertNotContains(r2, "내 질문")
+
+    def test_host_sees_all_questions_regardless_of_asker(self):
+        member = self._member_client()
+        member.post(reverse("chat", args=[self.meeting.id]), {"mode": "anon", "text": "팀원 질문"})
+        r = self.client.get(reverse("inbox", args=[self.meeting.id]))
+        self.assertContains(r, "팀원 질문")
 
     def test_meeting_without_host_stays_open_to_members(self):
         self.meeting.host = None
@@ -277,12 +345,12 @@ class PrototypeFlowTests(TestCase):
         member = self._member_client()
         member.post(reverse("chat", args=[self.meeting.id]), {"mode": "anon", "text": "hi"})
         self.assertEqual(Question.objects.filter(meeting=self.meeting).count(), 1)
+        self.assertEqual(Question.objects.get().user.username, "member")
 
-    def test_non_host_does_not_see_inbox_link_that_would_403(self):
+    def test_inbox_link_visible_to_everyone(self):
         member = self._member_client()
         r = member.get(reverse("meeting_detail", args=[self.meeting.id]))
-        self.assertNotContains(r, reverse("inbox", args=[self.meeting.id]))
-        self.assertContains(r, reverse("chat", args=[self.meeting.id]))
+        self.assertContains(r, reverse("inbox", args=[self.meeting.id]))
 
     def test_host_sees_inbox_link(self):
         r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
@@ -315,7 +383,7 @@ class LocalLLMTests(TestCase):
     def test_disabled_without_model_env_keeps_fake_behavior(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertIn("(가짜 LLM 응답)", services.chat_reply(self.meeting, "q"))
-            self.assertEqual(services.check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
+            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
 
     def test_chat_reply_sends_record_as_context(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="A안입니다") as gen:
@@ -337,37 +405,58 @@ class LocalLLMTests(TestCase):
             services.chat_reply(self.meeting, "q")
         self.assertNotIn("이전 대화", gen.call_args[0][0])
 
-    def test_check_questions_from_llm_lines(self):
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="질문1\n\n질문2\n질문3"):
-            self.assertEqual(services.check_questions(self.meeting), ["질문1", "질문2"])
+    def _mcq_json(self, n=2):
+        items = [
+            {"question": "질문%d" % i, "choices": ["a", "b", "c", "d"], "answer_index": i % 4, "evidence": "근거%d" % i}
+            for i in range(n)
+        ]
+        return json.dumps(items, ensure_ascii=False)
+
+    def test_generate_check_questions_parses_llm_json(self):
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=self._mcq_json(2)):
+            result = services.generate_check_questions(self.meeting)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["text"], "질문0")
+        self.assertEqual(result[0]["choices"], ["a", "b", "c", "d"])
+        self.assertEqual(result[0]["correct_choice"], 0)
+        self.assertEqual(result[0]["evidence"], "근거0")
+
+    def test_generate_check_questions_caps_at_five(self):
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=self._mcq_json(8)):
+            result = services.generate_check_questions(self.meeting)
+        self.assertEqual(len(result), 5)
 
     def test_llm_failure_falls_back(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", side_effect=OSError("down")):
             self.assertIn("LLM 연결 실패", services.chat_reply(self.meeting, "q"))
-            self.assertEqual(services.check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
+            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
 
     def test_no_record_uses_fake_even_when_enabled(self):
         self.meeting.record = ""
         self.meeting.save()
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate") as gen:
-            self.assertEqual(services.check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
+            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
         gen.assert_not_called()
 
-    def test_question_count_scales_with_record_bullet_count(self):
-        self.assertEqual(services._question_count_for("안건만 있고 불릿 없음"), 2)
-        self.assertEqual(services._question_count_for("- a\n- b\n- c\n- d"), 2)
-        self.assertEqual(services._question_count_for("\n".join(["- x"] * 10)), 5)
-        self.assertEqual(services._question_count_for("\n".join(["- x"] * 6)), 3)
+    def test_malformed_json_falls_back_to_fake(self):
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="이건 JSON이 아닙니다"):
+            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
 
-    def test_longer_record_requests_more_questions_from_llm(self):
-        self.meeting.record = "[결정 사항]\n" + "\n".join("- 항목%d" % i for i in range(10))
-        self.meeting.save()
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(
-            services, "_generate", return_value="\n".join("질문%d" % i for i in range(5))
-        ) as gen:
-            result = services.check_questions(self.meeting)
-        self.assertEqual(len(result), 5)
-        self.assertIn("정확히 5개", gen.call_args[0][0])
+    def test_parse_mcq_json_drops_malformed_items_but_keeps_valid_ones(self):
+        raw = json.dumps([
+            {"question": "좋은 질문", "choices": ["a", "b", "c", "d"], "answer_index": 1, "evidence": "e"},
+            {"question": "보기 3개뿐", "choices": ["a", "b", "c"], "answer_index": 0},
+            {"question": "범위 밖 정답", "choices": ["a", "b", "c", "d"], "answer_index": 9},
+            {"question": "", "choices": ["a", "b", "c", "d"], "answer_index": 0},
+        ], ensure_ascii=False)
+        result = services._parse_mcq_json(raw)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["text"], "좋은 질문")
+
+    def test_parse_mcq_json_extracts_array_even_with_surrounding_prose(self):
+        raw = "물론입니다! 요청하신 문제는 다음과 같습니다:\n```json\n%s\n```\n참고하세요." % self._mcq_json(1)
+        result = services._parse_mcq_json(raw)
+        self.assertEqual(len(result), 1)
 
 
 class LanguageFilterTests(TestCase):
@@ -387,7 +476,7 @@ class LanguageFilterTests(TestCase):
     def test_check_questions_rejects_mixed_language_output(self):
         garbled = "IPv6的地址空间更大吗？这是一个问题です"
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=garbled):
-            self.assertEqual(services.check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
+            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
 
     def test_summarize_rejects_mixed_language_output(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="这是总结"):
@@ -397,22 +486,21 @@ class LanguageFilterTests(TestCase):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="这是回答"):
             self.assertIn("언어 오류", services.chat_reply(self.meeting, "q"))
 
-    def test_is_consistent_rejects_mixed_language_verdict(self):
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="一致"):
-            self.assertFalse(services.is_consistent(["a", "b"], record="r", question="q"))
-
     def test_retries_once_then_succeeds_on_clean_output(self):
+        clean = json.dumps([{"question": "질문1", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""}], ensure_ascii=False)
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(
-            services, "_generate", side_effect=["这是中文", "질문1\n질문2"]
+            services, "_generate", side_effect=["这是中文", clean]
         ) as gen:
-            self.assertEqual(services.check_questions(self.meeting), ["질문1", "질문2"])
+            result = services.generate_check_questions(self.meeting)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["text"], "질문1")
         self.assertEqual(gen.call_count, 2)
 
     def test_gives_up_after_one_retry_still_garbled(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(
             services, "_generate", return_value="这是中文"
         ) as gen:
-            self.assertEqual(services.check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
+            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
         self.assertEqual(gen.call_count, 2)
 
 
@@ -555,7 +643,7 @@ class MeetingSummaryTests(TestCase):
         self.assertContains(r, "전사 원문 내용")
 
 
-class SemanticDiscrepancyTests(TestCase):
+class DiscrepancyTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("a", password="pw12345!")
         self.other = User.objects.create_user("b", password="pw12345!")
@@ -563,67 +651,46 @@ class SemanticDiscrepancyTests(TestCase):
         self.team = Team.objects.create(name="t")
         self.team.members.add(self.user, self.other)
         self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.user, record="결정: 로그인은 이메일만")
-        self.question = CheckQuestion.objects.create(meeting=self.meeting, text="로그인 범위는?")
+        self.question = CheckQuestion.objects.create(
+            meeting=self.meeting, text="로그인 범위는?",
+            choices=["이메일만", "이메일+소셜", "소셜만", "모름"], correct_choice=0,
+            evidence="로그인은 이메일만 지원한다", status=CheckQuestion.STATUS_PUBLISHED,
+        )
 
     def _answer(self, a, b):
-        Answer.objects.create(question=self.question, user=self.user, text=a)
-        Answer.objects.create(question=self.question, user=self.other, text=b)
+        Answer.objects.create(question=self.question, user=self.user, selected_choice=a)
+        Answer.objects.create(question=self.question, user=self.other, selected_choice=b)
 
-    def test_identical_answers_are_consistent_without_llm(self):
-        self._answer("이메일", "이메일")
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate") as gen:
-            self.assertTrue(services.is_consistent(["이메일", "이메일"], record="r", question="q"))
-        gen.assert_not_called()
-
-    def test_llm_accepts_different_wording_with_same_meaning(self):
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="일치"):
-            self.assertTrue(services.is_consistent(["이메일 로그인", "메일로 로그인"], record="r", question="q"))
-
-    def test_llm_flags_different_understanding(self):
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="불일치"):
-            self.assertFalse(services.is_consistent(["이메일 로그인", "소셜 로그인 포함"], record="r", question="q"))
-
-    def test_without_llm_different_wording_is_flagged(self):
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(services.is_consistent(["이메일 로그인", "메일로 로그인"], record="r", question="q"))
-
-    def test_llm_error_falls_back_to_flagged(self):
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", side_effect=OSError("down")):
-            self.assertFalse(services.is_consistent(["a", "b"], record="r", question="q"))
-
-    def test_view_uses_llm_verdict(self):
-        self._answer("이메일 로그인", "메일로 로그인")
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="일치"):
-            r = self.client.get(reverse("verification", args=[self.meeting.id]))
+    def test_identical_correct_answers_show_no_discrepancy(self):
+        self._answer(0, 0)
+        r = self.client.get(reverse("verification", args=[self.meeting.id]))
         self.assertContains(r, "엇갈린 답변이 없습니다.")
 
+    def test_wrong_answer_flagged_as_discrepancy(self):
+        self._answer(0, 1)
+        r = self.client.get(reverse("verification", args=[self.meeting.id]))
+        self.assertNotContains(r, "엇갈린 답변이 없습니다.")
+        self.assertContains(r, "a: 이메일만")
+        self.assertContains(r, "b: 이메일+소셜")
+
     def test_progress_bar_shows_answer_completion(self):
-        Answer.objects.create(question=self.question, user=self.user, text="이메일")
+        Answer.objects.create(question=self.question, user=self.user, selected_choice=0)
         r = self.client.get(reverse("verification", args=[self.meeting.id]))
         self.assertEqual(r.context["answered_slots"], 1)
         self.assertEqual(r.context["total_slots"], 2)
         self.assertEqual(r.context["progress_pct"], 50)
         self.assertContains(r, "1 / 2")
 
-    def test_view_shows_llm_explanation_for_discrepancy(self):
-        self._answer("이메일 로그인", "소셜 로그인 포함")
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(
-            services, "_generate", side_effect=["불일치", "소셜 로그인 포함 여부에 대한 해석이 다릅니다."]
-        ):
-            r = self.client.get(reverse("verification", args=[self.meeting.id]))
-        self.assertContains(r, "소셜 로그인 포함 여부에 대한 해석이 다릅니다.")
+    def test_view_shows_evidence_for_discrepancy(self):
+        self._answer(0, 1)
+        r = self.client.get(reverse("verification", args=[self.meeting.id]))
+        self.assertContains(r, "로그인은 이메일만 지원한다")
 
-    def test_explain_discrepancy_returns_empty_without_llm(self):
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(
-                services.explain_discrepancy("record", "question", ["a", "b"]), ""
-            )
-
-    def test_explain_discrepancy_falls_back_silently_on_llm_error(self):
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", side_effect=OSError("down")):
-            self.assertEqual(
-                services.explain_discrepancy("record", "question", ["a", "b"]), ""
-            )
+    def test_draft_questions_are_not_counted_in_verification(self):
+        self.question.status = CheckQuestion.STATUS_DRAFT
+        self.question.save()
+        r = self.client.get(reverse("verification", args=[self.meeting.id]))
+        self.assertEqual(r.context["total_slots"], 0)
 
 
 class QuestionTimingTests(TestCase):
@@ -635,16 +702,20 @@ class QuestionTimingTests(TestCase):
         self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.user)
 
     def test_no_questions_are_created_before_record_exists(self):
-        r = self.client.get(reverse("understanding", args=[self.meeting.id]))
+        r = self.client.get(reverse("question_review", args=[self.meeting.id]))
         self.assertEqual(CheckQuestion.objects.filter(meeting=self.meeting).count(), 0)
-        self.assertContains(r, "회의록이 만들어지면 질문이 생성됩니다.")
+        self.assertContains(r, "아직 문제가 없습니다")
 
     def test_questions_are_created_once_record_exists(self):
         self.meeting.record = "결정: A안"
         self.meeting.save()
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="질문1\n질문2"):
-            self.client.get(reverse("understanding", args=[self.meeting.id]))
-            self.client.get(reverse("understanding", args=[self.meeting.id]))
+        raw = json.dumps([
+            {"question": "질문1", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""},
+            {"question": "질문2", "choices": ["a", "b", "c", "d"], "answer_index": 1, "evidence": ""},
+        ], ensure_ascii=False)
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=raw):
+            self.client.get(reverse("question_review", args=[self.meeting.id]))
+            self.client.get(reverse("question_review", args=[self.meeting.id]))
         self.assertEqual(list(CheckQuestion.objects.filter(meeting=self.meeting).values_list("text", flat=True)), ["질문1", "질문2"])
 
 
@@ -879,29 +950,36 @@ class FollowupTests(TestCase):
         with self.assertRaises(IntegrityError), transaction.atomic():
             CheckQuestion.objects.create(meeting=self.meeting, text="q2", order=0)
 
-    def test_understanding_does_not_duplicate_existing_questions(self):
+    def test_question_review_does_not_duplicate_existing_questions(self):
         CheckQuestion.objects.create(meeting=self.meeting, text="기존", order=0)
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="새1\n새2"):
-            self.client.get(reverse("understanding", args=[self.meeting.id]))
+        raw = json.dumps([{"question": "새1", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""}], ensure_ascii=False)
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=raw):
+            self.client.get(reverse("question_review", args=[self.meeting.id]))
         self.assertEqual(CheckQuestion.objects.filter(meeting=self.meeting, order=0).count(), 1)
 
+    def _published_question(self, text="Q", order=0):
+        return CheckQuestion.objects.create(
+            meeting=self.meeting, text=text, order=order,
+            choices=["a", "b", "c", "d"], correct_choice=0, status=CheckQuestion.STATUS_PUBLISHED,
+        )
+
     def test_verification_lists_members_who_have_not_answered(self):
-        question = CheckQuestion.objects.create(meeting=self.meeting, text="Q", order=0)
-        Answer.objects.create(question=question, user=self.user, text="답")
+        question = self._published_question()
+        Answer.objects.create(question=question, user=self.user, selected_choice=0)
         r = self.client.get(reverse("verification", args=[self.meeting.id]))
         self.assertContains(r, "아직 답하지 않은 팀원")
         self.assertContains(r, "b")
 
     def test_reminder_text_lists_pending_usernames(self):
-        CheckQuestion.objects.create(meeting=self.meeting, text="Q", order=0)
+        self._published_question()
         r = self.client.get(reverse("verification", args=[self.meeting.id]))
         self.assertIn("a, b", r.context["reminder_text"])
         self.assertContains(r, "복사해서 알리기")
 
     def test_no_reminder_button_when_everyone_answered(self):
-        question = CheckQuestion.objects.create(meeting=self.meeting, text="Q", order=0)
-        Answer.objects.create(question=question, user=self.user, text="답1")
-        Answer.objects.create(question=question, user=self.other, text="답2")
+        question = self._published_question()
+        Answer.objects.create(question=question, user=self.user, selected_choice=0)
+        Answer.objects.create(question=question, user=self.other, selected_choice=1)
         r = self.client.get(reverse("verification", args=[self.meeting.id]))
         self.assertEqual(r.context["reminder_text"], "")
         self.assertNotContains(r, "복사해서 알리기")

@@ -1,10 +1,10 @@
 {% extends "meetalign/base.html" %}
-{% block note %}<li>주최자(팀장)만 익명 질문을 보고 답할 수 있다.</li>{% endblock %}
+{% block note %}<li>주최자는 받은 질문 전체(작성자 비공개)를 보고 답한다. 팀원은 본인이 보낸 질문과 그 답변만 볼 수 있다.</li>{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
     <div class="crumb"><a href="{% url 'meeting_detail' meeting.id %}">{{ meeting.title }}</a></div>
-    <h1>익명 질문함</h1>
+    <h1>{% if is_host %}익명 질문함{% else %}내가 보낸 질문{% endif %}</h1>
   </div>
 </div>
 <div class="card elevated">
@@ -16,9 +16,11 @@
       {% if q.answer %}<div class="bubble" style="margin-top:8px">답변: {{ q.answer }}</div>{% else %}<span class="badge processing" style="margin-top:6px">아직 답변 전</span>{% endif %}
     </li>
   {% empty %}
-    <li class="empty"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11V6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v5"/><path d="M4 11h4.5a1 1 0 0 1 .9.55L10.5 14h3l1.1-2.45a1 1 0 0 1 .9-.55H20"/><path d="M4 11v6a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6"/></svg>받은 익명 질문이 없습니다.</li>
+    <li class="empty"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11V6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v5"/><path d="M4 11h4.5a1 1 0 0 1 .9.55L10.5 14h3l1.1-2.45a1 1 0 0 1 .9-.55H20"/><path d="M4 11v6a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6"/></svg>{% if is_host %}받은 익명 질문이 없습니다.{% else %}아직 보낸 질문이 없습니다. 대화창에서 주최자에게 익명으로 물어보세요.{% endif %}</li>
   {% endfor %}
   </ul>
+  {% if is_host %}
   <div class="row" style="margin-top:16px"><a class="btn" href="{% url 'answers' meeting.id %}">질문에 답변하기</a></div>
+  {% endif %}
 </div>
 {% endblock %}

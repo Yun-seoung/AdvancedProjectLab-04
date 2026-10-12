@@ -16,13 +16,18 @@
   {% if discrepancies %}
     <div class="notice">팀원끼리 다르게 이해한 질문이 있습니다. 회의록을 함께 확인해 보세요.</div>
     <ul class="plain">
-    {% for q, answers, explanation in discrepancies %}
+    {% for q, rows in discrepancies %}
       <li class="item" style="display:block">
         <div class="title">{{ q.text }}</div>
         <ul class="plain" style="margin-top:8px">
-        {% for a in answers %}<li class="muted"><span style="color:var(--ink)">{{ a.user.username }}: {{ a.text }}</span></li>{% endfor %}
+        {% for row in rows %}
+          <li class="muted">
+            <span style="color:var(--ink)">{{ row.username }}: {{ row.text }}</span>
+            {% if row.correct %}<span class="badge done">정답</span>{% else %}<span class="badge failed">오답</span>{% endif %}
+          </li>
+        {% endfor %}
         </ul>
-        {% if explanation %}<div class="bubble" style="margin-top:10px">{{ explanation }}</div>{% endif %}
+        {% if q.evidence %}<div class="bubble" style="margin-top:10px">근거: {{ q.evidence }}</div>{% endif %}
       </li>
     {% endfor %}
     </ul>

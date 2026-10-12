@@ -10,11 +10,17 @@
 <div class="card elevated">
   <div class="item-icon" style="margin-bottom:16px"><svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 12 2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg></div>
   <form method="post">{% csrf_token %}
-    {% for q, ans in rows %}
-      <div class="field"><label for="q{{ q.id }}">{{ forloop.counter }}. {{ q.text }}</label>
-        <input id="q{{ q.id }}" name="q{{ q.id }}" value="{{ ans }}" placeholder="내가 이해한 내용을 적어 주세요"></div>
+    {% for q, selected in rows %}
+      <div class="field"><span class="label">{{ forloop.counter }}. {{ q.text }}</span>
+        {% for choice in q.choices %}
+        <label class="row" style="gap:10px;font-weight:400;cursor:pointer">
+          <input type="radio" name="q{{ q.id }}" value="{{ forloop.counter0 }}" style="width:auto" {% if selected == forloop.counter0 %}checked{% endif %}>
+          {{ choice }}
+        </label>
+        {% endfor %}
+      </div>
     {% empty %}
-      <div class="empty"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11V6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v5"/><path d="M4 11h4.5a1 1 0 0 1 .9.55L10.5 14h3l1.1-2.45a1 1 0 0 1 .9-.55H20"/><path d="M4 11v6a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6"/></svg>아직 질문이 없습니다. 회의록이 만들어지면 질문이 생성됩니다.</div>
+      <div class="empty"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11V6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v5"/><path d="M4 11h4.5a1 1 0 0 1 .9.55L10.5 14h3l1.1-2.45a1 1 0 0 1 .9-.55H20"/><path d="M4 11v6a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6"/></svg>아직 질문이 공개되지 않았습니다. 주최자가 문제를 검토하는 중입니다.</div>
     {% endfor %}
     {% if rows %}<div class="row" style="margin-top:8px"><button>답변 저장</button></div>{% endif %}
   </form>
