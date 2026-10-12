@@ -34,6 +34,10 @@ if not SECRET_KEY:
 # SECURITY WARNING: don't run with debug turned on in production!
 ALLOWED_HOSTS = [h for h in os.environ.get('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',') if h]
 
+# Cloudflare Tunnel 등 TLS를 앞단에서 종료하는 프록시를 쓸 때, 브라우저가 보내는
+# https Origin과 Django가 인식하는 scheme(http)이 달라서 CSRF 검증이 막히는 걸 방지한다.
+CSRF_TRUSTED_ORIGINS = [o for o in os.environ.get('DJANGO_CSRF_TRUSTED_ORIGINS', '').split(',') if o]
+
 
 # Application definition
 

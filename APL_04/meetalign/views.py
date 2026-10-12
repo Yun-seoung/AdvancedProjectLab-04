@@ -150,6 +150,8 @@ def meeting_detail(request, meeting_id):
             tasks.start_processing(added.id)
         if request.POST.get("action") == "end":
             Meeting.objects.filter(pk=meeting.pk).update(ended=True)
+            if meeting.host_id == request.user.id:
+                return redirect("question_review", meeting_id=meeting.id)
             return redirect("understanding", meeting_id=meeting.id)
         return redirect("meeting_result", meeting_id=meeting.id)
     return render(request, "meetalign/meeting_detail.html", {"meeting": meeting})
@@ -193,7 +195,7 @@ def chat(request, meeting_id):
             if meeting.ended:
                 error = "종료된 회의에는 익명 질문을 보낼 수 없습니다."
             else:
-                Question.objects.create(meeting=meeting, text=text)
+                Question.objects.create(meeting=meeting, text=text, user=request.user)
         else:
             history = list(
                 ChatMessage.objects.filter(meeting=meeting, user=request.user)
@@ -218,9 +220,12 @@ def _require_host(meeting, user):
 
 @login_required
 def inbox(request, meeting_id):
+    # 주최자는 받은 질문 전체(작성자 비공개)를 보고 답한다. 팀원은 본인이 보낸 질문과
+    # 그 답변만 볼 수 있다 — 익명이라는 취지상 다른 사람이 받은 답은 보이면 안 된다.
     meeting = _meeting(request, meeting_id)
-    _require_host(meeting, request.user)
-    return render(request, "meetalign/inbox.html", {"meeting": meeting, "questions": meeting.questions.all()})
+    is_host = meeting.host_id == request.user.id
+    questions = meeting.questions.all() if is_host else meeting.questions.filter(user=request.user)
+    return render(request, "meetalign/inbox.html", {"meeting": meeting, "questions": questions, "is_host": is_host})
 
 
 @login_required
@@ -242,35 +247,74 @@ def answers(request, meeting_id):
 
 def _find_discrepancies(meeting):
     found = []
-    for question in meeting.check_questions.all():
+    for question in meeting.check_questions.filter(status=CheckQuestion.STATUS_PUBLISHED):
         answers = list(question.answers.select_related("user"))
-        texts = [a.text for a in answers]
-        if not services.is_consistent(texts, record=meeting.record, question=question.text):
-            explanation = services.explain_discrepancy(meeting.record, question.text, texts)
-            found.append((question, answers, explanation))
+        if answers and any(a.selected_choice != question.correct_choice for a in answers):
+            rows = [{"username": a.user.username, "text": question.choices[a.selected_choice], "correct": a.is_correct} for a in answers]
+            found.append((question, rows))
     return found
+
+
+@login_required
+def question_review(request, meeting_id):
+    """주최자가 AI가 낸 객관식 문제를 검토·수정하고, 준비되면 참가자에게 공개한다."""
+    meeting = _meeting(request, meeting_id)
+    _require_host(meeting, request.user)
+    if meeting.record and not meeting.check_questions.exists():
+        for order, q in enumerate(services.generate_check_questions(meeting)):
+            try:
+                with transaction.atomic():
+                    CheckQuestion.objects.create(
+                        meeting=meeting, text=q["text"], choices=q["choices"],
+                        correct_choice=q["correct_choice"], evidence=q.get("evidence", ""), order=order,
+                    )
+            except IntegrityError:
+                break
+    if request.method == "POST":
+        if request.POST.get("action") == "publish":
+            meeting.check_questions.filter(status=CheckQuestion.STATUS_DRAFT).update(status=CheckQuestion.STATUS_PUBLISHED)
+        else:
+            question = get_object_or_404(CheckQuestion, pk=request.POST.get("question_id"), meeting=meeting)
+            text = request.POST.get("text", "").strip()
+            choices = [request.POST.get("choice_%d" % i, "").strip() for i in range(4)]
+            evidence = request.POST.get("evidence", "").strip()
+            try:
+                correct_choice = int(request.POST.get("correct_choice", question.correct_choice))
+            except ValueError:
+                correct_choice = question.correct_choice
+            if text and all(choices) and 0 <= correct_choice < 4:
+                question.text = text
+                question.choices = choices
+                question.correct_choice = correct_choice
+                question.evidence = evidence
+                question.save()
+        return redirect("question_review", meeting_id=meeting.id)
+    questions = list(meeting.check_questions.all())
+    all_published = bool(questions) and all(q.status == CheckQuestion.STATUS_PUBLISHED for q in questions)
+    return render(request, "meetalign/question_review.html", {
+        "meeting": meeting, "questions": questions, "all_published": all_published,
+    })
 
 
 @login_required
 def understanding(request, meeting_id):
     meeting = _meeting(request, meeting_id)
-    if meeting.record and not meeting.check_questions.exists():
-        for order, text in enumerate(services.check_questions(meeting)):
-            try:
-                with transaction.atomic():
-                    CheckQuestion.objects.create(meeting=meeting, text=text, order=order)
-            except IntegrityError:
-                break
     user = request.user
-    questions = list(meeting.check_questions.all())
+    questions = list(meeting.check_questions.filter(status=CheckQuestion.STATUS_PUBLISHED))
     if request.method == "POST":
         for question in questions:
-            text = request.POST.get("q%d" % question.id, "").strip()
-            if text:
-                Answer.objects.update_or_create(question=question, user=user, defaults={"text": text})
+            raw = request.POST.get("q%d" % question.id)
+            if raw is None or raw == "":
+                continue
+            try:
+                selected = int(raw)
+            except ValueError:
+                continue
+            if 0 <= selected < len(question.choices):
+                Answer.objects.update_or_create(question=question, user=user, defaults={"selected_choice": selected})
         return redirect("understanding", meeting_id=meeting.id)
-    my_answers = {a.question_id: a.text for a in Answer.objects.filter(question__meeting=meeting, user=user)}
-    rows = [(q, my_answers.get(q.id, "")) for q in questions]
+    my_answers = {a.question_id: a.selected_choice for a in Answer.objects.filter(question__meeting=meeting, user=user)}
+    rows = [(q, my_answers.get(q.id)) for q in questions]
     return render(request, "meetalign/understanding.html", {"meeting": meeting, "rows": rows})
 
 
@@ -278,7 +322,7 @@ def understanding(request, meeting_id):
 def verification(request, meeting_id):
     meeting = _meeting(request, meeting_id)
     members = list(meeting.team.members.all())
-    questions = list(meeting.check_questions.all())
+    questions = list(meeting.check_questions.filter(status=CheckQuestion.STATUS_PUBLISHED))
     pending = []
     answered_slots = 0
     for question in questions:
