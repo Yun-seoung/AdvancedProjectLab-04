@@ -565,11 +565,22 @@ class LocalSTTTests(TestCase):
             self.assertIsNone(services.transcribe("/nonexistent.wav"))
 
     def test_transcribe_passes_model_and_korean_language(self):
-        fake = MagicMock()
-        fake.transcribe.return_value = {"text": " 안녕하세요 "}
-        with patch.dict(os.environ, {"MLX_WHISPER_MODEL": "mlx-community/whisper-large-v3-turbo"}), patch.dict(sys.modules, {"mlx_whisper": fake}):
+        fake_result = MagicMock(returncode=0, stdout=json.dumps(" 안녕하세요 "), stderr="")
+        with patch.dict(os.environ, {"MLX_WHISPER_MODEL": "mlx-community/whisper-large-v3-turbo"}), patch.object(
+            services.subprocess, "run", return_value=fake_result
+        ) as run:
             self.assertEqual(services.transcribe("/x.wav"), "안녕하세요")
-        fake.transcribe.assert_called_once_with("/x.wav", path_or_hf_repo="mlx-community/whisper-large-v3-turbo", language="ko")
+        args = run.call_args[0][0]
+        self.assertIn("/x.wav", args)
+        self.assertIn("mlx-community/whisper-large-v3-turbo", args)
+
+    def test_transcribe_raises_on_subprocess_failure(self):
+        fake_result = MagicMock(returncode=1, stdout="", stderr="ffmpeg decode error")
+        with patch.dict(os.environ, {"MLX_WHISPER_MODEL": "mlx-community/whisper-large-v3-turbo"}), patch.object(
+            services.subprocess, "run", return_value=fake_result
+        ):
+            with self.assertRaises(RuntimeError):
+                services.transcribe("/x.wav")
 
     @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
     def test_upload_without_model_leaves_record_empty(self):
