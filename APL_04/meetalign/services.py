@@ -3,6 +3,8 @@
 import json
 import os
 import re
+import subprocess
+import sys
 import urllib.request
 
 FAKE_CHECK_QUESTIONS = [
@@ -23,12 +25,30 @@ def _is_korean_or_english(text):
     return not _FOREIGN_SCRIPT.search(text)
 
 
+TRANSCRIBE_TIMEOUT_SECONDS = 1800
+_TRANSCRIBE_SCRIPT = (
+    "import json, mlx_whisper, sys\n"
+    "result = mlx_whisper.transcribe(sys.argv[1], path_or_hf_repo=sys.argv[2], language='ko')\n"
+    "print(json.dumps(result['text']))\n"
+)
+
+
 def transcribe(recording_path):
+    """mlx-whisper(Apple MLX, GPU) 호출은 별도 프로세스로 띄워서 실행한다. Django 개발 서버는
+    요청마다 새 스레드를 쓰는데, mlx의 GPU 스트림이 스레드에 묶여 있어서 같은 프로세스 안에서
+    다른 스레드가 연달아 호출하면 간헐적으로 'no Stream(gpu, 1) in current thread' 에러가 난다.
+    매번 새 프로세스에서 실행하면 항상 그 프로세스의 메인 스레드에서 처음 쓰는 상태가 되어
+    이 문제를 피할 수 있다."""
     model = os.environ.get("MLX_WHISPER_MODEL")
     if not model:
         return None
-    import mlx_whisper
-    return mlx_whisper.transcribe(recording_path, path_or_hf_repo=model, language="ko")["text"].strip()
+    result = subprocess.run(
+        [sys.executable, "-c", _TRANSCRIBE_SCRIPT, recording_path, model],
+        capture_output=True, text=True, timeout=TRANSCRIBE_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or "mlx_whisper 전사 실패").strip()[-500:])
+    return json.loads(result.stdout.strip()).strip()
 
 
 def _generate(prompt, temperature=None):
