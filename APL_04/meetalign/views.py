@@ -261,24 +261,37 @@ def _find_discrepancies(meeting):
     return found
 
 
+def _create_check_questions(meeting, generated, batch):
+    for order, q in enumerate(generated):
+        try:
+            with transaction.atomic():
+                CheckQuestion.objects.create(
+                    meeting=meeting, text=q["text"], choices=q["choices"],
+                    correct_choice=q["correct_choice"], evidence=q.get("evidence", ""),
+                    order=order, batch=batch,
+                )
+        except IntegrityError:
+            break
+
+
 @login_required
 def question_review(request, meeting_id):
     """주최자가 AI가 낸 객관식 문제를 검토·수정하고, 준비되면 참가자에게 공개한다."""
     meeting = _meeting(request, meeting_id)
     _require_host(meeting, request.user)
     if meeting.transcript and not meeting.check_questions.exists():
-        for order, q in enumerate(services.generate_check_questions(meeting)):
-            try:
-                with transaction.atomic():
-                    CheckQuestion.objects.create(
-                        meeting=meeting, text=q["text"], choices=q["choices"],
-                        correct_choice=q["correct_choice"], evidence=q.get("evidence", ""), order=order,
-                    )
-            except IntegrityError:
-                break
+        _create_check_questions(meeting, services.generate_check_questions(meeting), batch=0)
+        Meeting.objects.filter(pk=meeting.pk).update(check_questions_transcript=meeting.transcript)
+        meeting.check_questions_transcript = meeting.transcript
     if request.method == "POST":
         if request.POST.get("action") == "publish":
             meeting.check_questions.filter(status=CheckQuestion.STATUS_DRAFT).update(status=CheckQuestion.STATUS_PUBLISHED)
+        elif request.POST.get("action") == "generate_more":
+            new_text = meeting.transcript[len(meeting.check_questions_transcript):].strip()
+            last = meeting.check_questions.order_by("-batch").first()
+            next_batch = (last.batch + 1) if last else 0
+            _create_check_questions(meeting, services.generate_check_questions_from_text(new_text), batch=next_batch)
+            Meeting.objects.filter(pk=meeting.pk).update(check_questions_transcript=meeting.transcript)
         else:
             for question in meeting.check_questions.all():
                 text = request.POST.get("text_%d" % question.id, "").strip()
@@ -297,8 +310,12 @@ def question_review(request, meeting_id):
         return redirect("question_review", meeting_id=meeting.id)
     questions = list(meeting.check_questions.all())
     all_published = bool(questions) and all(q.status == CheckQuestion.STATUS_PUBLISHED for q in questions)
+    has_new_transcript = bool(
+        meeting.check_questions_transcript and meeting.transcript != meeting.check_questions_transcript
+    )
     return render(request, "meetalign/question_review.html", {
         "meeting": meeting, "questions": questions, "all_published": all_published,
+        "has_new_transcript": has_new_transcript,
     })
 
 
