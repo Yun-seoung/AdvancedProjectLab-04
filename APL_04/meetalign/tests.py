@@ -795,6 +795,74 @@ class QuestionTimingTests(TestCase):
             self.client.get(reverse("question_review", args=[self.meeting.id]))
         self.assertEqual(list(CheckQuestion.objects.filter(meeting=self.meeting).values_list("text", flat=True)), ["질문1", "질문2"])
 
+    def test_no_new_transcript_banner_right_after_initial_generation(self):
+        self.meeting.transcript = "오늘 회의에서 A안으로 진행하기로 결정했습니다."
+        self.meeting.save()
+        raw = json.dumps([{"question": "질문1", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""}], ensure_ascii=False)
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=raw):
+            self.client.get(reverse("question_review", args=[self.meeting.id]))
+        r = self.client.get(reverse("question_review", args=[self.meeting.id]))
+        self.assertNotContains(r, "추가 질문 생성")
+
+    def test_new_transcript_after_additional_recording_shows_banner(self):
+        self.meeting.transcript = "오늘 회의에서 A안으로 진행하기로 결정했습니다."
+        self.meeting.save()
+        raw = json.dumps([{"question": "질문1", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""}], ensure_ascii=False)
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=raw):
+            self.client.get(reverse("question_review", args=[self.meeting.id]))
+        self.meeting.refresh_from_db()
+        self.meeting.transcript += " 추가로 녹음된 내용입니다."
+        self.meeting.save()
+        r = self.client.get(reverse("question_review", args=[self.meeting.id]))
+        self.assertContains(r, "추가 질문 생성")
+
+    def test_generate_more_only_passes_new_transcript_portion(self):
+        self.meeting.transcript = "원본 내용입니다."
+        self.meeting.check_questions_transcript = "원본 내용입니다."
+        self.meeting.save()
+        CheckQuestion.objects.create(
+            meeting=self.meeting, text="기존질문", choices=["a", "b", "c", "d"], correct_choice=0, batch=0, order=0,
+        )
+        self.meeting.transcript = "원본 내용입니다. 추가된 내용입니다."
+        self.meeting.save()
+        with patch.object(services, "generate_check_questions_from_text", return_value=[]) as gen:
+            self.client.post(reverse("question_review", args=[self.meeting.id]), {"action": "generate_more"})
+        gen.assert_called_once_with("추가된 내용입니다.")
+
+    def test_generate_more_creates_new_batch_without_touching_existing(self):
+        self.meeting.transcript = "원본 내용입니다."
+        self.meeting.save()
+        raw1 = json.dumps([{"question": "질문1", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""}], ensure_ascii=False)
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=raw1):
+            self.client.get(reverse("question_review", args=[self.meeting.id]))
+
+        self.meeting.refresh_from_db()
+        self.meeting.transcript += " 추가 녹음 내용입니다."
+        self.meeting.save()
+
+        raw2 = json.dumps([{"question": "질문2", "choices": ["a", "b", "c", "d"], "answer_index": 1, "evidence": ""}], ensure_ascii=False)
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=raw2):
+            self.client.post(reverse("question_review", args=[self.meeting.id]), {"action": "generate_more"})
+
+        q1 = CheckQuestion.objects.get(text="질문1")
+        q2 = CheckQuestion.objects.get(text="질문2")
+        self.assertEqual(q1.batch, 0)
+        self.assertEqual(q2.batch, 1)
+
+    def test_understanding_page_groups_questions_by_batch(self):
+        self.meeting.transcript = "원본 내용입니다."
+        self.meeting.save()
+        CheckQuestion.objects.create(
+            meeting=self.meeting, text="최초질문", choices=["a", "b", "c", "d"], correct_choice=0,
+            batch=0, order=0, status=CheckQuestion.STATUS_PUBLISHED,
+        )
+        CheckQuestion.objects.create(
+            meeting=self.meeting, text="추가질문", choices=["a", "b", "c", "d"], correct_choice=0,
+            batch=1, order=0, status=CheckQuestion.STATUS_PUBLISHED,
+        )
+        r = self.client.get(reverse("understanding", args=[self.meeting.id]))
+        self.assertContains(r, "추가 질문 1차")
+
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(), BACKGROUND_RECORDING=False)
 class BackgroundProcessingTests(TestCase):

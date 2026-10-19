@@ -125,7 +125,13 @@ def generate_check_questions(meeting):
     문항 개수는 고정이 아니라 실제로 찾은 모호한 표현 개수만큼(최대 5개).
     LLM이 요약본(meeting.record)이 아니라 전사 원문(meeting.transcript)을 보고 문제를 내게 해서,
     요약 과정에서 맥락(담당자/기한 등)이 뒤섞여 엉뚱하게 연결되는 환각을 줄인다."""
-    source = meeting.transcript
+    return generate_check_questions_from_text(meeting.transcript)
+
+
+def generate_check_questions_from_text(source):
+    """generate_check_questions와 같은 로직이지만 회의 전체가 아니라 임의의 전사
+    텍스트 조각을 받는다. 녹음이 추가된 뒤 새로 늘어난 부분만 넘겨서 추가 질문을
+    만들 때 쓴다."""
     if not (_enabled() and source):
         return list(FAKE_CHECK_QUESTIONS)
     prompt = (

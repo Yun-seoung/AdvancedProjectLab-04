@@ -15,6 +15,16 @@
   {% endif %}
 </div>
 
+{% if has_new_transcript %}
+<div class="card elevated">
+  <p>녹음이 추가되어 전사본이 갱신됐습니다. 추가된 내용으로 질문을 더 만들까요?</p>
+  <form method="post">{% csrf_token %}
+    <input type="hidden" name="action" value="generate_more">
+    <button type="submit" class="secondary">추가 질문 생성</button>
+  </form>
+</div>
+{% endif %}
+
 {% if not questions %}
 <div class="card elevated">
   <div class="empty"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11a2 2 0 1 0 4 0 2 2 0 0 0-4 0Z"/><path d="M12 7v.01M12 16v4"/></svg>아직 문제가 없습니다. 회의록이 만들어지면 자동으로 문제 초안이 생성됩니다.</div>
@@ -24,6 +34,7 @@
 {% if questions %}
 <form method="post">{% csrf_token %}
 {% for q in questions %}
+{% ifchanged q.batch %}<h2 class="section-title">{% if q.batch == 0 %}문제{% else %}추가 문제 {{ q.batch }}차{% endif %}</h2>{% endifchanged %}
 <div class="card elevated">
   <div class="row" style="justify-content:space-between;margin-bottom:12px">
     <span class="muted">{{ forloop.counter }}번</span>

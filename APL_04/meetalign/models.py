@@ -40,6 +40,9 @@ class Meeting(models.Model):
     record = models.TextField(blank=True)
     transcript = models.TextField(blank=True)
     processing_status = models.CharField(max_length=20, blank=True, default="")
+    # 이해도 검증 질문을 마지막으로 생성했을 때의 전사본 스냅샷. 그 뒤로 녹음이
+    # 추가되어 transcript가 길어지면(이 값과 달라지면) "추가 질문 생성"을 제안할 수 있다.
+    check_questions_transcript = models.TextField(blank=True, default="")
 
     def __str__(self):
         return self.title
@@ -117,11 +120,14 @@ class CheckQuestion(models.Model):
     evidence = models.TextField(blank=True, default="")
     status = models.CharField(max_length=10, choices=[(STATUS_DRAFT, "draft"), (STATUS_PUBLISHED, "published")], default=STATUS_DRAFT)
     order = models.PositiveSmallIntegerField(default=0)
+    # 몇 번째로 생성된 질문 묶음인지(0 = 최초 생성분, 1 = 녹음 추가 후 첫 추가분, ...).
+    # 팀원 화면에서 묶음별로 나눠서 보여주는 데 쓴다.
+    batch = models.PositiveSmallIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["order", "id"]
-        constraints = [models.UniqueConstraint(fields=["meeting", "order"], name="unique_check_question_order")]
+        ordering = ["batch", "order", "id"]
+        constraints = [models.UniqueConstraint(fields=["meeting", "batch", "order"], name="unique_check_question_batch_order")]
 
     def __str__(self):
         return self.text[:30]
