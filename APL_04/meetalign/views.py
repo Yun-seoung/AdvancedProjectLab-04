@@ -337,9 +337,21 @@ def question_review(request, meeting_id):
     has_new_transcript = bool(
         meeting.check_questions_transcript and meeting.transcript != meeting.check_questions_transcript
     )
+    # 미완료 참가자 이름은 이 화면(진행자 전용)에서만 모은다. 위 _require_host를 통과한
+    # 뒤에만 조회하므로, 참가자 요청에는 이름이 담긴 HTML이 애초에 만들어지지 않는다.
+    quiz_open = any(q.status == CheckQuestion.STATUS_PUBLISHED for q in questions)
+    pending = quiz_status.pending_participants(meeting) if quiz_open else []
+    participant_total = quiz_status.participant_count(meeting) if quiz_open else 0
+    participant_done = participant_total - len(pending)
     return render(request, "meetalign/question_review.html", {
         "meeting": meeting, "questions": questions, "all_published": all_published,
         "has_new_transcript": has_new_transcript,
+        "quiz_open": quiz_open,
+        # 이름은 '완료 여부'에만 연결한다 — 누가 어떤 보기를 골랐는지는 담지 않는다.
+        "pending_rows": [{"name": user.username, "answered": done, "total": total} for user, done, total in pending],
+        "participant_total": participant_total,
+        "participant_done": participant_done,
+        "participant_pct": round(participant_done * 100 / participant_total) if participant_total else 0,
     })
 
 
