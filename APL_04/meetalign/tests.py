@@ -15,6 +15,22 @@ from django.utils import timezone
 from . import services, tasks, views
 from .models import Answer, ChatMessage, CheckQuestion, Meeting, Question, Recording, Team
 
+# 셸에 실행용 LLM/STT 환경변수가 설정돼 있어도 테스트가 실제 모델/API를 호출하지 않고 항상 같은 결과가
+# 나오도록, 모듈 시작 시 잠시 치웠다가 끝나면 되돌린다. 필요한 테스트는 각자 patch.dict로 값을 넣는다.
+_MODEL_ENV_VARS = ("GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_TIMEOUT", "OLLAMA_MODEL", "MLX_WHISPER_MODEL")
+_saved_model_env = {}
+
+
+def setUpModule():
+    for name in _MODEL_ENV_VARS:
+        if name in os.environ:
+            _saved_model_env[name] = os.environ.pop(name)
+
+
+def tearDownModule():
+    os.environ.update(_saved_model_env)
+    _saved_model_env.clear()
+
 
 class AuthTests(TestCase):
     def test_signup_creates_user_and_logs_in(self):
@@ -941,9 +957,129 @@ class BackgroundProcessingTests(TestCase):
             captured["body"] = json.loads(request.data.decode("utf-8"))
             return FakeResponse()
 
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1", "GEMINI_API_KEY": ""}), patch("urllib.request.urlopen", side_effect=fake_urlopen):
             services._generate("hi")
         self.assertEqual(captured["body"]["options"]["num_ctx"], 16384)
+
+    def _fake_gemini_urlopen(self, captured, payload):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            captured["headers"] = dict(request.header_items())
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+        return fake_urlopen
+
+    def test_gemini_needs_both_api_key_and_model(self):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True):
+            self.assertTrue(services._enabled())
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1"}, clear=True):
+            self.assertFalse(services._enabled())
+        with patch.dict(os.environ, {"GEMINI_MODEL": "gemini-x"}, clear=True):
+            self.assertFalse(services._enabled())
+
+    def test_gemini_request_and_response(self):
+        captured = {}
+        payload = {"candidates": [{"content": {"parts": [{"text": " 답변 "}]}}]}
+        fake = self._fake_gemini_urlopen(captured, payload)
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x", "OLLAMA_MODEL": "m1"}, clear=True), patch("urllib.request.urlopen", side_effect=fake):
+            result = services._generate("hi", temperature=0.3)
+        self.assertEqual(result, "답변")
+        self.assertIn("/models/gemini-x:generateContent", captured["url"])
+        self.assertEqual(captured["headers"].get("X-goog-api-key"), "k1")
+        self.assertEqual(captured["body"]["contents"][0]["parts"][0]["text"], "hi")
+        self.assertEqual(captured["body"]["generationConfig"]["temperature"], 0.3)
+
+    def test_gemini_empty_response_falls_back(self):
+        fake = self._fake_gemini_urlopen({}, {"promptFeedback": {"blockReason": "SAFETY"}})
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), patch("urllib.request.urlopen", side_effect=fake):
+            self.assertRaises(OSError, services._generate, "hi")
+            self.assertEqual(services.summarize("전사본"), "전사본")
+
+    def test_gemini_http_error_falls_back(self):
+        import urllib.error
+        error = urllib.error.HTTPError("u", 429, "Too Many Requests", {}, None)
+        self.meeting.record = "결정: A안"
+        self.meeting.transcript = "A안으로 진행합니다."
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=error), patch.object(services.time, "sleep"):
+            self.assertIn("LLM 연결 실패", services.chat_reply(self.meeting, "q"))
+            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
+
+    def test_gemini_retries_transient_error_then_succeeds(self):
+        import urllib.error
+        payload = {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+        success = self._fake_gemini_urlopen({}, payload)
+        calls = []
+
+        def flaky_urlopen(request, timeout):
+            calls.append(timeout)
+            if len(calls) < 3:
+                raise urllib.error.HTTPError("u", 503, "Service Unavailable", {}, None)
+            return success(request, timeout)
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=flaky_urlopen), patch.object(services.time, "sleep") as sleep:
+            self.assertEqual(services._generate("hi"), "ok")
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(calls[0], services.GEMINI_DEFAULT_TIMEOUT_SECONDS)
+
+    def test_gemini_does_not_retry_auth_error_or_timeout(self):
+        import urllib.error
+        for error in (urllib.error.HTTPError("u", 401, "Unauthorized", {}, None), TimeoutError("timed out")):
+            with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
+                    patch("urllib.request.urlopen", side_effect=error) as urlopen, patch.object(services.time, "sleep") as sleep:
+                self.assertRaises(OSError, services._generate, "hi")
+            self.assertEqual(urlopen.call_count, 1)
+            sleep.assert_not_called()
+
+    def test_gemini_failure_falls_back_to_ollama_when_configured(self):
+        import urllib.error
+        error = urllib.error.HTTPError("u", 503, "Service Unavailable", {}, None)
+        urls = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return '{"response": "올라마 답"}'.encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            urls.append(request.full_url)
+            if "generativelanguage" in request.full_url:
+                raise error
+            return FakeResponse()
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x", "OLLAMA_MODEL": "m1"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=fake_urlopen), patch.object(services.time, "sleep"):
+            self.assertEqual(services._generate("hi"), "올라마 답")
+        self.assertEqual(len(urls), services.GEMINI_RETRIES + 2)
+        self.assertEqual(urls[-1], services.OLLAMA_URL)
+
+    def test_gemini_failure_without_ollama_raises(self):
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")) as urlopen:
+            self.assertRaises(OSError, services._generate, "hi")
+        self.assertEqual(urlopen.call_count, 1)
+
+    def test_gemini_timeout_env_overrides_default(self):
+        captured = {}
+        payload = {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+        fake = self._fake_gemini_urlopen(captured, payload)
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x", "GEMINI_TIMEOUT": "42"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=fake) as urlopen:
+            services._generate("hi")
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 42)
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(), BACKGROUND_RECORDING=False)
