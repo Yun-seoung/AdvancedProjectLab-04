@@ -12,7 +12,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.http import url_has_allowed_host_and_scheme
 
-from . import services, tasks
+from . import quiz_status, services, tasks
 from .models import Answer, ChatMessage, CheckQuestion, Meeting, Question, Recording, Team
 
 ALLOWED_RECORDING_EXTENSIONS = {
@@ -88,6 +88,27 @@ def _meeting(request, meeting_id):
     return get_object_or_404(Meeting, pk=meeting_id, team__members=request.user)
 
 
+def _meeting_rows(meetings):
+    """회의 목록에 뿌릴 (회의 + 확인 퀴즈 미완료 배지) 묶음.
+
+    팀 홈은 팀원 전원이 보는 화면이라 숫자만 담고 이름은 절대 담지 않는다.
+    집계는 회의 개수와 무관한 고정 쿼리 수로 한 번에 처리한다(N+1 금지).
+    """
+    pending_counts = quiz_status.pending_count_for_meetings(meetings)
+    rows = []
+    for meeting in meetings:
+        pending = pending_counts.get(meeting.id)
+        rows.append({
+            "meeting": meeting,
+            # 퀴즈가 공개되지 않은 회의(처리 중, 진행자 검토 전)는 배지 자체를 숨긴다.
+            "quiz_open": pending is not None,
+            "pending": pending,
+            "badge": quiz_status.badge_text(pending) if pending else "",
+            "tooltip": "아직 %d명이 확인 퀴즈를 풀지 않았어요" % pending if pending else "",
+        })
+    return rows
+
+
 @login_required
 def meeting_list(request, team_id):
     team = _team(request, team_id)
@@ -96,7 +117,10 @@ def meeting_list(request, team_id):
             raise PermissionDenied
         team.delete()
         return redirect("index")
-    return render(request, "meetalign/meeting_list.html", {"team": team, "meetings": team.meetings.all()})
+    meetings = list(team.meetings.all())
+    return render(request, "meetalign/meeting_list.html", {
+        "team": team, "meetings": meetings, "rows": _meeting_rows(meetings),
+    })
 
 
 def _parse_deadline(raw):
