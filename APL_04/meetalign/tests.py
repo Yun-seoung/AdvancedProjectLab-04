@@ -7,12 +7,13 @@ from datetime import timedelta
 
 from django.contrib.auth.models import User
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.test import Client, TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 
-from . import services, tasks, views
+from . import quiz_status, services, tasks, views
 from .models import Answer, ChatMessage, CheckQuestion, Meeting, Question, Recording, Team
 
 
@@ -1213,3 +1214,146 @@ class DeleteTests(TestCase):
         client.force_login(self.other)
         r = client.get(reverse("meeting_detail", args=[self.meeting.id]))
         self.assertNotContains(r, "회의 삭제")
+
+
+class QuizPendingTests(TestCase):
+    """확인 퀴즈 미완료 인원 배지(팀 홈, 숫자만)와 미완료 참가자 명단(진행자 전용)."""
+
+    def setUp(self):
+        self.host = User.objects.create_user("quizhost", password="pw12345!")
+        self.alpha = User.objects.create_user("memb-alpha", password="pw12345!")
+        self.beta = User.objects.create_user("memb-beta", password="pw12345!")
+        self.gamma = User.objects.create_user("memb-gamma", password="pw12345!")
+        self.team = Team.objects.create(name="t", created_by=self.host)
+        self.team.members.add(self.host, self.alpha, self.beta, self.gamma)
+        self.meeting = Meeting.objects.create(
+            team=self.team, title="m", host=self.host, record="회의록", transcript="전사본",
+        )
+        self.q1 = self._question(order=0)
+        self.q2 = self._question(order=1)
+        self.client.force_login(self.host)
+
+    def _question(self, order, batch=0, status=CheckQuestion.STATUS_PUBLISHED):
+        return CheckQuestion.objects.create(
+            meeting=self.meeting, text="문항 %d-%d" % (batch, order),
+            choices=["보기1", "보기2", "보기3", "보기4"], correct_choice=0,
+            evidence="근거", status=status, order=order, batch=batch,
+        )
+
+    def _solve(self, user, questions, selected=0):
+        for question in questions:
+            Answer.objects.update_or_create(question=question, user=user, defaults={"selected_choice": selected})
+
+    def _home(self, user=None):
+        client = self.client
+        if user is not None:
+            client = Client()
+            client.force_login(user)
+        return client.get(reverse("meeting_list", args=[self.team.id]))
+
+    def _review(self):
+        return self.client.get(reverse("question_review", args=[self.meeting.id]))
+
+    def test_unpublished_quiz_shows_no_badge_and_no_host_section(self):
+        self.meeting.check_questions.update(status=CheckQuestion.STATUS_DRAFT)
+        home = self._home()
+        self.assertIsNone(home.context["rows"][0]["pending"])
+        self.assertNotContains(home, 'class="pending-badge"')
+        self.assertNotContains(home, "모두 완료")
+        review = self._review()
+        self.assertFalse(review.context["quiz_open"])
+        self.assertNotContains(review, "아직 풀지 않은 참가자")
+
+    def test_badge_counts_participants_who_have_not_finished(self):
+        self._solve(self.alpha, [self.q1, self.q2])
+        home = self._home()
+        self.assertEqual(home.context["rows"][0]["pending"], 2)
+        self.assertContains(home, 'class="pending-badge"')
+        self.assertContains(home, ">2</span>")
+        self.assertContains(home, "아직 2명이 확인 퀴즈를 풀지 않았어요")
+        review = self._review()
+        self.assertContains(review, "3명 중 1명 완료")
+        self.assertContains(review, "memb-beta")
+        self.assertContains(review, "memb-gamma")
+        self.assertNotContains(review, "memb-alpha")
+
+    def test_badge_shows_99_plus_over_limit(self):
+        self.assertEqual(quiz_status.badge_text(99), "99")
+        self.assertEqual(quiz_status.badge_text(100), "99+")
+
+    def test_all_finished_shows_completion_markers(self):
+        for member in (self.alpha, self.beta, self.gamma):
+            self._solve(member, [self.q1, self.q2])
+        home = self._home()
+        self.assertEqual(home.context["rows"][0]["pending"], 0)
+        self.assertNotContains(home, 'class="pending-badge"')
+        self.assertContains(home, "모두 완료")
+        review = self._review()
+        self.assertContains(review, "3명 중 3명 완료")
+        self.assertContains(review, "모든 참가자가 퀴즈를 마쳤어요")
+
+    def test_host_is_excluded_from_the_count(self):
+        for member in (self.alpha, self.beta, self.gamma):
+            self._solve(member, [self.q1, self.q2])
+        # 진행자는 한 문항도 풀지 않았지만 독려 대상이 아니라서 집계에서 빠진다.
+        self.assertFalse(Answer.objects.filter(user=self.host).exists())
+        self.assertEqual(quiz_status.participant_count(self.meeting), 3)
+        self.assertEqual(self._home().context["rows"][0]["pending"], 0)
+        self.assertEqual(self._review().context["pending_rows"], [])
+
+    def test_newly_published_question_makes_finished_participant_pending_again(self):
+        for member in (self.alpha, self.beta, self.gamma):
+            self._solve(member, [self.q1, self.q2])
+        self.assertEqual(self._home().context["rows"][0]["pending"], 0)
+        # 녹음을 추가로 올려 다음 batch 문항이 공개된 상황 (PR #31)
+        extra = self._question(order=0, batch=1)
+        self.assertEqual(self._home().context["rows"][0]["pending"], 3)
+        self._solve(self.alpha, [extra])
+        self.assertEqual(self._home().context["rows"][0]["pending"], 2)
+        review = self._review()
+        self.assertContains(review, "2/3문항")
+        self.assertNotContains(review, "memb-alpha")
+
+    def test_participant_pages_contain_no_other_participant_names(self):
+        self._solve(self.alpha, [self.q1])
+        client = Client()
+        client.force_login(self.alpha)
+        for url in (
+            reverse("meeting_list", args=[self.team.id]),
+            reverse("meeting_detail", args=[self.meeting.id]),
+            reverse("understanding", args=[self.meeting.id]),
+        ):
+            response = client.get(url)
+            self.assertEqual(response.status_code, 200)
+            body = response.content.decode()
+            for name in ("memb-beta", "memb-gamma", "quizhost"):
+                self.assertNotIn(name, body, "%s 응답에 %s가 노출됨" % (url, name))
+
+    def test_participant_gets_403_on_host_screen(self):
+        client = Client()
+        client.force_login(self.alpha)
+        self.assertEqual(client.get(reverse("question_review", args=[self.meeting.id])).status_code, 403)
+
+    def test_host_screen_does_not_reveal_who_chose_what(self):
+        # 전부 오답으로 풀었어도 '완료'라서 명단에 안 나온다 — 이름은 완료 여부에만 연결된다.
+        self._solve(self.alpha, [self.q1, self.q2], selected=1)
+        review = self._review()
+        self.assertNotContains(review, "memb-alpha")
+        self.assertNotContains(review, "오답")
+        self.assertContains(review, "memb-beta")
+
+    def test_meeting_list_query_count_does_not_grow_with_meetings(self):
+        self._solve(self.alpha, [self.q1])
+        url = reverse("meeting_list", args=[self.team.id])
+        with CaptureQueriesContext(connection) as one_meeting:
+            self.assertEqual(self.client.get(url).status_code, 200)
+        for i in range(4):
+            extra = Meeting.objects.create(team=self.team, title="m%d" % i, host=self.host, transcript="전사본")
+            CheckQuestion.objects.create(
+                meeting=extra, text="q", choices=["1", "2", "3", "4"],
+                correct_choice=0, status=CheckQuestion.STATUS_PUBLISHED,
+            )
+        with CaptureQueriesContext(connection) as five_meetings:
+            response = self.client.get(url)
+        self.assertEqual(len(response.context["rows"]), 5)
+        self.assertEqual(len(five_meetings.captured_queries), len(one_meeting.captured_queries))

@@ -16,7 +16,7 @@
   <button type="button" class="btn sm secondary" style="flex:0 0 auto;white-space:nowrap;margin-left:auto" onclick="navigator.clipboard.writeText('{{ team.invite_code }}').then(() => { this.textContent='복사됨'; setTimeout(() => this.textContent='복사', 1500); })">복사</button>
 </div>
 <ul class="plain">
-{% for m in meetings %}
+{% for row in rows %}{% with m=row.meeting %}
   <li class="item">
     <div class="item-main">
       <span class="item-icon">
@@ -29,9 +29,18 @@
         <div class="meta">{{ m.created_at|date:"Y.m.d" }}{% if m.deadline %} · 마감 {{ m.deadline|date:"Y.m.d" }}{% endif %}</div>
       </div>
     </div>
-    <a class="btn sm secondary" href="{% url 'meeting_detail' m.id %}">입장</a>
+    <div class="item-actions">
+      {% if row.quiz_open %}
+        {% if row.pending %}
+        <span class="pending-badge" title="{{ row.tooltip }}" aria-label="{{ row.tooltip }}">{{ row.badge }}</span>
+        {% else %}
+        <span class="pending-clear" title="모두 확인 퀴즈를 마쳤어요">✓ 모두 완료</span>
+        {% endif %}
+      {% endif %}
+      <a class="btn sm secondary" href="{% url 'meeting_detail' m.id %}">입장</a>
+    </div>
   </li>
-{% empty %}
+{% endwith %}{% empty %}
   <li class="empty"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11V6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v5"/><path d="M4 11h4.5a1 1 0 0 1 .9.55L10.5 14h3l1.1-2.45a1 1 0 0 1 .9-.55H20"/><path d="M4 11v6a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6"/></svg>아직 회의가 없습니다. 첫 회의를 만들어 보세요.</li>
 {% endfor %}
 </ul>
