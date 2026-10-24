@@ -75,6 +75,17 @@ class Recording(models.Model):
         return self.filename
 
 
+class SttUsage(models.Model):
+    """외부 STT(CLOVA Speech)로 전사한 음성 길이(초) 기록. 이번 달 무료 사용량이 남았는지 판단하는 데 쓴다.
+    녹음을 지워도 그 달에 쓴 양은 그대로 남아야 하므로 recording이 사라지면 비워 둔다(SET_NULL)."""
+    recording = models.ForeignKey(Recording, on_delete=models.SET_NULL, null=True, blank=True, related_name="stt_usages")
+    audio_seconds = models.PositiveIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return "%d초 (%s)" % (self.audio_seconds, self.created_at)
+
+
 class ChatMessage(models.Model):
     """회의 내용에 대해 질문하는 대화창의 기록. 사용자별로 따로 저장되어
     다음 질문을 할 때 이전 대화를 참고할 수 있게 한다. 익명 질문함(Question)과는 별개다."""

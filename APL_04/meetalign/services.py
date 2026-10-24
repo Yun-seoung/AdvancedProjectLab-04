@@ -1,8 +1,12 @@
 """LLM/STT 연결 지점. GEMINI_API_KEY와 GEMINI_MODEL이 모두 있으면 Gemini API를, 아니고 OLLAMA_MODEL이 있으면 로컬 Ollama를 LLM으로 쓴다.
 둘 다 설정돼 있으면 Gemini를 먼저 쓰고, Gemini 호출이 실패하면 Ollama로 다시 시도한다.
-MLX_WHISPER_MODEL이 있으면 로컬 STT를 쓴다. 해당 환경변수가 없으면 현재(가짜) 동작을 그대로 쓴다."""
+STT는 CLOVA_SPEECH_INVOKE_URL과 CLOVA_SPEECH_SECRET_KEY가 모두 있으면 네이버 CLOVA Speech를 쓰되, 이번 달 무료 사용량
+(CLOVA_SPEECH_FREE_MINUTES, 기본 20분)을 다 썼거나 호출이 실패하면 로컬 Whisper(MLX_WHISPER_MODEL 또는 FASTER_WHISPER_MODEL)로
+넘어간다. 해당 환경변수가 없으면 현재(가짜) 동작을 그대로 쓴다."""
 
 import json
+import logging
+import math
 import os
 import re
 import subprocess
@@ -10,6 +14,15 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
+import wave
+
+from django.db.models import Sum
+from django.utils import timezone
+
+from .models import SttUsage
+
+logger = logging.getLogger(__name__)
 
 FAKE_CHECK_QUESTIONS = [
     {"text": "이번 회의의 핵심 결정 사항은?", "choices": ["A안으로 진행한다", "B안으로 진행한다", "아직 결정되지 않았다", "다음 회의로 미룬다"], "correct_choice": 0, "evidence": ""},
@@ -41,29 +54,198 @@ def _is_korean_or_english(text):
 
 
 TRANSCRIBE_TIMEOUT_SECONDS = 1800
-_TRANSCRIBE_SCRIPT = (
-    "import json, mlx_whisper, sys\n"
-    "result = mlx_whisper.transcribe(sys.argv[1], path_or_hf_repo=sys.argv[2], language='ko')\n"
-    "print(json.dumps(result['text']))\n"
-)
+_WHISPER_WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "whisper_worker.py")
+LOCAL_STT_LABELS = {"mlx": "로컬 모델(mlx-whisper)", "faster": "로컬 모델(faster-whisper)"}
+# CLOVA Speech Free 플랜은 매월 20분을 무료로 준다. 네이버 클라우드는 15초 단위로 올림해서 과금하므로 사용량도 같은 단위로 기록한다.
+CLOVA_FREE_MINUTES_DEFAULT = 20
+CLOVA_BILLING_UNIT_SECONDS = 15
 
 
-def transcribe(recording_path):
-    """mlx-whisper(Apple MLX, GPU) 호출은 별도 프로세스로 띄워서 실행한다. Django 개발 서버는
-    요청마다 새 스레드를 쓰는데, mlx의 GPU 스트림이 스레드에 묶여 있어서 같은 프로세스 안에서
-    다른 스레드가 연달아 호출하면 간헐적으로 'no Stream(gpu, 1) in current thread' 에러가 난다.
-    매번 새 프로세스에서 실행하면 항상 그 프로세스의 메인 스레드에서 처음 쓰는 상태가 되어
-    이 문제를 피할 수 있다."""
-    model = os.environ.get("MLX_WHISPER_MODEL")
-    if not model:
+def _clova_enabled():
+    return bool(os.environ.get("CLOVA_SPEECH_INVOKE_URL") and os.environ.get("CLOVA_SPEECH_SECRET_KEY"))
+
+
+def _local_stt_engine():
+    """설정된 로컬 Whisper 엔진. mlx-whisper(Apple Silicon 전용)가 있으면 그것을, 아니면 faster-whisper(Windows 포함 모든 OS)."""
+    if os.environ.get("MLX_WHISPER_MODEL"):
+        return "mlx"
+    if os.environ.get("FASTER_WHISPER_MODEL"):
+        return "faster"
+    return None
+
+
+def _clova_limit_seconds():
+    return int(os.environ.get("CLOVA_SPEECH_FREE_MINUTES", CLOVA_FREE_MINUTES_DEFAULT)) * 60
+
+
+def clova_used_seconds():
+    """이번 달(1일 0시부터) CLOVA Speech로 전사한 음성 길이 합계(초)."""
+    month_start = timezone.localtime().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    return SttUsage.objects.filter(created_at__gte=month_start).aggregate(total=Sum("audio_seconds"))["total"] or 0
+
+
+def _round_up_billing(seconds):
+    return max(math.ceil(seconds / CLOVA_BILLING_UNIT_SECONDS), 1) * CLOVA_BILLING_UNIT_SECONDS
+
+
+def _audio_duration_seconds(path):
+    """녹음 길이(초). faster-whisper와 함께 설치되는 PyAV가 있으면 어떤 형식이든 읽고, 없으면 WAV만 표준 라이브러리로 읽는다.
+    둘 다 안 되면(브라우저 녹음 webm은 길이 정보가 없는 경우도 있다) None — 길이를 모르는 채로 진행한다."""
+    try:
+        import av
+        with av.open(path) as container:
+            if container.duration:
+                return container.duration / 1_000_000
+    except Exception:
+        pass
+    try:
+        with wave.open(path, "rb") as wav_file:
+            return wav_file.getnframes() / wav_file.getframerate()
+    except Exception:
         return None
+
+
+def _clova_budget_allows(duration):
+    """이번 달 남은 무료 사용량 안에서 이 녹음을 CLOVA로 보낼 수 있는지. 길이를 모르면 한도가 남아 있기만 하면 보낸다
+    (호출 뒤 응답으로 사용량을 기록하므로, 그 한 건만큼은 한도를 넘길 수 있다)."""
+    used, limit = clova_used_seconds(), _clova_limit_seconds()
+    if duration is None:
+        return used < limit
+    return used + _round_up_billing(duration) <= limit
+
+
+def _clova_multipart(path, params):
+    """urllib에는 multipart 인코더가 없어서 직접 만든다. 녹음 파일(최대 500MB)을 통째로 메모리에 올리지 않도록 본문을
+    머리말 → 파일 조각들 → 꼬리말 순서로 내보내는 제너레이터와, 미리 계산한 Content-Length, Content-Type을 돌려준다."""
+    boundary = uuid.uuid4().hex
+    head = (
+        '--%s\r\nContent-Disposition: form-data; name="params"\r\nContent-Type: application/json\r\n\r\n%s\r\n'
+        '--%s\r\nContent-Disposition: form-data; name="media"; filename="%s"\r\nContent-Type: application/octet-stream\r\n\r\n'
+        % (boundary, json.dumps(params), boundary, os.path.basename(path))
+    ).encode("utf-8")
+    tail = ("\r\n--%s--\r\n" % boundary).encode("utf-8")
+
+    def body():
+        yield head
+        with open(path, "rb") as audio:
+            while chunk := audio.read(1024 * 1024):
+                yield chunk
+        yield tail
+
+    return body(), len(head) + os.path.getsize(path) + len(tail), "multipart/form-data; boundary=%s" % boundary
+
+
+def _clova_text(data, segments, diarize):
+    """화자 구분을 켰고 화자가 둘 이상 나오면 발언을 "화자 A: ..." 줄로 묶어서 돌려주고, 아니면 전체 텍스트를 그대로 돌려준다."""
+    if diarize:
+        turns = []
+        for segment in segments:
+            speaker = segment.get("speaker") or {}
+            name, text = speaker.get("name") or speaker.get("label") or "?", (segment.get("text") or "").strip()
+            if not text:
+                continue
+            if turns and turns[-1][0] == name:
+                turns[-1][1] += " " + text
+            else:
+                turns.append([name, text])
+        if len({name for name, _ in turns}) > 1:
+            return "\n".join("화자 %s: %s" % (name, text) for name, text in turns)
+    return (data.get("text") or " ".join((segment.get("text") or "").strip() for segment in segments)).strip()
+
+
+def _transcribe_clova(path):
+    """CLOVA Speech 장문 인식(로컬 파일 업로드, 동기 방식) 호출. 전사 텍스트와, 응답의 마지막 구간 끝 시각으로 추정한 음성
+    길이(초)를 돌려준다. 네트워크/HTTP 오류, 해석 불가 응답, COMPLETED가 아닌 결과는 모두 이유를 담은 RuntimeError로 올린다."""
+    diarize = os.environ.get("CLOVA_SPEECH_DIARIZATION") == "1"
+    params = {"language": "ko-KR", "completion": "sync", "wordAlignment": False, "fullText": True, "diarization": {"enable": diarize}}
+    body, length, content_type = _clova_multipart(path, params)
+    request = urllib.request.Request(
+        os.environ["CLOVA_SPEECH_INVOKE_URL"].rstrip("/") + "/recognizer/upload", data=body, method="POST",
+        headers={
+            "Content-Type": content_type, "Content-Length": str(length),
+            "X-CLOVASPEECH-API-KEY": os.environ["CLOVA_SPEECH_SECRET_KEY"],
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=TRANSCRIBE_TIMEOUT_SECONDS) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode("utf-8", "replace").strip()[:200] if error.fp is not None else ""
+        raise RuntimeError("CLOVA Speech 오류 %d: %s" % (error.code, detail or error.reason)) from error
+    except OSError as error:
+        raise RuntimeError("CLOVA Speech 연결 실패: %s" % error) from error
+    except ValueError as error:
+        raise RuntimeError("CLOVA Speech 응답 해석 실패: %s" % error) from error
+    if data.get("result") != "COMPLETED":
+        raise RuntimeError("CLOVA Speech 전사 실패: %s" % (data.get("message") or data.get("result") or str(data)[:200]))
+    segments = data.get("segments") or []
+    end_seconds = max((segment.get("end") or 0 for segment in segments), default=0) / 1000
+    return _clova_text(data, segments, diarize), end_seconds
+
+
+def _transcribe_local(recording_path, engine):
+    """로컬 Whisper(mlx-whisper 또는 faster-whisper)는 별도 프로세스(whisper_worker.py)로 띄워서 실행한다. Django 개발 서버는
+    요청마다 새 스레드를 쓰는데, mlx의 GPU 스트림이 스레드에 묶여 있어서 같은 프로세스 안에서 다른 스레드가 연달아 호출하면
+    간헐적으로 'no Stream(gpu, 1) in current thread' 에러가 난다. 매번 새 프로세스에서 실행하면 항상 그 프로세스의 메인
+    스레드에서 처음 쓰는 상태가 되어 이 문제를 피할 수 있다. faster-whisper도 같은 방식으로 돌려서 수 GB짜리 모델이 서버
+    프로세스 메모리에 계속 남지 않게 한다."""
+    if engine is None:
+        return None
+    if engine == "mlx":
+        args = ["mlx", recording_path, os.environ["MLX_WHISPER_MODEL"]]
+    else:
+        args = [
+            "faster", recording_path, os.environ["FASTER_WHISPER_MODEL"],
+            os.environ.get("FASTER_WHISPER_DEVICE", "auto"), os.environ.get("FASTER_WHISPER_COMPUTE_TYPE", "default"),
+        ]
     result = subprocess.run(
-        [sys.executable, "-c", _TRANSCRIBE_SCRIPT, recording_path, model],
-        capture_output=True, text=True, timeout=TRANSCRIBE_TIMEOUT_SECONDS,
+        [sys.executable, _WHISPER_WORKER] + args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=TRANSCRIBE_TIMEOUT_SECONDS, env={**os.environ, "PYTHONUTF8": "1"},
     )
     if result.returncode != 0:
-        raise RuntimeError((result.stderr or "mlx_whisper 전사 실패").strip()[-500:])
+        raise RuntimeError((result.stderr or "로컬 Whisper 전사 실패").strip()[-500:])
     return json.loads(result.stdout.strip()).strip()
+
+
+def transcribe(recording_path, recording_id=None):
+    """녹음 파일을 전사한다. CLOVA Speech가 설정돼 있고 이번 달 무료 사용량이 남아 있으면 CLOVA로, 한도를 다 썼거나 CLOVA 호출이
+    실패하면 로컬 Whisper로 전사한다. 로컬 Whisper가 없으면 그 이유를 그대로 올려서 화면에 실패 사유로 보이게 한다.
+    어느 쪽도 설정돼 있지 않으면 None(가짜 동작 유지). recording_id는 사용량 기록에 어떤 녹음이었는지 남기는 용도."""
+    local = _local_stt_engine()
+    if _clova_enabled():
+        duration = _audio_duration_seconds(recording_path)
+        if _clova_budget_allows(duration):
+            try:
+                text, end_seconds = _transcribe_clova(recording_path)
+            except RuntimeError as error:
+                if local is None:
+                    raise
+                logger.warning("%s — %s로 전환합니다", error, LOCAL_STT_LABELS[local])
+            else:
+                SttUsage.objects.create(recording_id=recording_id, audio_seconds=_round_up_billing(max(duration or 0, end_seconds)))
+                return text
+        else:
+            message = "CLOVA Speech 이번 달 무료 사용량(%d분)을 다 썼습니다" % (_clova_limit_seconds() // 60)
+            if local is None:
+                raise RuntimeError(message + ". 로컬 Whisper(FASTER_WHISPER_MODEL)를 설정하면 그쪽으로 넘어갑니다")
+            logger.info("%s — %s로 전사합니다", message, LOCAL_STT_LABELS[local])
+    return _transcribe_local(recording_path, local)
+
+
+def _format_minutes(seconds):
+    return ("%.1f" % (seconds / 60)).rstrip("0").rstrip(".")
+
+
+def stt_status_text():
+    """회의 상세 화면의 녹음 업로드 폼에 보여줄 전사 엔진 안내 한 줄. 어떤 STT도 설정돼 있지 않으면 None."""
+    local = LOCAL_STT_LABELS.get(_local_stt_engine())
+    if not _clova_enabled():
+        return "전사 엔진: %s" % local if local else None
+    used, limit = clova_used_seconds(), _clova_limit_seconds()
+    status = "전사 엔진: CLOVA Speech · 이번 달 무료 사용량 %s/%d분" % (_format_minutes(used), limit // 60)
+    if used >= limit:
+        return status + (" (소진 → %s로 전사)" % local if local else " (소진 — 로컬 모델이 없어 전사가 실패합니다)")
+    return status + (" (소진 시 %s로 전환)" % local if local else "")
 
 
 def _generate(prompt, temperature=None):

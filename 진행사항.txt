@@ -356,6 +356,83 @@ PR 히스토리
   모듈 시작 시 해당 변수를 잠시 치웠다가 끝나면 되돌리게 함. 기존엔
   OLLAMA_MODEL이 설정돼 있으면 test_llm_chat_does_not_touch_anon_questions가
   실패했고, 실제 키가 있으면 테스트 중 실제 API가 호출될 수 있었음.
+
+네이버 CLOVA Speech STT 연동 + 무료 사용량 소진 시 로컬 전환 + Windows 로컬 STT (2026-10-24)
+----------------------
+- 배경: 기존 STT는 mlx-whisper뿐이라 Apple Silicon Mac에서만 전사가 됐다. 한국어 정확도가 더 높고
+  실행 환경을 타지 않는 외부 API로 네이버 CLOVA Speech(Free 플랜, 매월 20분 무료)를 붙이고,
+  무료 사용량을 다 쓰면 로컬 모델로 자동 전환하되 로컬 모델도 Windows에서 돌아가게 했다.
+- meetalign/services.py의 transcribe(recording_path, recording_id=None) — 엔진 선택 순서:
+    1) CLOVA_SPEECH_INVOKE_URL + CLOVA_SPEECH_SECRET_KEY가 있고 이번 달 사용량 + 이 녹음 길이가
+       CLOVA_SPEECH_FREE_MINUTES(기본 20분) 안이면 CLOVA Speech 장문 인식(/recognizer/upload,
+       completion=sync, language=ko-KR)을 호출한다. 외부 라이브러리 없이 urllib로 multipart 본문을
+       직접 만들고, 녹음 파일(최대 500MB)을 메모리에 통째로 올리지 않도록 제너레이터로 흘려보낸다.
+    2) 무료 사용량을 다 썼거나 CLOVA 호출이 실패(키 오류 4xx, 네트워크, 서버 오류, COMPLETED가 아닌
+       결과)하면 로컬 Whisper로 넘어간다. MLX_WHISPER_MODEL(Mac)이 있으면 그것을, 아니면
+       FASTER_WHISPER_MODEL(모든 OS)을 쓴다. 로컬 모델이 없으면 이유("무료 사용량(20분)을 다 썼습니다",
+       "CLOVA Speech 오류 401: ...")를 RuntimeError로 올려서 기존 실패 사유 표시에 그대로 뜬다.
+    3) 어느 것도 없으면 None(가짜 응답 모드 유지).
+- 사용량 기록: SttUsage 모델(마이그레이션 0019; recording FK는 SET_NULL이라 녹음을 지워도 그 달 사용량은
+  남는다). 네이버 클라우드가 15초 단위 올림으로 과금하므로 같은 단위로 기록한다. 녹음 길이는 PyAV
+  (faster-whisper와 함께 설치됨)가 있으면 어떤 형식이든 미리 읽고, 없으면 WAV만 표준 라이브러리로 읽는다.
+  길이를 모르면(브라우저 webm 등) 한도가 남아 있기만 하면 보내고 응답의 마지막 구간 끝 시각으로 기록한다
+  → 그 한 건만큼은 한도를 넘길 수 있음(README에 적어둠). 사용량은 매월 1일 0시(서버 시간대) 기준으로 센다.
+- CLOVA_SPEECH_DIARIZATION=1이면 화자 구분을 켜고, 화자가 둘 이상이면 전사본을 "화자 A: ..." 줄로 묶어
+  LLM이 담당자를 구분하기 쉽게 한다. 기본은 꺼짐(Basic 플랜에서 화자인식이 따로 과금되므로).
+- 로컬 Whisper 워커 분리: 인라인 -c 스크립트 대신 meetalign/whisper_worker.py(Django 의존 없음)를
+  서브프로세스로 실행한다. mlx는 #28의 GPU 스레드 문제 때문에, faster-whisper는 수 GB 모델이 서버
+  프로세스 메모리에 남지 않게 하려고 둘 다 같은 방식으로 돌린다.
+  Windows에서 pip로 설치한 nvidia-cublas-cu12/nvidia-cudnn-cu12의 DLL 폴더(site-packages/nvidia/*/bin)를
+  워커가 스스로 찾아 os.add_dll_directory + PATH에 넣는다 — 안 그러면 CTranslate2가
+  'Could not locate cudnn_ops64_9.dll'로 바로 죽는다. faster-whisper는 PyAV를 쓰므로 ffmpeg 설치가 필요 없다.
+  FASTER_WHISPER_DEVICE(기본 auto)/FASTER_WHISPER_COMPUTE_TYPE(기본 default, CPU는 int8 권장)으로 조정.
+  vad_filter=True로 묵음 구간을 건너뛴다(긴 회의에서 시간 절약 + 묵음 환각 감소).
+- 회의 상세 화면의 녹음 업로드 폼 위에 전사 엔진 상태 한 줄 추가(services.stt_status_text):
+  "전사 엔진: CLOVA Speech · 이번 달 무료 사용량 12.5/20분 (소진 시 로컬 모델(faster-whisper)로 전환)" 등.
+  STT가 하나도 설정돼 있지 않으면 표시하지 않는다.
+- README: 프라이버시 문구를 "CLOVA 설정 시 녹음이 네이버 서버로 전송됨"으로 고치고, CLOVA 준비 절차
+  (도메인 생성 → 빌더 > 설정 > 연동 정보에서 Secret Key/Invoke URL), Windows용 .env 로드(PowerShell),
+  faster-whisper/CUDA 설치를 적었다. 요금·무료 제공량은 공식 문서에 수치가 없어(도메인 가이드는 "매월 일정
+  인식 시간", 요금표는 "20분") 콘솔에서 확인하라고 안내했다.
+- 이 Windows PC(RTX 4060 Laptop, Python 3.14)에서 실제 검증: faster-whisper 1.2.1 설치 → Windows 한국어
+  TTS(Microsoft Heami)로 만든 약 24초짜리 가상 회의 음성(WAV)을 whisper_worker.py로 전사하고, manage.py shell에서
+  services.transcribe()를 직접 불러 서브프로세스 실행·PyAV 길이 측정(_audio_duration_seconds)·상태 문구까지 확인.
+  (발견) pip가 최신 PyAV 19.0.2를 같이 깔아 주는데, faster-whisper 1.2.1은 PyAV 19에서 제거된
+  av.open(metadata_errors=...) 인자를 아직 써서 전사 시작 즉시 TypeError로 죽는다(faster-whisper 저장소에는
+  수정 PR #1495가 2026-09-30 병합됐지만 PyPI 릴리스에는 아직 안 들어감). `pip install faster-whisper "av<19"`로
+  PyAV 18.1.0을 쓰면 정상 동작 — README 설치 명령에 고정과 이유를 적어 뒀다.
+  결과: base 모델 + CPU int8로 4초 만에 TTS 원문과 글자 하나 안 틀리고 같은 전사가 나왔다
+  (TTS 음성이라 실제 회의보다 훨씬 깨끗한 조건임을 감안).
+  GPU 경로(RTX 4060 Laptop): nvidia-cublas-cu12 12.9 / nvidia-cudnn-cu12 9.27(의존성으로 nvidia-cuda-nvrtc-cu12도
+  함께)을 .venv에 설치하고 large-v3-turbo를 device=auto로 실행 → cuda/float16으로 잡혀서 성공. 첫 실행은 1.6GB
+  모델 다운로드 때문에 2분 47초, 두 번째(캐시됨)는 프로세스 시작 + 모델 로딩 + 24초 음성 전사까지 7초.
+  전사 결과는 base 모델과 달리 "디자인 시안" → "디자인 시한" 한 글자가 틀렸다(TTS 발음 문제일 수 있음).
+  (확인) ctranslate2 4.8.3은 pip로 깐 NVIDIA DLL을 PATH 설정 없이도 스스로 찾았다(이 함수를 안 불러도 cuda 로딩
+  성공). 그래도 _add_windows_cuda_dlls는 구버전/다른 조합에서 흔히 보고되는 'Could not locate cudnn_ops64_9.dll'
+  대비 안전장치로 남겨 둔다(패키지가 없으면 아무것도 안 하므로 부작용 없음). GPU가 안 잡히면
+  FASTER_WHISPER_DEVICE=cpu FASTER_WHISPER_COMPUTE_TYPE=int8 로는 바로 동작한다.
+  huggingface_hub가 "To support symlinks on Windows..." 경고를 stderr에 찍지만 무해하다(캐시를 복사본으로
+  저장할 뿐). 워커는 실패했을 때만 stderr를 화면에 올리므로 사용자에게는 안 보인다.
+  ※ 위 검증으로 .venv에 faster-whisper 1.2.1, av 18.1.0, NVIDIA 라이브러리가 설치돼 있고(requirements.txt에는
+  일부러 넣지 않음 — 선택 사항이라 README에서 안내), ~/.cache/huggingface에 base(142MB)·large-v3-turbo(1.6GB)
+  모델이 내려받아져 있다. 필요 없으면 pip uninstall / 캐시 삭제로 되돌릴 수 있다.
+- 실제 CLOVA Speech 키로 검증(Free 도메인, 같은 24초 TTS 음성):
+  services.transcribe() 한 번에 2.5초 만에 COMPLETED. 직접 만든 multipart 요청 형식(params JSON + media,
+  X-CLOVASPEECH-API-KEY 헤더, Content-Length 미리 계산)이 그대로 받아들여졌고, 사용량 30초(24초 → 15초 단위
+  올림)가 SttUsage에 기록돼 화면 문구가 "0/20분" → "0.5/20분"으로 바뀌는 것까지 확인.
+  (품질 관찰) "담당자는 김민수 님입니다"에서 이름 "김민수 님"이 통째로 빠져 "담당자는  입니다"로 나왔다.
+  wordAlignment를 켜고 받아 보니 10.3초('담당자는')와 11.85초('입니다.') 사이 0.8초 구간에 단어가 하나도
+  없었다 — 금칙어(forbiddens)는 비어 있었으므로 사후 마스킹이 아니라 인식기가 그 구간을 아예 비운 것.
+  noiseFiltering=false로 다시 보내도 같았다. 키워드 부스팅(boostings: 김민수, weight 3)을 주면 "담당자는 김민"
+  까지만 나오고 뒤의 "수 님입니다"가 사라지며 전체 confidence도 0.97 → 0.86으로 떨어져, 부스팅도 해결책이
+  아니었다(그래서 부스팅 기능은 넣지 않음). Whisper(base, large-v3-turbo)는 같은 음성에서 이름을 정확히
+  냈다. TTS 합성음이라 실제 사람 목소리와 다를 수 있으니 실제 회의 녹음으로 다시 봐야 한다.
+  ※ 진단용 호출 3건(원시 응답 확인, noiseFiltering 끄기, 부스팅)은 services.transcribe()를 거치지 않아 장부에
+  자동 기록되지 않으므로 30초씩 수동으로 넣어 두었다(실제 네이버 쪽 사용량과 맞추기 위함). 현재 장부 2분.
+- 테스트 24개 추가(CLOVA 활성 조건/요청 형식(multipart, 헤더, params)/사용량 기록(15초 올림, 파일 길이 우선,
+  녹음 삭제 후 유지)/이번 달만 집계/한도 소진·초과 예상 시 로컬 전환/한도 내면 CLOVA/한도 환경변수/
+  로컬 없을 때 실패 사유/HTTP 오류·연결 실패·FAILED 결과 처리/화자 구분 포맷/상태 문구/화면 표시,
+  faster-whisper 인자·mlx 우선순위, 워커 세그먼트 결합·옵션·CUDA DLL 경로 처리).
 팀 레포 반영 (PR #25~#31, 2026-10-12 ~ 10-20)
 ----------------------
 개인 레포(Yooch2/meetalign)에서 먼저 만든 것을 팀 레포로 옮긴 것이 대부분이다.
