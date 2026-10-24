@@ -1,10 +1,14 @@
-"""LLM/STT 연결 지점. OLLAMA_MODEL이나 MLX_WHISPER_MODEL 환경변수가 있을 때만 로컬 모델을 쓰고, 없으면 현재 동작을 그대로 쓴다."""
+"""LLM/STT 연결 지점. GEMINI_API_KEY와 GEMINI_MODEL이 모두 있으면 Gemini API를, 아니고 OLLAMA_MODEL이 있으면 로컬 Ollama를 LLM으로 쓴다.
+둘 다 설정돼 있으면 Gemini를 먼저 쓰고, Gemini 호출이 실패하면 Ollama로 다시 시도한다.
+MLX_WHISPER_MODEL이 있으면 로컬 STT를 쓴다. 해당 환경변수가 없으면 현재(가짜) 동작을 그대로 쓴다."""
 
 import json
 import os
 import re
 import subprocess
 import sys
+import time
+import urllib.error
 import urllib.request
 
 FAKE_CHECK_QUESTIONS = [
@@ -12,13 +16,24 @@ FAKE_CHECK_QUESTIONS = [
     {"text": "내가 맡은 다음 할 일은?", "choices": ["문서 작성", "코드 리뷰", "디자인 시안 제작", "회의 일정 조율"], "correct_choice": 0, "evidence": ""},
 ]
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent"
+# 무료 등급은 응답 대기가 길어서 Ollama보다 넉넉하게 기다린다 (GEMINI_TIMEOUT으로 조정).
+GEMINI_DEFAULT_TIMEOUT_SECONDS = 300
+# 바로 실패하는 일시적 오류(요청 과다, 서버 바쁨)만 잠시 쉬었다가 다시 보낸다. 타임아웃은 재시도하지 않는다.
+GEMINI_RETRY_STATUS = (429, 500, 503)
+GEMINI_RETRIES = 3
+GEMINI_RETRY_DELAY_SECONDS = 5
 TIMEOUT_SECONDS = 120
 # 한국어/영어 외 문자(일본어 가나, 중국어 한자 등)가 섞여나오는 LLM 출력을 걸러낸다.
 _FOREIGN_SCRIPT = re.compile(r"[぀-ヿ一-鿿]")
 
 
+def _gemini_enabled():
+    return bool(os.environ.get("GEMINI_API_KEY") and os.environ.get("GEMINI_MODEL"))
+
+
 def _enabled():
-    return bool(os.environ.get("OLLAMA_MODEL"))
+    return _gemini_enabled() or bool(os.environ.get("OLLAMA_MODEL"))
 
 
 def _is_korean_or_english(text):
@@ -52,6 +67,13 @@ def transcribe(recording_path):
 
 
 def _generate(prompt, temperature=None):
+    if _gemini_enabled():
+        try:
+            return _generate_gemini(prompt, temperature=temperature)
+        except OSError:
+            # 재시도 후에도 Gemini가 안 되면(과부하, 타임아웃, 키 오류 등) Ollama가 설정돼 있을 때만 그쪽으로 넘어간다.
+            if not os.environ.get("OLLAMA_MODEL"):
+                raise
     num_ctx = int(os.environ.get("OLLAMA_NUM_CTX", "16384"))
     options = {"num_ctx": num_ctx}
     if temperature is not None:
@@ -65,6 +87,41 @@ def _generate(prompt, temperature=None):
     request = urllib.request.Request(OLLAMA_URL, data=body, headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
         return json.loads(response.read().decode("utf-8"))["response"].strip()
+
+
+def _generate_gemini(prompt, temperature=None):
+    """Gemini generateContent API 호출. HTTP/네트워크 오류(401 잘못된 키, 429 무료 한도 초과 등)는
+    urllib이 OSError 하위 예외로 올리므로 호출자의 기존 대체 처리가 그대로 동작한다. 안전 필터 차단 등으로
+    응답에 텍스트가 없을 때도 같은 경로로 처리되도록 OSError로 바꿔서 올린다.
+    429/500/503은 GEMINI_RETRIES번까지 점점 길게 쉬었다가 다시 보내고, 타임아웃은 다시 보내도 처음부터
+    다시 기다려야 해서 재시도 없이 바로 올린다."""
+    model = os.environ["GEMINI_MODEL"]
+    payload = {"contents": [{"parts": [{"text": prompt}]}]}
+    if temperature is not None:
+        payload["generationConfig"] = {"temperature": temperature}
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        GEMINI_URL % model, data=body,
+        headers={"Content-Type": "application/json", "x-goog-api-key": os.environ["GEMINI_API_KEY"]},
+    )
+    timeout = int(os.environ.get("GEMINI_TIMEOUT", GEMINI_DEFAULT_TIMEOUT_SECONDS))
+    for attempt in range(GEMINI_RETRIES + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as error:
+            if error.code not in GEMINI_RETRY_STATUS or attempt == GEMINI_RETRIES:
+                raise
+            time.sleep(GEMINI_RETRY_DELAY_SECONDS * (attempt + 1))
+    try:
+        parts = data["candidates"][0]["content"]["parts"]
+        text = "".join(part.get("text", "") for part in parts if not part.get("thought"))
+    except (KeyError, IndexError, TypeError):
+        raise OSError("Gemini 응답에 텍스트가 없습니다: %s" % str(data)[:300])
+    if not text.strip():
+        raise OSError("Gemini 응답에 텍스트가 없습니다")
+    return text.strip()
 
 
 def _generate_clean(prompt, retries=1, temperature=None):
@@ -193,7 +250,7 @@ def chat_reply(meeting, text, history=None):
     try:
         result = _generate_clean(prompt)
     except OSError:
-        return "(LLM 연결 실패: Ollama가 실행 중인지 확인하세요)"
+        return "(LLM 연결 실패: Gemini API 키나 Ollama 실행 상태를 확인하세요)"
     if result is None:
         return "(LLM 응답 언어 오류: 다시 시도해 주세요)"
     return result

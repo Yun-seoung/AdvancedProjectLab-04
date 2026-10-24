@@ -315,6 +315,47 @@ PR 히스토리
 - 팀원은 익명 질문함에서 본인이 보낸 질문과 그 답변만 봄.
 - 테스트 127개 전부 통과.
 
+상용 LLM(Gemini API) 연동 (2026-10-24)
+----------------------
+- 로컬 LLM(Ollama) 대신 Google Gemini API(무료 API 키)로도 동작하도록
+  meetalign/services.py의 LLM 호출 지점(_enabled, _generate)만 수정.
+  프롬프트, 응답 파싱, 근거 검증, 대체(가짜) 응답 로직과 다른 화면/모델은
+  변경 없음. STT(mlx-whisper)도 그대로.
+- 환경변수:
+    GEMINI_API_KEY  Gemini API 키
+    GEMINI_MODEL    사용할 Gemini 모델 ID (필수, 코드에 기본값 없음)
+    GEMINI_TIMEOUT  응답 최대 대기 시간(초, 선택, 기본 300)
+  두 변수가 모두 있으면 Gemini를 사용(Ollama보다 우선). 하나라도 없으면
+  기존처럼 OLLAMA_MODEL이 있을 때 Ollama를 쓰고, Gemini 설정과 OLLAMA_MODEL이
+  모두 없으면 가짜 응답 모드로 동작.
+- 외부 라이브러리 없이 기존과 같은 urllib로 generateContent REST API 호출
+  (requirements.txt 변경 없음). 잘못된 키(4xx), 무료 한도 초과(429), 네트워크
+  오류는 OSError로 올라와 기존 대체 처리(가짜 문항/원문 유지/안내 문구)가
+  그대로 동작. 안전 필터 차단 등으로 응답 텍스트가 비어 있어도 같은 경로로 처리.
+- 실제 키로 시험해 보니 무료 등급은 짧은 요청도 응답까지 1~4분 걸리는 경우가
+  있어(네트워크 지연은 0.2초 수준, 서버 쪽 대기), Gemini만 타임아웃을 기본
+  300초로 늘림(Ollama는 기존 120초 그대로). 429/500/503처럼 바로 실패하는
+  일시적 오류는 5초, 10초, 15초 쉬었다가 최대 3번 다시 보내고, 타임아웃은 다시
+  보내도 처음부터 다시 기다려야 해서 재시도하지 않음. (시험 중 gemini-3.8-flash가
+  "high demand" 503을 연달아 내는 경우가 있어 재시도 횟수/간격을 늘림)
+- 재시도 후에도 Gemini가 실패하면(과부하, 타임아웃, 키 오류 등) OLLAMA_MODEL이
+  설정돼 있을 때 같은 요청을 Ollama로 다시 보냄. OLLAMA_MODEL이 없으면 기존
+  대체 처리(가짜 문항/원문 유지/안내 문구)로 넘어감.
+  대화창은 응답이 올 때까지 화면이 기다리므로 서버가 느리면 오래 걸릴 수 있음.
+- 키는 프로젝트 루트 .env에 두고(.gitignore로 커밋 제외) 서버 실행 전에
+  `set -a && source ../.env && set +a`로 불러옴. 프로젝트가 .env를 자동으로
+  읽지는 않음.
+- 대화창 연결 실패 문구를 "Gemini API 키나 Ollama 실행 상태를 확인하세요"로 변경.
+- 주의: Gemini를 쓰면 전사본/회의록이 Google 서버로 전송됨(로컬 처리 아님).
+  무료 등급은 입력 데이터가 Google 서비스 개선에 쓰일 수 있음.
+- 테스트 9개 추가(Gemini 활성 조건/요청 형식/빈 응답·HTTP 오류 시 대체 동작/
+  일시적 오류 재시도/인증 오류·타임아웃 미재시도/타임아웃 설정/실패 시 Ollama
+  전환/Ollama 미설정 시 오류 전달), 147개 전부 통과.
+- 셸에 실행용 환경변수(GEMINI_API_KEY, GEMINI_MODEL, GEMINI_TIMEOUT,
+  OLLAMA_MODEL, MLX_WHISPER_MODEL)가 설정된 채로 테스트를 돌려도 결과가 같도록, tests.py
+  모듈 시작 시 해당 변수를 잠시 치웠다가 끝나면 되돌리게 함. 기존엔
+  OLLAMA_MODEL이 설정돼 있으면 test_llm_chat_does_not_touch_anon_questions가
+  실패했고, 실제 키가 있으면 테스트 중 실제 API가 호출될 수 있었음.
 팀 레포 반영 (PR #25~#31, 2026-10-12 ~ 10-20)
 ----------------------
 개인 레포(Yooch2/meetalign)에서 먼저 만든 것을 팀 레포로 옮긴 것이 대부분이다.
