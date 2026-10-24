@@ -1,7 +1,9 @@
+import io
 import json
 import os
 import sys
 import tempfile
+import types
 from unittest.mock import MagicMock, patch
 from datetime import timedelta
 
@@ -13,12 +15,16 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 
-from . import quiz_status, services, tasks, views
-from .models import Answer, ChatMessage, CheckQuestion, Meeting, Question, Recording, Team
+from . import quiz_status, services, tasks, views, whisper_worker
+from .models import Answer, ChatMessage, CheckQuestion, Meeting, Question, Recording, SttUsage, Team
 
 # 셸에 실행용 LLM/STT 환경변수가 설정돼 있어도 테스트가 실제 모델/API를 호출하지 않고 항상 같은 결과가
 # 나오도록, 모듈 시작 시 잠시 치웠다가 끝나면 되돌린다. 필요한 테스트는 각자 patch.dict로 값을 넣는다.
-_MODEL_ENV_VARS = ("GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_TIMEOUT", "OLLAMA_MODEL", "MLX_WHISPER_MODEL")
+_MODEL_ENV_VARS = (
+    "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_TIMEOUT", "OLLAMA_MODEL", "MLX_WHISPER_MODEL",
+    "FASTER_WHISPER_MODEL", "FASTER_WHISPER_DEVICE", "FASTER_WHISPER_COMPUTE_TYPE",
+    "CLOVA_SPEECH_INVOKE_URL", "CLOVA_SPEECH_SECRET_KEY", "CLOVA_SPEECH_FREE_MINUTES", "CLOVA_SPEECH_DIARIZATION",
+)
 _saved_model_env = {}
 
 
@@ -615,6 +621,315 @@ class LocalSTTTests(TestCase):
             self.client.post(reverse("meeting_detail", args=[self.meeting.id]), {"action": "submit", "recording": file})
         self.meeting.refresh_from_db()
         self.assertEqual(self.meeting.record, "전사된 회의 내용")
+
+    def test_faster_whisper_runs_worker_with_default_device(self):
+        fake_result = MagicMock(returncode=0, stdout=json.dumps(" 전사 "), stderr="")
+        with patch.dict(os.environ, {"FASTER_WHISPER_MODEL": "large-v3-turbo"}, clear=True), patch.object(
+            services.subprocess, "run", return_value=fake_result
+        ) as run:
+            self.assertEqual(services.transcribe("/x.wav"), "전사")
+        args = run.call_args[0][0]
+        self.assertEqual(args[0], sys.executable)
+        self.assertTrue(args[1].endswith("whisper_worker.py"))
+        self.assertEqual(args[2:], ["faster", "/x.wav", "large-v3-turbo", "auto", "default"])
+
+    def test_faster_whisper_device_and_compute_type_come_from_env(self):
+        fake_result = MagicMock(returncode=0, stdout=json.dumps("전사"), stderr="")
+        env = {"FASTER_WHISPER_MODEL": "turbo", "FASTER_WHISPER_DEVICE": "cpu", "FASTER_WHISPER_COMPUTE_TYPE": "int8"}
+        with patch.dict(os.environ, env, clear=True), patch.object(services.subprocess, "run", return_value=fake_result) as run:
+            services.transcribe("/x.wav")
+        self.assertEqual(run.call_args[0][0][2:], ["faster", "/x.wav", "turbo", "cpu", "int8"])
+
+    def test_mlx_takes_precedence_over_faster_whisper(self):
+        fake_result = MagicMock(returncode=0, stdout=json.dumps("전사"), stderr="")
+        env = {"MLX_WHISPER_MODEL": "mlx-community/whisper-large-v3-turbo", "FASTER_WHISPER_MODEL": "turbo"}
+        with patch.dict(os.environ, env, clear=True), patch.object(services.subprocess, "run", return_value=fake_result) as run:
+            services.transcribe("/x.wav")
+        self.assertEqual(run.call_args[0][0][2:], ["mlx", "/x.wav", "mlx-community/whisper-large-v3-turbo"])
+
+
+class ClovaSTTTests(TestCase):
+    CLOVA_ENV = {"CLOVA_SPEECH_INVOKE_URL": "https://clovaspeech-gw.ncloud.com/external/v1/1234/abcd", "CLOVA_SPEECH_SECRET_KEY": "secret-1"}
+    LOCAL_ENV = {"FASTER_WHISPER_MODEL": "large-v3-turbo"}
+    LOCAL_RESULT = MagicMock(returncode=0, stdout=json.dumps("로컬 전사"), stderr="")
+
+    def setUp(self):
+        self.user = User.objects.create_user("a", password="pw12345!")
+        self.client.force_login(self.user)
+        self.team = Team.objects.create(name="t")
+        self.team.members.add(self.user)
+        self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.user)
+        self.audio = os.path.join(tempfile.mkdtemp(), "회의.wav")
+        with open(self.audio, "wb") as f:
+            f.write(b"RIFF-fake-audio-bytes")
+
+    def _fake_urlopen(self, captured, payload):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            captured["headers"] = dict(request.header_items())
+            captured["body"] = b"".join(request.data)
+            captured["timeout"] = timeout
+            return FakeResponse()
+        return fake_urlopen
+
+    def _params(self, body):
+        """multipart 본문에서 params 필드의 JSON만 꺼낸다."""
+        start = body.index(b"\r\n\r\n", body.index(b'name="params"')) + 4
+        return json.loads(body[start:body.index(b"\r\n--", start)].decode("utf-8"))
+
+    def test_clova_needs_both_invoke_url_and_secret_key(self):
+        with patch.dict(os.environ, self.CLOVA_ENV, clear=True):
+            self.assertTrue(services._clova_enabled())
+        for name in self.CLOVA_ENV:
+            with patch.dict(os.environ, {name: self.CLOVA_ENV[name]}, clear=True):
+                self.assertFalse(services._clova_enabled())
+
+    def test_clova_request_format_and_usage_record(self):
+        captured = {}
+        payload = {"result": "COMPLETED", "text": " 안녕하세요. 회의 시작합니다. ", "segments": [{"start": 0, "end": 61000, "text": "안녕하세요. 회의 시작합니다."}]}
+        with patch.dict(os.environ, self.CLOVA_ENV, clear=True), patch("urllib.request.urlopen", side_effect=self._fake_urlopen(captured, payload)), \
+                patch.object(services, "_audio_duration_seconds", return_value=None):
+            self.assertEqual(services.transcribe(self.audio, recording_id=None), "안녕하세요. 회의 시작합니다.")
+        self.assertEqual(captured["url"], self.CLOVA_ENV["CLOVA_SPEECH_INVOKE_URL"] + "/recognizer/upload")
+        self.assertEqual(captured["headers"].get("X-clovaspeech-api-key"), "secret-1")
+        self.assertTrue(captured["headers"]["Content-type"].startswith("multipart/form-data; boundary="))
+        self.assertEqual(int(captured["headers"]["Content-length"]), len(captured["body"]))
+        self.assertEqual(captured["timeout"], services.TRANSCRIBE_TIMEOUT_SECONDS)
+        params = self._params(captured["body"])
+        self.assertEqual(params["language"], "ko-KR")
+        self.assertEqual(params["completion"], "sync")
+        self.assertFalse(params["diarization"]["enable"])
+        self.assertIn('name="media"; filename="회의.wav"'.encode("utf-8"), captured["body"])
+        self.assertIn(b"\r\n\r\nRIFF-fake-audio-bytes\r\n--", captured["body"])
+        # 마지막 구간이 61초에서 끝났으니 15초 단위로 올림한 75초가 기록된다.
+        self.assertEqual(list(SttUsage.objects.values_list("audio_seconds", flat=True)), [75])
+
+    def test_clova_usage_uses_known_file_length_when_longer_than_speech(self):
+        payload = {"result": "COMPLETED", "text": "짧은 말", "segments": [{"start": 0, "end": 5000, "text": "짧은 말"}]}
+        with patch.dict(os.environ, self.CLOVA_ENV, clear=True), patch("urllib.request.urlopen", side_effect=self._fake_urlopen({}, payload)), \
+                patch.object(services, "_audio_duration_seconds", return_value=100.0):
+            services.transcribe(self.audio, recording_id=None)
+        self.assertEqual(SttUsage.objects.get().audio_seconds, 105)
+
+    def test_usage_record_points_at_recording_and_survives_its_deletion(self):
+        rec = Recording.objects.create(meeting=self.meeting, file=SimpleUploadedFile("a.wav", b"RIFF"))
+        payload = {"result": "COMPLETED", "text": "전사", "segments": []}
+        with patch.dict(os.environ, self.CLOVA_ENV, clear=True), patch("urllib.request.urlopen", side_effect=self._fake_urlopen({}, payload)), \
+                patch.object(services, "_audio_duration_seconds", return_value=None):
+            services.transcribe(self.audio, recording_id=rec.id)
+        usage = SttUsage.objects.get()
+        self.assertEqual(usage.recording_id, rec.id)
+        self.assertEqual(usage.audio_seconds, 15)  # 길이를 알 수 없어도 호출 한 번은 최소 과금 단위로 센다
+        rec.delete()
+        usage.refresh_from_db()
+        self.assertIsNone(usage.recording)
+
+    def test_quota_counts_only_this_month(self):
+        old = SttUsage.objects.create(audio_seconds=900)
+        SttUsage.objects.filter(pk=old.pk).update(created_at=timezone.now() - timedelta(days=40))
+        SttUsage.objects.create(audio_seconds=120)
+        self.assertEqual(services.clova_used_seconds(), 120)
+
+    def test_exhausted_quota_switches_to_local_without_calling_clova(self):
+        SttUsage.objects.create(audio_seconds=20 * 60)
+        with patch.dict(os.environ, {**self.CLOVA_ENV, **self.LOCAL_ENV}, clear=True), patch("urllib.request.urlopen") as urlopen, \
+                patch.object(services.subprocess, "run", return_value=self.LOCAL_RESULT) as run:
+            self.assertEqual(services.transcribe(self.audio), "로컬 전사")
+        urlopen.assert_not_called()
+        self.assertEqual(run.call_args[0][0][2], "faster")
+        self.assertEqual(SttUsage.objects.count(), 1)
+
+    def test_file_that_would_exceed_remaining_quota_goes_local(self):
+        SttUsage.objects.create(audio_seconds=15 * 60)
+        with patch.dict(os.environ, {**self.CLOVA_ENV, **self.LOCAL_ENV}, clear=True), patch("urllib.request.urlopen") as urlopen, \
+                patch.object(services.subprocess, "run", return_value=self.LOCAL_RESULT), \
+                patch.object(services, "_audio_duration_seconds", return_value=400.0):
+            self.assertEqual(services.transcribe(self.audio), "로컬 전사")  # 15분 + 6분 45초 > 20분
+        urlopen.assert_not_called()
+
+    def test_file_that_fits_remaining_quota_uses_clova(self):
+        SttUsage.objects.create(audio_seconds=15 * 60)
+        payload = {"result": "COMPLETED", "text": "클로바 전사", "segments": []}
+        with patch.dict(os.environ, {**self.CLOVA_ENV, **self.LOCAL_ENV}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=self._fake_urlopen({}, payload)), \
+                patch.object(services.subprocess, "run") as run, patch.object(services, "_audio_duration_seconds", return_value=290.0):
+            self.assertEqual(services.transcribe(self.audio), "클로바 전사")  # 15분 + 5분 = 딱 20분
+        run.assert_not_called()
+        self.assertEqual(services.clova_used_seconds(), 20 * 60)
+
+    def test_free_minutes_env_overrides_default_quota(self):
+        SttUsage.objects.create(audio_seconds=30 * 60)
+        payload = {"result": "COMPLETED", "text": "클로바 전사", "segments": []}
+        with patch.dict(os.environ, {**self.CLOVA_ENV, "CLOVA_SPEECH_FREE_MINUTES": "60"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=self._fake_urlopen({}, payload)), \
+                patch.object(services, "_audio_duration_seconds", return_value=None):
+            self.assertEqual(services.transcribe(self.audio), "클로바 전사")
+
+    def test_exhausted_quota_without_local_model_fails_with_reason(self):
+        SttUsage.objects.create(audio_seconds=20 * 60)
+        with patch.dict(os.environ, self.CLOVA_ENV, clear=True), patch("urllib.request.urlopen") as urlopen:
+            with self.assertRaises(RuntimeError) as ctx:
+                services.transcribe(self.audio)
+        self.assertIn("무료 사용량(20분)을 다 썼습니다", str(ctx.exception))
+        urlopen.assert_not_called()
+
+    def test_clova_http_error_falls_back_to_local_and_records_nothing(self):
+        import urllib.error
+        error = urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
+        with patch.dict(os.environ, {**self.CLOVA_ENV, **self.LOCAL_ENV}, clear=True), patch("urllib.request.urlopen", side_effect=error), \
+                patch.object(services.subprocess, "run", return_value=self.LOCAL_RESULT) as run, \
+                patch.object(services, "_audio_duration_seconds", return_value=None), self.assertLogs(services.logger, "WARNING") as logs:
+            self.assertEqual(services.transcribe(self.audio), "로컬 전사")
+        self.assertEqual(run.call_args[0][0][2], "faster")
+        self.assertEqual(SttUsage.objects.count(), 0)
+        self.assertIn("CLOVA Speech 오류 401", logs.output[0])
+
+    def test_clova_http_error_without_local_model_shows_server_message(self):
+        import urllib.error
+        error = urllib.error.HTTPError("u", 401, "Unauthorized", {}, io.BytesIO(b'{"message": "Invalid secret"}'))
+        with patch.dict(os.environ, self.CLOVA_ENV, clear=True), patch("urllib.request.urlopen", side_effect=error), \
+                patch.object(services, "_audio_duration_seconds", return_value=None):
+            with self.assertRaises(RuntimeError) as ctx:
+                services.transcribe(self.audio)
+        self.assertIn("CLOVA Speech 오류 401", str(ctx.exception))
+        self.assertIn("Invalid secret", str(ctx.exception))
+
+    def test_clova_connection_error_and_bad_result_are_reported(self):
+        with patch.dict(os.environ, self.CLOVA_ENV, clear=True), patch.object(services, "_audio_duration_seconds", return_value=None):
+            with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+                with self.assertRaises(RuntimeError) as ctx:
+                    services.transcribe(self.audio)
+            self.assertIn("연결 실패", str(ctx.exception))
+            failed = {"result": "FAILED", "message": "ERROR_AUDIO_CONVERSION"}
+            with patch("urllib.request.urlopen", side_effect=self._fake_urlopen({}, failed)):
+                with self.assertRaises(RuntimeError) as ctx:
+                    services.transcribe(self.audio)
+            self.assertIn("ERROR_AUDIO_CONVERSION", str(ctx.exception))
+        self.assertEqual(SttUsage.objects.count(), 0)
+
+    def test_diarization_groups_consecutive_speaker_turns(self):
+        captured = {}
+        payload = {
+            "result": "COMPLETED", "text": "안녕하세요. 반갑습니다. 네 저도요.",
+            "segments": [
+                {"end": 1000, "text": "안녕하세요.", "speaker": {"label": "1", "name": "A"}},
+                {"end": 2000, "text": "반갑습니다.", "speaker": {"label": "1", "name": "A"}},
+                {"end": 3000, "text": "네 저도요.", "speaker": {"label": "2", "name": "B"}},
+            ],
+        }
+        with patch.dict(os.environ, {**self.CLOVA_ENV, "CLOVA_SPEECH_DIARIZATION": "1"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=self._fake_urlopen(captured, payload)), \
+                patch.object(services, "_audio_duration_seconds", return_value=None):
+            self.assertEqual(services.transcribe(self.audio), "화자 A: 안녕하세요. 반갑습니다.\n화자 B: 네 저도요.")
+        self.assertTrue(self._params(captured["body"])["diarization"]["enable"])
+
+    def test_diarization_with_single_speaker_keeps_plain_text(self):
+        payload = {"result": "COMPLETED", "text": "혼자 말함.", "segments": [{"end": 1000, "text": "혼자 말함.", "speaker": {"label": "1", "name": "A"}}]}
+        with patch.dict(os.environ, {**self.CLOVA_ENV, "CLOVA_SPEECH_DIARIZATION": "1"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=self._fake_urlopen({}, payload)), \
+                patch.object(services, "_audio_duration_seconds", return_value=None):
+            self.assertEqual(services.transcribe(self.audio), "혼자 말함.")
+
+    def test_stt_status_text_variants(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertIsNone(services.stt_status_text())
+        with patch.dict(os.environ, self.LOCAL_ENV, clear=True):
+            self.assertEqual(services.stt_status_text(), "전사 엔진: 로컬 모델(faster-whisper)")
+        SttUsage.objects.create(audio_seconds=750)
+        with patch.dict(os.environ, {**self.CLOVA_ENV, **self.LOCAL_ENV}, clear=True):
+            self.assertEqual(
+                services.stt_status_text(),
+                "전사 엔진: CLOVA Speech · 이번 달 무료 사용량 12.5/20분 (소진 시 로컬 모델(faster-whisper)로 전환)",
+            )
+        with patch.dict(os.environ, {**self.CLOVA_ENV, "CLOVA_SPEECH_FREE_MINUTES": "60"}, clear=True):
+            self.assertEqual(services.stt_status_text(), "전사 엔진: CLOVA Speech · 이번 달 무료 사용량 12.5/60분")
+        SttUsage.objects.create(audio_seconds=450)
+        with patch.dict(os.environ, self.CLOVA_ENV, clear=True):
+            self.assertIn("20/20분 (소진 — 로컬 모델이 없어 전사가 실패합니다)", services.stt_status_text())
+        with patch.dict(os.environ, {**self.CLOVA_ENV, **self.LOCAL_ENV}, clear=True):
+            self.assertIn("(소진 → 로컬 모델(faster-whisper)로 전사)", services.stt_status_text())
+
+    def test_meeting_detail_shows_stt_status_only_when_configured(self):
+        url = reverse("meeting_detail", args=[self.meeting.id])
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertNotContains(self.client.get(url), "전사 엔진")
+        with patch.dict(os.environ, self.CLOVA_ENV, clear=True):
+            self.assertContains(self.client.get(url), "전사 엔진: CLOVA Speech · 이번 달 무료 사용량 0/20분")
+
+
+class WhisperWorkerTests(TestCase):
+    def _fake_faster_whisper(self, segment_texts, calls):
+        class FakeSegment:
+            def __init__(self, text):
+                self.text = text
+
+        class FakeModel:
+            def __init__(self, model, device, compute_type):
+                calls["init"] = (model, device, compute_type)
+
+            def transcribe(self, path, **kwargs):
+                calls["transcribe"] = (path, kwargs)
+                return (FakeSegment(text) for text in segment_texts), object()
+
+        module = types.ModuleType("faster_whisper")
+        module.WhisperModel = FakeModel
+        return module
+
+    def test_faster_whisper_joins_segments_and_passes_options(self):
+        calls = {}
+        module = self._fake_faster_whisper([" 안녕하세요 ", "   ", " 회의를 시작합니다 "], calls)
+        with patch.dict(sys.modules, {"faster_whisper": module}), patch.object(whisper_worker, "_add_windows_cuda_dlls") as dlls:
+            text = whisper_worker.transcribe_faster("/x.wav", "large-v3-turbo", "cpu", "int8")
+        self.assertEqual(text, "안녕하세요 회의를 시작합니다")
+        self.assertEqual(calls["init"], ("large-v3-turbo", "cpu", "int8"))
+        self.assertEqual(calls["transcribe"][0], "/x.wav")
+        self.assertEqual(calls["transcribe"][1]["language"], "ko")
+        self.assertTrue(calls["transcribe"][1]["vad_filter"])
+        dlls.assert_called_once()
+
+    def test_main_dispatches_engine_and_prints_json(self):
+        with patch.object(whisper_worker, "transcribe_faster", return_value="전사 결과") as faster, patch("sys.stdout", new_callable=io.StringIO) as out:
+            whisper_worker.main(["whisper_worker.py", "faster", "/x.wav", "turbo", "cuda", "float16"])
+        faster.assert_called_once_with("/x.wav", "turbo", "cuda", "float16")
+        self.assertEqual(json.loads(out.getvalue()), "전사 결과")
+        with patch.object(whisper_worker, "transcribe_mlx", return_value="맥 전사") as mlx, patch("sys.stdout", new_callable=io.StringIO) as out:
+            whisper_worker.main(["whisper_worker.py", "mlx", "/x.wav", "mlx-community/whisper-large-v3-turbo"])
+        mlx.assert_called_once_with("/x.wav", "mlx-community/whisper-large-v3-turbo")
+        self.assertEqual(json.loads(out.getvalue()), "맥 전사")
+
+    def test_windows_adds_pip_installed_nvidia_dll_dirs(self):
+        root = tempfile.mkdtemp()
+        for name in ("cublas", "cudnn"):
+            os.makedirs(os.path.join(root, "nvidia", name, "bin"))
+        os.makedirs(os.path.join(root, "nvidia", "no_bin_here"))
+        added = []
+        with patch.object(whisper_worker.sys, "platform", "win32"), \
+                patch.object(whisper_worker.sysconfig, "get_paths", return_value={"purelib": root}), \
+                patch.object(whisper_worker.os, "add_dll_directory", create=True, side_effect=added.append), \
+                patch.dict(os.environ, {"PATH": "ORIGINAL"}):
+            whisper_worker._add_windows_cuda_dlls()
+            path = os.environ["PATH"]
+        cublas, cudnn = (os.path.join(root, "nvidia", name, "bin") for name in ("cublas", "cudnn"))
+        self.assertEqual(added, [cublas, cudnn])
+        self.assertEqual(path, os.pathsep.join([cudnn, cublas, "ORIGINAL"]))
+
+    def test_cuda_dll_setup_does_nothing_outside_windows_or_without_packages(self):
+        with patch.object(whisper_worker.sys, "platform", "darwin"), patch.object(whisper_worker.sysconfig, "get_paths") as paths:
+            whisper_worker._add_windows_cuda_dlls()
+        paths.assert_not_called()
+        with patch.object(whisper_worker.sys, "platform", "win32"), \
+                patch.object(whisper_worker.sysconfig, "get_paths", return_value={"purelib": tempfile.mkdtemp()}), \
+                patch.object(whisper_worker.os, "add_dll_directory", create=True) as add:
+            whisper_worker._add_windows_cuda_dlls()
+        add.assert_not_called()
 
 
 class SecurityFixTests(TestCase):

@@ -174,7 +174,7 @@ def meeting_detail(request, meeting_id):
         elif recording:
             error = _recording_error(recording)
         if error:
-            return render(request, "meetalign/meeting_detail.html", {"meeting": meeting, "error": error})
+            return render(request, "meetalign/meeting_detail.html", {"meeting": meeting, "error": error, "stt_status": services.stt_status_text()})
         if recording:
             added = Recording.objects.create(meeting=meeting, file=recording, status=Recording.STATUS_PROCESSING)
             tasks.start_processing(added.id)
@@ -184,7 +184,7 @@ def meeting_detail(request, meeting_id):
                 return redirect("question_review", meeting_id=meeting.id)
             return redirect("understanding", meeting_id=meeting.id)
         return redirect("meeting_result", meeting_id=meeting.id)
-    return render(request, "meetalign/meeting_detail.html", {"meeting": meeting})
+    return render(request, "meetalign/meeting_detail.html", {"meeting": meeting, "stt_status": services.stt_status_text()})
 
 
 @login_required

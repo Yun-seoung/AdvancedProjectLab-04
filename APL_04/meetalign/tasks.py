@@ -46,7 +46,7 @@ def process_recording(recording_id):
     meeting = recording.meeting
     with _meeting_lock(meeting.id):
         try:
-            recording.transcript = services.transcribe(recording.file.path) or ""
+            recording.transcript = services.transcribe(recording.file.path, recording_id=recording.id) or ""
             recording.status = Recording.STATUS_DONE
             recording.error_message = ""
         except Exception as exc:
