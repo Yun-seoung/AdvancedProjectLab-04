@@ -374,7 +374,20 @@ def understanding(request, meeting_id):
         return redirect("understanding", meeting_id=meeting.id)
     my_answers = {a.question_id: a.selected_choice for a in Answer.objects.filter(question__meeting=meeting, user=user)}
     rows = [(q, my_answers.get(q.id)) for q in questions]
-    return render(request, "meetalign/understanding.html", {"meeting": meeting, "rows": rows})
+    # 한 문항도 안 고르고 저장해도 넘어가기 때문에(위 continue), 본인은 다 answered고 생각하는데
+    # 실제로는 남아 있는 경우가 생긴다. 녹음을 추가해 batch가 늘어난 경우도 마찬가지라서,
+    # 몇 문항이 남았는지 당사자 화면에서 바로 보이게 한다.
+    answered_count = sum(1 for _, selected in rows if selected is not None)
+    total_count = len(rows)
+    return render(request, "meetalign/understanding.html", {
+        "meeting": meeting, "rows": rows,
+        "answered_count": answered_count,
+        "total_count": total_count,
+        "remaining_count": total_count - answered_count,
+        "progress_pct": round(answered_count * 100 / total_count) if total_count else 0,
+        # 한 번도 답한 적 없으면 문항마다 '미응답'을 달아봐야 시끄럽기만 하다.
+        "started": answered_count > 0,
+    })
 
 
 @login_required

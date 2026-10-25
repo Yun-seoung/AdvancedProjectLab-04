@@ -1808,3 +1808,61 @@ class QuizPendingTests(TestCase):
             response = self.client.get(url)
         self.assertEqual(len(response.context["rows"]), 5)
         self.assertEqual(len(five_meetings.captured_queries), len(one_meeting.captured_queries))
+
+
+class PartialAnswerNoticeTests(TestCase):
+    """부분 응답은 막지 않되, 몇 문항이 남았는지 당사자 화면에 알려준다."""
+
+    def setUp(self):
+        self.host = User.objects.create_user("quizhost", password="pw12345!")
+        self.member = User.objects.create_user("memb-alpha", password="pw12345!")
+        self.team = Team.objects.create(name="t", created_by=self.host)
+        self.team.members.add(self.host, self.member)
+        self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.host, transcript="전사본")
+        self.questions = [
+            CheckQuestion.objects.create(
+                meeting=self.meeting, text="문항 %d" % order,
+                choices=["보기1", "보기2", "보기3", "보기4"], correct_choice=0,
+                status=CheckQuestion.STATUS_PUBLISHED, order=order,
+            )
+            for order in range(3)
+        ]
+        self.client.force_login(self.member)
+        self.url = reverse("understanding", args=[self.meeting.id])
+
+    def test_first_visit_shows_progress_but_no_unanswered_badges(self):
+        r = self.client.get(self.url)
+        self.assertContains(r, "3문항 중 0문항 답함")
+        # 아직 한 번도 답하지 않았으면 문항마다 '미응답'을 달지 않는다(시끄럽기만 함).
+        self.assertNotContains(r, "미응답")
+        self.assertNotContains(r, "남았습니다")
+
+    def test_partial_submit_warns_how_many_are_left(self):
+        # 3문항 중 1문항만 고르고 저장 — 뷰가 빈 문항을 건너뛰므로 그대로 저장된다.
+        self.client.post(self.url, {"q%d" % self.questions[0].id: "0"})
+        r = self.client.get(self.url)
+        self.assertContains(r, "3문항 중 1문항 답함")
+        self.assertContains(r, "아직 2문항이 남았습니다")
+        self.assertContains(r, "미응답")
+        self.assertEqual(r.context["remaining_count"], 2)
+        self.assertEqual(r.context["progress_pct"], 33)
+
+    def test_all_answered_shows_completion_line(self):
+        self.client.post(self.url, {"q%d" % q.id: "0" for q in self.questions})
+        r = self.client.get(self.url)
+        self.assertContains(r, "3문항 모두 답했습니다")
+        self.assertNotContains(r, "남았습니다")
+        self.assertNotContains(r, "미응답")
+        self.assertEqual(r.context["progress_pct"], 100)
+
+    def test_newly_published_batch_reopens_the_notice(self):
+        self.client.post(self.url, {"q%d" % q.id: "0" for q in self.questions})
+        self.assertContains(self.client.get(self.url), "3문항 모두 답했습니다")
+        # 녹음을 추가해 batch 1 문항이 공개되면, 잘못한 것 없이도 다시 미완료가 된다.
+        CheckQuestion.objects.create(
+            meeting=self.meeting, text="추가 문항", choices=["1", "2", "3", "4"],
+            correct_choice=0, status=CheckQuestion.STATUS_PUBLISHED, order=0, batch=1,
+        )
+        r = self.client.get(self.url)
+        self.assertContains(r, "4문항 중 3문항 답함")
+        self.assertContains(r, "아직 1문항이 남았습니다")
