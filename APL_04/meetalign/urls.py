@@ -25,4 +25,8 @@ urlpatterns = [
     # 결정 컴파일러 (실험 기능)
     path("meetings/<int:meeting_id>/decisions/", views.decision_vote, name="decision_vote"),
     path("meetings/<int:meeting_id>/decisions/review/", views.decision_review, name="decision_review"),
+    path(
+        "meetings/<int:meeting_id>/decisions/<int:decision_id>/carryover/resolve/",
+        views.decision_carryover_resolve, name="decision_carryover_resolve",
+    ),
 ]

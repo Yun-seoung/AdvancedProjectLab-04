@@ -60,8 +60,23 @@
   {% if vote_started %}
     <div class="notice">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;margin-top:1px"><path d="M12 9v4M12 17h.01M10.3 3.86 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.86a2 2 0 0 0-3.4 0Z"/></svg>
-      <span>투표가 시작된 항목이 있어 수정할 수 없습니다. 집계는 진행자도 본인이 고른 뒤에 볼 수 있습니다.</span>
+      <span>투표가 시작된 항목이 있어 수정할 수 없습니다. 집계는 진행자도 본인이 고른 뒤에 <a href="{% url 'decision_vote' meeting.id %}">나의 선택</a> 화면에서만 볼 수 있습니다.</span>
     </div>
+    {% if voting_count %}
+    <div class="row" style="justify-content:space-between;align-items:center;gap:10px">
+      <div>
+        <b>투표 중 {{ voting_count }}개</b>
+        <div class="meta">
+          {% if can_close %}마감하면 제출된 표로 바로 판정합니다. 아직 고르지 않은 팀원은 판정에서 빠지고 인원 수만 표시됩니다.
+          {% else %}마감하려면 먼저 {{ host_remaining }}개 항목에 본인 선택을 제출해야 합니다.{% endif %}
+        </div>
+      </div>
+      <form method="post">{% csrf_token %}
+        <button name="action" value="close_vote"{% if not can_close %} disabled title="본인 선택을 먼저 제출해야 합니다"{% endif %}
+          onclick="return confirm('투표를 마감하고 {{ voting_count }}개 항목을 판정할까요?');">투표 마감</button>
+      </form>
+    </div>
+    {% endif %}
   {% elif unvotable_count %}
     <div class="notice">
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;margin-top:1px"><path d="M12 9v4M12 17h.01M10.3 3.86 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.86a2 2 0 0 0-3.4 0Z"/></svg>
@@ -69,7 +84,8 @@
     </div>
   {% endif %}
 
-  <form method="post">{% csrf_token %}
+  {# 수정 폼은 draft일 때만 연다. 투표 후에는 항목별 확정 폼이 들어오므로 폼이 중첩되면 안 된다. #}
+  {% if editable %}<form method="post">{% csrf_token %}{% endif %}
   <ul class="plain">
     {% for row in rows %}
     <li class="item" style="flex-direction:column;align-items:stretch;gap:12px">
@@ -165,6 +181,36 @@
       {% elif row.decision.warnings %}
         <div class="meta">해석 후보가 없습니다 — 근거 검증을 통과한 해석이 하나도 없었습니다.</div>
       {% endif %}
+
+      {# ④ 분기 처리 결과. 어느 보기에 몇 명이 몰렸는지는 여기 담지 않는다 — 진행자도 집계는 "나의 선택" 화면에서만 본다. #}
+      {% if row.decision.status == status_resolved %}
+        <div class="success" style="margin:0">확정: {{ row.decision.final_text }}</div>
+      {% elif row.decision.status == status_undecided %}
+        <div class="notice" style="margin:0">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;margin-top:1px"><path d="M12 9v4M12 17h.01M10.3 3.86 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.86a2 2 0 0 0-3.4 0Z"/></svg>
+          <span><b>미결정</b> — 다음 회의 화면에 "지난 회의 미결정 안건"으로 계속 보입니다.</span>
+        </div>
+      {% elif row.decision.status == status_pending_host %}
+        <div style="border-top:1px solid var(--line);padding-top:12px">
+          <span class="label" style="font-size:.86rem;font-weight:700;color:var(--ink-soft)">해석이 갈렸습니다 — 한 줄로 확정해 주세요</span>
+          <form method="post" style="margin-top:8px">{% csrf_token %}
+            <input type="hidden" name="decision_id" value="{{ row.decision.id }}">
+            <input type="text" name="final_text" value="{{ row.decision.final_text }}"
+              placeholder="예: 금요일 18시까지 스테이징 배포까지 끝낸다">
+            <div class="row" style="margin-top:10px">
+              <button name="action" value="confirm" class="sm">
+                {% if row.decision.final_text %}확정 문장 고치기{% else %}이 문장으로 확정{% endif %}
+              </button>
+              {% if row.decision.final_text %}
+                <span class="muted">{{ agreement_needed }}명 중 {{ row.agreed }}명 동의</span>
+              {% endif %}
+            </div>
+            {% if row.decision.final_text %}
+              <p class="muted" style="margin:8px 0 0">문장을 고치면 지금까지 받은 동의는 무효가 되고 다시 받습니다.</p>
+            {% endif %}
+          </form>
+        </div>
+      {% endif %}
     </li>
     {% endfor %}
   </ul>
@@ -177,8 +223,8 @@
       투표 시작 ({{ votable_count }}개)
     </button>
   </div>
-  {% endif %}
   </form>
+  {% endif %}
 </div>
 {% endif %}
 {% endblock %}

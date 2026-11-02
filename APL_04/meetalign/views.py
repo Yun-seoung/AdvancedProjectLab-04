@@ -14,8 +14,8 @@ from django.utils.http import url_has_allowed_host_and_scheme
 
 from . import decision_compiler, quiz_status, services, tasks
 from .models import (
-    Answer, ChatMessage, CheckQuestion, Decision, DecisionVote, Interpretation, Meeting,
-    Question, Recording, Team,
+    Answer, ChatMessage, CheckQuestion, Decision, DecisionAgreement, DecisionVote, Interpretation,
+    Meeting, Question, Recording, Team,
 )
 
 ALLOWED_RECORDING_EXTENSIONS = {
@@ -187,7 +187,12 @@ def meeting_detail(request, meeting_id):
                 return redirect("question_review", meeting_id=meeting.id)
             return redirect("understanding", meeting_id=meeting.id)
         return redirect("meeting_result", meeting_id=meeting.id)
-    return render(request, "meetalign/meeting_detail.html", {"meeting": meeting, "stt_status": services.stt_status_text()})
+    return render(request, "meetalign/meeting_detail.html", {
+        "meeting": meeting, "stt_status": services.stt_status_text(),
+        # 결정 컴파일러(실험): 지난 회의의 미결정 안건. 읽기만 하므로 위 POST 흐름은 건드리지 않는다.
+        # '처리됨' 버튼은 별도 URL(decision_carryover_resolve)로 보낸다.
+        "carryover_decisions": decision_compiler.carryover_decisions(meeting),
+    })
 
 
 @login_required
@@ -512,6 +517,86 @@ def _start_decision_vote(meeting):
     return None
 
 
+def _host_unvoted_decisions(meeting, user):
+    """진행자가 아직 자기 선택을 제출하지 않은, 투표 중인 항목."""
+    voting = meeting.decisions.filter(status=Decision.STATUS_VOTING)
+    voted_ids = set(
+        DecisionVote.objects.filter(decision__meeting=meeting, user=user)
+        .values_list("decision_id", flat=True)
+    )
+    return [decision for decision in voting if decision.id not in voted_ids]
+
+
+def _close_decision_vote(request, meeting):
+    """투표 마감 → 투표 중인 항목 전부 판정.
+
+    진행자가 자기 선택을 하기 전에는 거부한다(선투표 강제). 집계를 먼저 본 뒤 고르면
+    블라인드가 깨지고, 진행자 선택은 판정 규칙 1·3번의 입력이기도 하다.
+    """
+    voting = list(meeting.decisions.filter(status=Decision.STATUS_VOTING))
+    if not voting:
+        return "마감할 항목이 없습니다."
+    remaining = _host_unvoted_decisions(meeting, request.user)
+    if remaining:
+        return "먼저 %d개 항목에 본인 선택을 제출해야 마감할 수 있습니다." % len(remaining)
+    for decision in voting:
+        # 판정만 한다. '진행자 확정 대기'로 간 항목은 확정 문장을 쓴 뒤(=_confirm_decision)
+        # 동의가 모일 때 확정으로 넘어간다.
+        decision_compiler.finalize(decision, meeting.host_id)
+    return None
+
+
+def _confirm_decision(request, meeting):
+    """갈린 항목에 진행자가 한 줄 확정 문장을 쓴다. 쓰고 나면 팀원 동의를 기다린다."""
+    decision = get_object_or_404(Decision, pk=request.POST.get("decision_id"), meeting=meeting)
+    if decision.status != Decision.STATUS_PENDING_HOST:
+        return "진행자 확정을 기다리는 항목이 아닙니다."
+    final_text = request.POST.get("final_text", "").strip()
+    if not final_text:
+        return "확정 문장을 한 줄 적어 주세요."
+    decision.final_text = final_text
+    decision.save(update_fields=["final_text"])
+    # 문장을 고쳐 쓰면 이전 동의는 무효다 — 팀원이 동의한 문장과 달라지기 때문이다.
+    decision.agreements.all().delete()
+    decision_compiler.resolve_if_everyone_agreed(decision, decision_compiler.agreement_total(meeting))
+    return None
+
+
+def _resolve_carryover(meeting, decision_id):
+    """이월된 미결정 안건을 '처리됨'으로 닫는다. 이후 회의 화면에서 사라진다."""
+    decision = get_object_or_404(
+        Decision, pk=decision_id, meeting__team_id=meeting.team_id,
+        status=Decision.STATUS_UNDECIDED, carryover_resolved_at__isnull=True,
+    )
+    Decision.objects.filter(pk=decision.pk).update(carryover_resolved_at=timezone.now())
+
+
+@login_required
+def decision_carryover_resolve(request, meeting_id, decision_id):
+    """이월 안건 '처리됨' 전용 엔드포인트.
+
+    회의 상세 화면(meeting_detail)의 기존 POST 흐름(녹음 업로드/종료/삭제)을 건드리지 않기
+    위해 별도 URL로 뺐다. 지금 보고 있는 회의의 진행자만 누를 수 있다.
+    """
+    meeting = _meeting(request, meeting_id)
+    _require_host(meeting, request.user)
+    if request.method == "POST":
+        _resolve_carryover(meeting, decision_id)
+    return redirect("meeting_detail", meeting_id=meeting.id)
+
+
+def _agree_decision(request, meeting):
+    """팀원이 진행자가 쓴 확정 문장에 "이 내용으로 맞춤"을 탭한다."""
+    decision = get_object_or_404(Decision, pk=request.POST.get("decision_id"), meeting=meeting)
+    if decision.status != Decision.STATUS_PENDING_HOST or not decision.final_text:
+        return "지금 동의를 받고 있는 항목이 아닙니다."
+    if meeting.host_id == request.user.id:
+        return "확정 문장을 쓴 진행자는 따로 동의하지 않습니다."
+    DecisionAgreement.objects.get_or_create(decision=decision, user=request.user)
+    decision_compiler.resolve_if_everyone_agreed(decision, decision_compiler.agreement_total(meeting))
+    return None
+
+
 @login_required
 def decision_review(request, meeting_id):
     """진행자 전용. "결정 컴파일 실행" → 실행 명세와 경고 확인·수정 → "투표 시작"."""
@@ -531,20 +616,28 @@ def decision_review(request, meeting_id):
             _save_decision_edits(request, meeting)
         elif action == "start_vote":
             error = _start_decision_vote(meeting)
+        elif action == "close_vote":
+            error = _close_decision_vote(request, meeting)
+        elif action == "confirm":
+            error = _confirm_decision(request, meeting)
         if error is None:
             return redirect("decision_review", meeting_id=meeting.id)
 
-    decisions = list(meeting.decisions.prefetch_related("interpretations"))
+    decisions = list(meeting.decisions.prefetch_related("interpretations", "agreements"))
     votable_ids = {decision.id for decision in decision_compiler.votable_decisions(meeting)}
+    agreement_needed = decision_compiler.agreement_total(meeting)
     rows = [
         {
             "decision": decision,
             "interpretations": list(decision.interpretations.all()),
             "votable": decision.id in votable_ids,
+            # 동의는 인원 수만 센다 — 누가 동의했는지는 담지 않는다.
+            "agreed": len(decision.agreements.all()),
         }
         for decision in decisions
     ]
     warned = [row for row in rows if row["decision"].warnings]
+    host_remaining = len(_host_unvoted_decisions(meeting, request.user))
     return render(request, "meetalign/decision_review.html", {
         "meeting": meeting,
         "rows": rows,
@@ -559,6 +652,15 @@ def decision_review(request, meeting_id):
         "editable": all(row["decision"].status == Decision.STATUS_DRAFT for row in rows),
         "vote_started": any(row["decision"].status != Decision.STATUS_DRAFT for row in rows),
         "confirm_choices": Decision.CONFIRM_CHOICES,
+        "voting_count": sum(1 for row in rows if row["decision"].status == Decision.STATUS_VOTING),
+        # 진행자가 아직 선택하지 않은 항목 수. 0이어야 "투표 마감"을 누를 수 있다(선투표 강제).
+        "host_remaining": host_remaining,
+        "can_close": host_remaining == 0,
+        "agreement_needed": agreement_needed,
+        "status_pending_host": Decision.STATUS_PENDING_HOST,
+        "status_resolved": Decision.STATUS_RESOLVED,
+        "status_undecided": Decision.STATUS_UNDECIDED,
+        "status_voting": Decision.STATUS_VOTING,
     })
 
 
@@ -600,6 +702,9 @@ def _save_decision_vote(request, meeting):
     except IntegrityError:
         # (항목, 사용자) 유일 제약. 창을 두 개 열어 동시에 제출한 경우 먼저 들어온 것을 남긴다.
         return "이미 이 항목에 선택을 제출했습니다."
+    # 전원이 골랐으면 진행자 마감을 기다리지 않고 바로 판정한다(④의 자동 발행 경로).
+    # 판정 결과가 '진행자 확정 대기'면 확정 문장이 아직 없으므로, 동의 집계는 여기서 보지 않는다.
+    decision_compiler.finalize_if_everyone_voted(decision, decision_compiler.participant_total(meeting))
     return None
 
 
@@ -613,12 +718,16 @@ def decision_vote(request, meeting_id):
     meeting = _decision_meeting(request, meeting_id)
     error = None
     if request.method == "POST":
-        error = _save_decision_vote(request, meeting)
+        if request.POST.get("action") == "agree":
+            error = _agree_decision(request, meeting)
+        else:
+            error = _save_decision_vote(request, meeting)
         if error is None:
             return redirect("decision_vote", meeting_id=meeting.id)
 
     decisions = list(
-        meeting.decisions.exclude(status=Decision.STATUS_DRAFT).prefetch_related("interpretations")
+        meeting.decisions.exclude(status=Decision.STATUS_DRAFT)
+        .prefetch_related("interpretations", "agreements")
     )
     # 내가 고른 항목의 id만 가져온다. 다른 사람의 선택은 조회조차 하지 않는다.
     voted_ids = set(
@@ -629,6 +738,13 @@ def decision_vote(request, meeting_id):
     total = decision_compiler.participant_total(meeting)
     tallies = decision_compiler.tallies_for(decisions, voted_ids, total)
 
+    is_host = meeting.host_id == request.user.id
+    agreement_needed = decision_compiler.agreement_total(meeting)
+    my_agreed_ids = set(
+        DecisionAgreement.objects.filter(decision__meeting=meeting, user=request.user)
+        .values_list("decision_id", flat=True)
+    )
+
     rows = []
     for decision in decisions:
         row = {
@@ -636,6 +752,15 @@ def decision_vote(request, meeting_id):
             "interpretations": list(decision.interpretations.all()),
             "voted": decision.id in voted_ids,
             "open": decision.status == Decision.STATUS_VOTING,
+            "agreed_count": len(decision.agreements.all()),
+            "i_agreed": decision.id in my_agreed_ids,
+            # 진행자가 쓴 확정 문장에 내가 동의를 눌러야 하는 항목인가.
+            "needs_my_agreement": (
+                decision.status == Decision.STATUS_PENDING_HOST
+                and bool(decision.final_text)
+                and not is_host
+                and decision.id not in my_agreed_ids
+            ),
         }
         # 내가 고르지 않은 항목에는 tally 키 자체가 없다 — 템플릿에서 꺼낼 수 있는 값이 없다.
         if decision.id in tallies:
@@ -647,12 +772,17 @@ def decision_vote(request, meeting_id):
         "meeting": meeting,
         "rows": rows,
         "error": error,
-        "is_host": meeting.host_id == request.user.id,
+        "is_host": is_host,
         "participant_total": total,
         "my_remaining": sum(1 for row in open_rows if not row["voted"]),
         "my_done": sum(1 for row in open_rows if row["voted"]),
         "open_count": len(open_rows),
+        "agreement_needed": agreement_needed,
+        "pending_my_agreement": sum(1 for row in rows if row["needs_my_agreement"]),
         "choice_prefix": decision_compiler.VOTE_CHOICE_PREFIX,
         "kind_custom": DecisionVote.KIND_CUSTOM,
         "kind_not_decided": DecisionVote.KIND_NOT_DECIDED,
+        "status_pending_host": Decision.STATUS_PENDING_HOST,
+        "status_resolved": Decision.STATUS_RESOLVED,
+        "status_undecided": Decision.STATUS_UNDECIDED,
     })

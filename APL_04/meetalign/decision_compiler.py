@@ -491,3 +491,153 @@ def tallies_for(decisions, voted_ids, total):
     for tally in tallies.values():
         tally["missing"] = max(tally["total"] - tally["voted"], 0)
     return tallies
+
+
+# ---------------------------------------------------------------------------
+# ④ 분기 처리 — 판정
+#
+# 판정은 '제출된 표'만 본다. 마감 시점에 아직 고르지 않은 사람은 판정에서 빼고, 화면에는
+# "N명 미투표"로 숫자만 보여준다(tally["missing"]).
+#
+# 규칙 (위에서부터 먼저 걸리는 것이 이긴다):
+#   1. 진행자가 '아직 안 정해진 것 같음'을 골랐다 → 다른 사람 선택과 관계없이 미결정.
+#   2. 제출한 전원이 '같은 해석'을 골랐다 → 확정 명세로 자동 발행.
+#      '직접 쓰기'나 '아직 안 정해진 것 같음'이 하나라도 섞이면 전원 일치가 아니다
+#      (직접 쓰기는 문장 내용을 비교하지 않는다 — 의미 비교는 하지 않기로 했다).
+#   3. 진행자가 고른 해석이 '해석을 고른 표'의 다수와 다르다 → 미결정.
+#      다수는 해석을 고른 표끼리만 센다. 그래서 "진행자는 해석을 골랐는데 참가자 일부가
+#      '아직 안 정해진 것 같음'을 고른" 경우는 다수 계산에서 그 표가 빠지므로 진행자가
+#      소수가 되지 않고, 아래 4번(갈림)으로 간다. 동률이면 진행자 선택이 공동 1위에
+#      들어 있으면 소수로 보지 않는다.
+#   4. 그 밖의 갈림 → 진행자 확정 대기. 진행자가 한 줄로 확정 문장을 쓰고 팀원이 동의한다.
+# ---------------------------------------------------------------------------
+
+
+def _host_vote(votes, host_id):
+    if not host_id:
+        return None
+    for vote in votes:
+        if vote.user_id == host_id:
+            return vote
+    return None
+
+
+def _interpretation_majority(votes):
+    """해석을 고른 표만 세서 가장 많이 나온 해석 id 집합. 동률이면 여러 개가 담긴다."""
+    counts = {}
+    for vote in votes:
+        if vote.kind == DecisionVote.KIND_INTERPRETATION and vote.interpretation_id:
+            counts[vote.interpretation_id] = counts.get(vote.interpretation_id, 0) + 1
+    if not counts:
+        return set()
+    top = max(counts.values())
+    return {interpretation_id for interpretation_id, n in counts.items() if n == top}
+
+
+def judge(decision, host_id):
+    """제출된 표로 ④ 분기를 판정한다. (새 status, 확정 문장) 을 돌려준다.
+
+    host_id가 없는(이 기능 도입 전에 만든) 회의는 '진행자 선택'이 없으므로 1·3번 규칙을
+    건너뛴다 — 전원 일치면 확정, 아니면 진행자 확정 대기다.
+    """
+    votes = list(decision.votes.select_related("interpretation"))
+    if not votes:
+        # 아무도 고르지 않은 채 마감됐다 — 판정할 근거가 없으므로 미결정으로 넘긴다.
+        return Decision.STATUS_UNDECIDED, ""
+
+    host_vote = _host_vote(votes, host_id)
+    if host_vote is not None and host_vote.kind == DecisionVote.KIND_NOT_DECIDED:
+        return Decision.STATUS_UNDECIDED, ""
+
+    chosen = {vote.interpretation_id for vote in votes}
+    all_picked_an_interpretation = all(
+        vote.kind == DecisionVote.KIND_INTERPRETATION and vote.interpretation_id for vote in votes
+    )
+    if all_picked_an_interpretation and len(chosen) == 1:
+        return Decision.STATUS_RESOLVED, votes[0].interpretation.text
+
+    if host_vote is not None and host_vote.kind == DecisionVote.KIND_INTERPRETATION:
+        majority = _interpretation_majority(votes)
+        if majority and host_vote.interpretation_id not in majority:
+            return Decision.STATUS_UNDECIDED, ""
+
+    return Decision.STATUS_PENDING_HOST, ""
+
+
+def finalize(decision, host_id):
+    """투표 중인 항목 하나를 판정해 저장한다. 저장된 새 status를 돌려준다.
+
+    status=voting 조건을 붙여 갱신하므로, 두 요청이 동시에 마감을 눌러도 판정은 한 번만
+    반영된다(두 번째 요청의 update가 0건이 된다).
+    """
+    status, final_text = judge(decision, host_id)
+    updated = Decision.objects.filter(pk=decision.pk, status=Decision.STATUS_VOTING).update(
+        status=status, final_text=final_text,
+    )
+    if not updated:
+        decision.refresh_from_db(fields=["status", "final_text"])
+        return decision.status
+    decision.status = status
+    decision.final_text = final_text
+    return status
+
+
+def finalize_if_everyone_voted(decision, total):
+    """전원이 골랐으면 바로 판정한다. 진행자 마감을 기다리지 않는 자동 발행 경로."""
+    if decision.status != Decision.STATUS_VOTING:
+        return None
+    if decision.votes.count() < total:
+        return None
+    return finalize(decision, decision.meeting.host_id)
+
+
+# ---------------------------------------------------------------------------
+# ④ 분기 처리 — 진행자 한 줄 확정과 동의
+# ---------------------------------------------------------------------------
+
+
+def agreement_total(meeting):
+    """'이 내용으로 맞춤' 동의가 필요한 인원 = 진행자를 뺀 팀원.
+
+    확정 문장을 쓴 사람이 진행자라서 진행자는 동의 대상이 아니다. 진행자가 없는 옛 회의는
+    팀원 전원을 대상으로 한다.
+    """
+    members = meeting.team.members
+    return members.exclude(pk=meeting.host_id).count() if meeting.host_id else members.count()
+
+
+def resolve_if_everyone_agreed(decision, total):
+    """동의가 다 모였으면 확정으로 넘긴다. 동의 대상이 0명이면(혼자인 팀) 바로 확정된다."""
+    if decision.status != Decision.STATUS_PENDING_HOST or not decision.final_text:
+        return False
+    if decision.agreements.count() < total:
+        return False
+    Decision.objects.filter(pk=decision.pk, status=Decision.STATUS_PENDING_HOST).update(
+        status=Decision.STATUS_RESOLVED,
+    )
+    decision.status = Decision.STATUS_RESOLVED
+    return True
+
+
+# ---------------------------------------------------------------------------
+# ④ 분기 처리 — 미결정 이월
+# ---------------------------------------------------------------------------
+
+
+def carryover_decisions(meeting):
+    """이 회의보다 먼저 만들어진 같은 팀 회의의 미결정 안건 중 아직 '처리됨'이 안 된 것.
+
+    진행자가 '처리됨'을 누를 때까지(carryover_resolved_at이 채워질 때까지) 이후 회의마다
+    계속 보인다 — 한 번 보고 사라지면 묻히기 때문이다.
+    """
+    return list(
+        Decision.objects
+        .filter(
+            meeting__team_id=meeting.team_id,
+            meeting__created_at__lt=meeting.created_at,
+            status=Decision.STATUS_UNDECIDED,
+            carryover_resolved_at__isnull=True,
+        )
+        .select_related("meeting")
+        .order_by("meeting__created_at", "order", "id")
+    )
