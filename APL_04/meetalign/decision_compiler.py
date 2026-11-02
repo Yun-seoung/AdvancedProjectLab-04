@@ -1,11 +1,18 @@
-"""결정 컴파일러(실험 기능)의 ① 컴파일과 ② 해석 분기.
+"""결정 컴파일러(실험 기능)의 ① 컴파일과 ② 해석 후보 생성.
 
 ① 컴파일: 회의 전사 원문에서 결정을 뽑아 실행 명세
    [누가 · 무엇을 · 언제까지 · 완료 기준 · 확정 여부]로 옮기고, 빈칸·모호어·숫자 충돌이
    있으면 '컴파일 경고'를 붙인다. 경고는 회의당 최대 MAX_WARNED_DECISIONS개까지만 남긴다.
-② 해석 분기: 경고가 붙은 항목마다 AI가 '가상 청자'가 되어 실행 결과가 서로 달라지는 해석
+② 해석 후보: 경고가 붙은 항목마다 AI가 '가상 청자'가 되어 실행 결과가 서로 달라지는 해석
    2~3개를 만든다. 각 해석의 근거 문장이 전사 원문에 실제로 없으면 그 해석은 버린다
    (기존 이해도 퀴즈의 evidence 검증과 같은 방식). 정답은 만들지 않는다.
+   이 후보는 진행자에게만 참고로 보여준다 — 진행자가 고르거나 직접 쓴 한 줄이 확정 내용이 된다.
+
+※ 블라인드 투표 모드(보류): 팀원 전원이 후보를 블라인드로 동시 선택하고 집계로 판정하는
+   방식을 먼저 만들었다가(DecisionVote + tallies_for/judge/finalize) 진행자 확정 모드로
+   방향을 바꿨다. 되살릴 때 참고할 구현은 커밋 7eb074a(블라인드 선택 화면)과
+   ac6fb89(전원일치/갈림/미결정 판정)에 있다. 아래 ①② 코드는 그때와 같으므로, 집계·판정
+   함수와 DecisionVote 모델만 다시 붙이면 된다.
 
 ※ services.py의 내부(_로 시작하는) 함수에 의존한다. 이번 실험에서는 services.py를 수정하지
    않고 그대로 가져다 쓰기로 했으므로, 아래 셋의 이름이나 동작이 바뀌면 이 모듈도 같이 고쳐야 한다.
@@ -23,10 +30,9 @@ import json
 import re
 
 from django.db import transaction
-from django.db.models import Count
 
 from . import services
-from .models import Decision, DecisionVote, Interpretation
+from .models import Decision, Interpretation
 
 # 경고는 회의당 최대 5개. 이보다 많이 발견되면 앞쪽(전사 순서) 5개만 경고로 남기고
 # 나머지는 명세로만 보여준다 — 한 회의에서 다룰 수 있는 안건 수를 넘기지 않기 위함.
@@ -34,7 +40,8 @@ MAX_WARNED_DECISIONS = 5
 # 명세 자체는 경고 유무와 무관하게 이만큼까지 받는다(LLM이 회의록을 잘게 쪼개는 경우 방지).
 MAX_DECISIONS = 12
 MAX_INTERPRETATIONS = 3
-# 해석이 1개 이하로 남으면 "서로 다른 해석"을 물을 수 없으므로 투표 대상이 못 된다.
+# 후보가 1개 이하로 남으면 "서로 다른 해석"을 보여줄 수 없어 진행자가 고를 것이 없다.
+# 그 항목은 직접 작성이나 '아직 미정'으로만 처리할 수 있다.
 MIN_INTERPRETATIONS = 2
 # 파싱 실패 시 같은 프롬프트로 한 번 더 보내고, 그래도 안 되면 실패 처리한다.
 PARSE_RETRIES = 1
@@ -358,13 +365,14 @@ def interpretations_for(decision, source):
 def compile_meeting(meeting):
     """회의 전사 원문을 컴파일해 Decision/Interpretation을 저장하고 요약을 돌려준다.
 
-    {"decisions": n, "warned": n, "dropped_warnings": n, "unvotable": n}
-    - warned: 경고가 붙어 해석 분기까지 간 항목 수
+    {"decisions": n, "warned": n, "dropped_warnings": n, "few_candidates": n}
+    - warned: 경고가 붙어 해석 후보 생성까지 간 항목 수
     - dropped_warnings: 경고가 났지만 회의당 5개 제한에 걸려 경고를 비운 항목 수
-    - unvotable: 근거 검증을 통과한 해석이 MIN_INTERPRETATIONS개 미만이라 투표에 올릴 수 없는 항목 수
+    - few_candidates: 근거 검증을 통과한 후보가 MIN_INTERPRETATIONS개 미만인 항목 수
+      (진행자가 고를 후보가 부족해 직접 작성이나 '아직 미정'으로만 처리할 수 있는 항목)
 
-    이미 Decision이 있는 회의는 건드리지 않는다(투표가 시작된 뒤 명세가 바뀌면 집계가 꼬인다).
-    다시 컴파일하려면 호출 전에 draft 상태인 Decision을 지워야 한다.
+    이미 Decision이 있는 회의는 건드리지 않는다(공개 뒤에 명세가 바뀌면 팀원이 확인한 내용과
+    달라진다). 다시 컴파일하려면 호출 전에 draft 상태인 Decision을 지워야 한다.
     """
     if meeting.decisions.exists():
         raise DecisionCompileError("이미 컴파일된 회의입니다. 다시 하려면 기존 명세를 먼저 지워 주세요.")
@@ -381,7 +389,7 @@ def compile_meeting(meeting):
     )
 
     warned = 0
-    unvotable = 0
+    few_candidates = 0
     with transaction.atomic():
         for order, (spec, warnings) in enumerate(zip(specs, all_warnings)):
             decision = Decision.objects.create(
@@ -399,224 +407,11 @@ def compile_meeting(meeting):
                     text=candidate["text"], evidence=candidate["evidence"],
                 )
             if len(candidates) < MIN_INTERPRETATIONS:
-                unvotable += 1
+                few_candidates += 1
     return {
         "decisions": len(specs), "warned": warned,
-        "dropped_warnings": dropped, "unvotable": unvotable,
+        "dropped_warnings": dropped, "few_candidates": few_candidates,
     }
-
-
-def votable_decisions(meeting):
-    """투표에 올릴 수 있는 항목 — 경고가 붙고 해석 후보가 MIN_INTERPRETATIONS개 이상인 것."""
-    # count()는 prefetch 캐시를 쓰지 않고 쿼리를 또 날리므로 len()으로 센다(항목 수만큼 N+1 방지).
-    return [
-        decision for decision in meeting.decisions.prefetch_related("interpretations")
-        if decision.warnings and len(decision.interpretations.all()) >= MIN_INTERPRETATIONS
-    ]
-
-
-# ---------------------------------------------------------------------------
-# ③ 블라인드 동시 선택 — 집계
-#
-# 집계에는 인원 수만 담고 user는 절대 담지 않는다. 그리고 "내가 고른 항목"의 집계만
-# 만든다 — 아직 고르지 않은 항목은 화면에서 숨기는 게 아니라 애초에 계산하지 않아야
-# 템플릿 실수로도 새지 않는다. 진행자도 예외가 아니다.
-# ---------------------------------------------------------------------------
-
-# 라디오 버튼 value에서 해석 선택을 가리키는 접두사. "interpretation:12" 형태.
-VOTE_CHOICE_PREFIX = "interpretation:"
-
-
-def participant_total(meeting):
-    """투표 대상 인원 = 팀 멤버 전원(진행자 포함).
-
-    기존 quiz_status.participant_count()는 '독려받을 대상'을 세느라 진행자를 뺐지만,
-    여기서는 진행자도 자기 해석을 골라야 하고 그 선택이 ④ 판정의 입력이 되므로 포함한다.
-    """
-    return meeting.team.members.count()
-
-
-def _empty_tally(decision, total):
-    return {
-        "interpretations": [
-            {"label": interpretation.label, "text": interpretation.text, "count": 0}
-            for interpretation in decision.interpretations.all()
-        ],
-        "by_interpretation_id": {},
-        "custom": 0,
-        "not_decided": 0,
-        # 해석이 지워져 어느 보기였는지 알 수 없게 된 표(DecisionVote.interpretation=SET_NULL).
-        "orphan": 0,
-        "voted": 0,
-        "missing": total,
-        "total": total,
-    }
-
-
-def tallies_for(decisions, voted_ids, total):
-    """{항목 id: 인원 수 집계}. voted_ids(= 내가 이미 고른 항목)에 든 항목만 계산한다.
-
-    쿼리는 항목이 몇 개든 1번이다(N+1 금지). 집계 항목:
-    interpretations[].count / custom / not_decided / orphan / voted / missing / total
-    """
-    wanted = [decision for decision in decisions if decision.id in voted_ids]
-    if not wanted:
-        return {}
-    tallies = {decision.id: _empty_tally(decision, total) for decision in wanted}
-    for decision in wanted:
-        tally = tallies[decision.id]
-        for index, interpretation in enumerate(decision.interpretations.all()):
-            tally["by_interpretation_id"][interpretation.id] = index
-
-    rows = (
-        DecisionVote.objects
-        .filter(decision_id__in=list(tallies))
-        .values("decision_id", "kind", "interpretation_id")
-        .annotate(n=Count("id"))
-    )
-    for row in rows:
-        tally = tallies[row["decision_id"]]
-        count = row["n"]
-        tally["voted"] += count
-        if row["kind"] == DecisionVote.KIND_CUSTOM:
-            tally["custom"] += count
-        elif row["kind"] == DecisionVote.KIND_NOT_DECIDED:
-            tally["not_decided"] += count
-        else:
-            index = tally["by_interpretation_id"].get(row["interpretation_id"])
-            if index is None:
-                tally["orphan"] += count
-            else:
-                tally["interpretations"][index]["count"] += count
-    for tally in tallies.values():
-        tally["missing"] = max(tally["total"] - tally["voted"], 0)
-    return tallies
-
-
-# ---------------------------------------------------------------------------
-# ④ 분기 처리 — 판정
-#
-# 판정은 '제출된 표'만 본다. 마감 시점에 아직 고르지 않은 사람은 판정에서 빼고, 화면에는
-# "N명 미투표"로 숫자만 보여준다(tally["missing"]).
-#
-# 규칙 (위에서부터 먼저 걸리는 것이 이긴다):
-#   1. 진행자가 '아직 안 정해진 것 같음'을 골랐다 → 다른 사람 선택과 관계없이 미결정.
-#   2. 제출한 전원이 '같은 해석'을 골랐다 → 확정 명세로 자동 발행.
-#      '직접 쓰기'나 '아직 안 정해진 것 같음'이 하나라도 섞이면 전원 일치가 아니다
-#      (직접 쓰기는 문장 내용을 비교하지 않는다 — 의미 비교는 하지 않기로 했다).
-#   3. 진행자가 고른 해석이 '해석을 고른 표'의 다수와 다르다 → 미결정.
-#      다수는 해석을 고른 표끼리만 센다. 그래서 "진행자는 해석을 골랐는데 참가자 일부가
-#      '아직 안 정해진 것 같음'을 고른" 경우는 다수 계산에서 그 표가 빠지므로 진행자가
-#      소수가 되지 않고, 아래 4번(갈림)으로 간다. 동률이면 진행자 선택이 공동 1위에
-#      들어 있으면 소수로 보지 않는다.
-#   4. 그 밖의 갈림 → 진행자 확정 대기. 진행자가 한 줄로 확정 문장을 쓰고 팀원이 동의한다.
-# ---------------------------------------------------------------------------
-
-
-def _host_vote(votes, host_id):
-    if not host_id:
-        return None
-    for vote in votes:
-        if vote.user_id == host_id:
-            return vote
-    return None
-
-
-def _interpretation_majority(votes):
-    """해석을 고른 표만 세서 가장 많이 나온 해석 id 집합. 동률이면 여러 개가 담긴다."""
-    counts = {}
-    for vote in votes:
-        if vote.kind == DecisionVote.KIND_INTERPRETATION and vote.interpretation_id:
-            counts[vote.interpretation_id] = counts.get(vote.interpretation_id, 0) + 1
-    if not counts:
-        return set()
-    top = max(counts.values())
-    return {interpretation_id for interpretation_id, n in counts.items() if n == top}
-
-
-def judge(decision, host_id):
-    """제출된 표로 ④ 분기를 판정한다. (새 status, 확정 문장) 을 돌려준다.
-
-    host_id가 없는(이 기능 도입 전에 만든) 회의는 '진행자 선택'이 없으므로 1·3번 규칙을
-    건너뛴다 — 전원 일치면 확정, 아니면 진행자 확정 대기다.
-    """
-    votes = list(decision.votes.select_related("interpretation"))
-    if not votes:
-        # 아무도 고르지 않은 채 마감됐다 — 판정할 근거가 없으므로 미결정으로 넘긴다.
-        return Decision.STATUS_UNDECIDED, ""
-
-    host_vote = _host_vote(votes, host_id)
-    if host_vote is not None and host_vote.kind == DecisionVote.KIND_NOT_DECIDED:
-        return Decision.STATUS_UNDECIDED, ""
-
-    chosen = {vote.interpretation_id for vote in votes}
-    all_picked_an_interpretation = all(
-        vote.kind == DecisionVote.KIND_INTERPRETATION and vote.interpretation_id for vote in votes
-    )
-    if all_picked_an_interpretation and len(chosen) == 1:
-        return Decision.STATUS_RESOLVED, votes[0].interpretation.text
-
-    if host_vote is not None and host_vote.kind == DecisionVote.KIND_INTERPRETATION:
-        majority = _interpretation_majority(votes)
-        if majority and host_vote.interpretation_id not in majority:
-            return Decision.STATUS_UNDECIDED, ""
-
-    return Decision.STATUS_PENDING_HOST, ""
-
-
-def finalize(decision, host_id):
-    """투표 중인 항목 하나를 판정해 저장한다. 저장된 새 status를 돌려준다.
-
-    status=voting 조건을 붙여 갱신하므로, 두 요청이 동시에 마감을 눌러도 판정은 한 번만
-    반영된다(두 번째 요청의 update가 0건이 된다).
-    """
-    status, final_text = judge(decision, host_id)
-    updated = Decision.objects.filter(pk=decision.pk, status=Decision.STATUS_VOTING).update(
-        status=status, final_text=final_text,
-    )
-    if not updated:
-        decision.refresh_from_db(fields=["status", "final_text"])
-        return decision.status
-    decision.status = status
-    decision.final_text = final_text
-    return status
-
-
-def finalize_if_everyone_voted(decision, total):
-    """전원이 골랐으면 바로 판정한다. 진행자 마감을 기다리지 않는 자동 발행 경로."""
-    if decision.status != Decision.STATUS_VOTING:
-        return None
-    if decision.votes.count() < total:
-        return None
-    return finalize(decision, decision.meeting.host_id)
-
-
-# ---------------------------------------------------------------------------
-# ④ 분기 처리 — 진행자 한 줄 확정과 동의
-# ---------------------------------------------------------------------------
-
-
-def agreement_total(meeting):
-    """'이 내용으로 맞춤' 동의가 필요한 인원 = 진행자를 뺀 팀원.
-
-    확정 문장을 쓴 사람이 진행자라서 진행자는 동의 대상이 아니다. 진행자가 없는 옛 회의는
-    팀원 전원을 대상으로 한다.
-    """
-    members = meeting.team.members
-    return members.exclude(pk=meeting.host_id).count() if meeting.host_id else members.count()
-
-
-def resolve_if_everyone_agreed(decision, total):
-    """동의가 다 모였으면 확정으로 넘긴다. 동의 대상이 0명이면(혼자인 팀) 바로 확정된다."""
-    if decision.status != Decision.STATUS_PENDING_HOST or not decision.final_text:
-        return False
-    if decision.agreements.count() < total:
-        return False
-    Decision.objects.filter(pk=decision.pk, status=Decision.STATUS_PENDING_HOST).update(
-        status=Decision.STATUS_RESOLVED,
-    )
-    decision.status = Decision.STATUS_RESOLVED
-    return True
 
 
 # ---------------------------------------------------------------------------

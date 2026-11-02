@@ -17,7 +17,7 @@ from django.utils import timezone
 
 from . import decision_compiler, quiz_status, services, tasks, views, whisper_worker
 from .models import (
-    Answer, ChatMessage, CheckQuestion, Checkpoint, Decision, DecisionAgreement, DecisionVote,
+    Answer, ChatMessage, CheckQuestion, Checkpoint, Decision, DecisionAgreement,
     Interpretation, Meeting, Question, Recording, SttUsage, Team,
 )
 
@@ -2141,9 +2141,14 @@ class DecisionCompileTests(TestCase):
         self.assertEqual(self.meeting.decisions.count(), len(decision_compiler.FAKE_DECISIONS))
         # 가짜 명세 3개 중 완전히 채워진 1개는 경고가 없고, 나머지 2개는 해석 후보까지 생긴다.
         self.assertEqual(summary["warned"], 2)
-        self.assertEqual(summary["unvotable"], 0)
+        self.assertEqual(summary["few_candidates"], 0)
         self.assertEqual(Interpretation.objects.filter(decision__meeting=self.meeting).count(), 4)
-        self.assertEqual(len(decision_compiler.votable_decisions(self.meeting)), 2)
+        # 경고가 붙은 2개 항목은 모두 후보를 2개씩 받아 진행자가 고를 수 있는 상태다.
+        with_candidates = [
+            d for d in self.meeting.decisions.all()
+            if d.interpretations.count() >= decision_compiler.MIN_INTERPRETATIONS
+        ]
+        self.assertEqual(len(with_candidates), 2)
 
     def test_items_without_warnings_get_no_interpretations(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -2197,7 +2202,7 @@ class DecisionCompileTests(TestCase):
             summary = decision_compiler.compile_meeting(self.meeting)
         self.assertEqual(summary["decisions"], len(decision_compiler.FAKE_DECISIONS))
 
-    def test_interpretations_with_fabricated_evidence_leave_the_item_unvotable(self):
+    def test_interpretations_with_fabricated_evidence_leave_the_item_without_candidates(self):
         compiled = json.dumps([{"who": "민수", "what": "배포", "due": "금요일", "done": "", "state": "확정"}], ensure_ascii=False)
         # 두 해석 모두 전사 원문에 없는 문장을 근거로 달았으므로 전부 버려진다.
         interpretations = json.dumps([
@@ -2207,9 +2212,8 @@ class DecisionCompileTests(TestCase):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), self._llm(compiled, interpretations, interpretations):
             summary = decision_compiler.compile_meeting(self.meeting)
         self.assertEqual(summary["warned"], 1)
-        self.assertEqual(summary["unvotable"], 1)
+        self.assertEqual(summary["few_candidates"], 1)
         self.assertEqual(Interpretation.objects.filter(decision__meeting=self.meeting).count(), 0)
-        self.assertEqual(decision_compiler.votable_decisions(self.meeting), [])
 
     def test_recompiling_an_already_compiled_meeting_is_refused(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -2285,7 +2289,6 @@ class DecisionReviewTests(TestCase):
         r = self.client.get(self.url)
         self.assertTrue(r.context["compiled"])
         self.assertEqual(r.context["warned_count"], 2)
-        self.assertEqual(r.context["votable_count"], 2)
 
     def test_compile_failure_is_shown_on_the_page(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="안 되겠습니다"):
@@ -2319,37 +2322,21 @@ class DecisionReviewTests(TestCase):
         decision.refresh_from_db()
         self.assertEqual(decision.what, before)
 
-    def test_dropping_interpretations_makes_the_item_unvotable(self):
+    def test_dropping_every_candidate_leaves_the_item_with_none(self):
         self._compile()
-        decision = decision_compiler.votable_decisions(self.meeting)[0]
+        decision = next(d for d in self.meeting.decisions.all() if d.warnings)
         fields = {"action": "save", "what_%d" % decision.id: decision.what}
         for interpretation in decision.interpretations.all():
             fields["drop_interpretation_%d" % interpretation.id] = "1"
         self.client.post(self.url, fields)
-        # decision은 prefetch_related로 받아온 객체라서 .interpretations.count()가 캐시된
-        # 옛 값을 돌려준다. 삭제가 실제로 됐는지는 새 쿼리로 확인한다.
+        # 후보가 하나도 없으면 진행자는 직접 작성이나 '아직 미정'으로만 처리할 수 있다.
         self.assertEqual(Interpretation.objects.filter(decision=decision).count(), 0)
-        self.assertNotIn(decision.id, {d.id for d in decision_compiler.votable_decisions(self.meeting)})
+        self.assertContains(self.client.get(self.url), "해석 후보가 없습니다")
 
-    def test_start_vote_moves_only_votable_items_to_voting(self):
+    def test_specs_cannot_be_edited_once_published(self):
         self._compile()
-        votable_ids = {d.id for d in decision_compiler.votable_decisions(self.meeting)}
-        self.client.post(self.url, {"action": "start_vote"})
-        for decision in self.meeting.decisions.all():
-            expected = Decision.STATUS_VOTING if decision.id in votable_ids else Decision.STATUS_DRAFT
-            self.assertEqual(decision.status, expected, decision.spec_line)
-
-    def test_start_vote_without_any_votable_item_shows_an_error(self):
-        self._compile()
-        Interpretation.objects.filter(decision__meeting=self.meeting).delete()
-        r = self.client.post(self.url, {"action": "start_vote"})
-        self.assertContains(r, "투표에 올릴 항목이 없습니다")
-        self.assertFalse(self.meeting.decisions.filter(status=Decision.STATUS_VOTING).exists())
-
-    def test_specs_cannot_be_edited_once_voting_started(self):
-        self._compile()
-        self.client.post(self.url, {"action": "start_vote"})
-        decision = self.meeting.decisions.filter(status=Decision.STATUS_VOTING).first()
+        decision = self.meeting.decisions.first()
+        Decision.objects.filter(pk=decision.pk).update(status=Decision.STATUS_PUBLISHED)
         before = decision.who
         self.client.post(self.url, {
             "action": "save",
@@ -2360,9 +2347,9 @@ class DecisionReviewTests(TestCase):
         self.assertEqual(decision.who, before)
         self.assertFalse(self.client.get(self.url).context["editable"])
 
-    def test_reset_is_refused_after_voting_started(self):
+    def test_reset_is_refused_after_publishing(self):
         self._compile()
-        self.client.post(self.url, {"action": "start_vote"})
+        self.meeting.decisions.update(status=Decision.STATUS_PUBLISHED)
         r = self.client.post(self.url, {"action": "reset"})
         self.assertContains(r, "지울 수 없습니다")
         self.assertGreater(self.meeting.decisions.count(), 0)
@@ -2416,698 +2403,12 @@ class DecisionEntryLinkTests(TestCase):
         r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
         self.assertContains(r, self.link)
 
-    def test_member_gets_the_vote_screen_link_instead(self):
+    def test_member_sees_no_decision_link_before_the_ack_screen_exists(self):
+        # 팀원 확인 화면(decision_ack)은 Phase C에서 붙인다. 그때까지 팀원에게는 링크가 없다.
         self.client.force_login(self.member)
-        vote_link = reverse("decision_vote", args=[self.meeting.id])
         for name in ("meeting_result", "meeting_detail"):
             r = self.client.get(reverse(name, args=[self.meeting.id]))
-            self.assertContains(r, vote_link, msg_prefix=name)
             self.assertNotContains(r, self.link, msg_prefix=name)
-
-
-class DecisionVoteTests(TestCase):
-    """③ 블라인드 동시 선택. 진행자도 참가자로서 똑같이 고른다."""
-
-    def setUp(self):
-        self.host = User.objects.create_user("hostuser", password="pw12345!")
-        self.alice = User.objects.create_user("aliceuser", password="pw12345!")
-        self.bob = User.objects.create_user("bobuser", password="pw12345!")
-        self.outsider = User.objects.create_user("outsideruser", password="pw12345!")
-        self.team = Team.objects.create(name="t")
-        self.team.members.add(self.host, self.alice, self.bob)
-        self.meeting = Meeting.objects.create(
-            team=self.team, title="m", host=self.host,
-            processing_status=Meeting.STATUS_DONE,
-            record="결정", transcript="민수가 금요일까지 배포를 맡기로 했습니다.",
-        )
-        self.decision = Decision.objects.create(
-            meeting=self.meeting, order=0, who="민수", what="배포", due_text="금요일",
-            done_criteria="", warnings=["완료 기준 빈칸"], status=Decision.STATUS_VOTING,
-        )
-        self.a = Interpretation.objects.create(decision=self.decision, order=0, text="이번 주 금요일")
-        self.b = Interpretation.objects.create(decision=self.decision, order=1, text="다음 주 금요일")
-        self.url = reverse("decision_vote", args=[self.meeting.id])
-
-    def _login(self, user):
-        client = Client()
-        client.force_login(user)
-        return client
-
-    def _vote(self, client, choice, custom_text=""):
-        return client.post(self.url, {
-            "decision_id": self.decision.id, "choice": choice, "custom_text": custom_text,
-        })
-
-    def _interp_choice(self, interpretation):
-        return "%s%d" % (decision_compiler.VOTE_CHOICE_PREFIX, interpretation.id)
-
-    # ---- 권한 ----
-
-    def test_outsider_gets_404(self):
-        self.assertEqual(self._login(self.outsider).get(self.url).status_code, 404)
-
-    def test_outsider_cannot_vote(self):
-        r = self._vote(self._login(self.outsider), self._interp_choice(self.a))
-        self.assertEqual(r.status_code, 404)
-        self.assertEqual(DecisionVote.objects.count(), 0)
-
-    def test_anonymous_user_is_redirected_to_login(self):
-        self.assertEqual(Client().get(self.url).status_code, 302)
-
-    def test_every_team_member_including_the_host_can_vote(self):
-        for user in (self.host, self.alice, self.bob):
-            client = self._login(user)
-            self.assertEqual(client.get(self.url).status_code, 200)
-            self.assertEqual(self._vote(client, self._interp_choice(self.a)).status_code, 302)
-        self.assertEqual(self.decision.votes.count(), 3)
-
-    def test_meeting_without_a_finished_record_gets_404(self):
-        Meeting.objects.filter(pk=self.meeting.pk).update(processing_status=Meeting.STATUS_PROCESSING)
-        self.assertEqual(self._login(self.alice).get(self.url).status_code, 404)
-
-    # ---- 블라인드: 내가 고르기 전에는 집계가 응답에 없다 ----
-
-    def test_tally_is_absent_from_the_context_before_i_vote(self):
-        self._vote(self._login(self.alice), self._interp_choice(self.a))
-        self._vote(self._login(self.bob), self._interp_choice(self.a))
-        r = self._login(self.host).get(self.url)
-        row = r.context["rows"][0]
-        self.assertFalse(row["voted"])
-        # 숨기는 게 아니라 키 자체가 없어야 한다 — 템플릿 실수로도 샐 수 없게.
-        self.assertNotIn("tally", row)
-        self.assertEqual(r.context["tallies"] if "tallies" in r.context else {}, {})
-
-    # 집계 블록에만 나오는 문구. 그냥 "집계"로 찾으면 base.html의 개발 노트 설명에도 걸린다.
-    TALLY_MARKER = "명 선택)"
-
-    def test_host_sees_no_tally_before_voting_either(self):
-        self._vote(self._login(self.alice), self._interp_choice(self.a))
-        r = self._login(self.host).get(self.url)
-        self.assertNotContains(r, self.TALLY_MARKER)
-        self.assertContains(r, "선택 제출")
-
-    def test_tally_appears_only_after_i_vote(self):
-        alice = self._login(self.alice)
-        self.assertNotContains(alice.get(self.url), self.TALLY_MARKER)
-        self._vote(alice, self._interp_choice(self.a))
-        r = alice.get(self.url)
-        self.assertContains(r, self.TALLY_MARKER)
-        self.assertNotContains(r, "선택 제출")
-
-    def test_tally_is_per_item_not_per_screen(self):
-        # 2번 항목은 안 골랐으므로 1번 항목의 집계만 보여야 한다.
-        second = Decision.objects.create(
-            meeting=self.meeting, order=1, what="문서 정리",
-            warnings=["담당자 빈칸"], status=Decision.STATUS_VOTING,
-        )
-        Interpretation.objects.create(decision=second, order=0, text="해석 A")
-        Interpretation.objects.create(decision=second, order=1, text="해석 B")
-        alice = self._login(self.alice)
-        self._vote(alice, self._interp_choice(self.a))
-        rows = {row["decision"].id: row for row in alice.get(self.url).context["rows"]}
-        self.assertIn("tally", rows[self.decision.id])
-        self.assertNotIn("tally", rows[second.id])
-
-    def test_tally_counts_everyone_once_i_have_voted(self):
-        self._vote(self._login(self.alice), self._interp_choice(self.a))
-        self._vote(self._login(self.bob), self._interp_choice(self.b))
-        self._vote(self._login(self.host), DecisionVote.KIND_NOT_DECIDED)
-        tally = self._login(self.host).get(self.url).context["rows"][0]["tally"]
-        self.assertEqual(tally["total"], 3)
-        self.assertEqual(tally["voted"], 3)
-        self.assertEqual(tally["missing"], 0)
-        self.assertEqual(tally["not_decided"], 1)
-        self.assertEqual([item["count"] for item in tally["interpretations"]], [1, 1])
-
-    def test_tally_reports_how_many_have_not_voted(self):
-        alice = self._login(self.alice)
-        self._vote(alice, self._interp_choice(self.a))
-        tally = alice.get(self.url).context["rows"][0]["tally"]
-        self.assertEqual(tally["voted"], 1)
-        self.assertEqual(tally["missing"], 2)
-        self.assertContains(alice.get(self.url), "2명 미선택")
-
-    # ---- 익명: 이름이 어떤 화면에도 선택과 함께 나오지 않는다 ----
-
-    def test_no_screen_shows_another_persons_name(self):
-        """다른 사람의 이름은 어떤 결정 확인 화면에도 나오지 않는다.
-
-        base.html은 상단 칩에 '보는 사람 본인'의 아이디를 늘 띄우므로(기존 동작) 본인
-        이름은 제외하고, 나머지 참가자의 이름이 한 번도 안 나오는지를 본다.
-        """
-        self._vote(self._login(self.alice), self._interp_choice(self.a))
-        self._vote(self._login(self.bob), DecisionVote.KIND_CUSTOM, "내가 이해한 내용")
-        self._vote(self._login(self.host), self._interp_choice(self.b))
-        review_url = reverse("decision_review", args=[self.meeting.id])
-        cases = [
-            (self.host, self.url),
-            (self.host, review_url),
-            (self.alice, self.url),
-            (self.bob, self.url),
-        ]
-        for viewer, url in cases:
-            page = self._login(viewer).get(url)
-            for other in (self.alice, self.bob, self.host):
-                if other.id == viewer.id:
-                    continue
-                self.assertNotContains(page, other.username, msg_prefix="%s/%s" % (viewer.username, url))
-
-    def test_custom_texts_are_not_shown_to_anyone(self):
-        self._vote(self._login(self.bob), DecisionVote.KIND_CUSTOM, "밥이 쓴 비밀 해석")
-        self._vote(self._login(self.host), self._interp_choice(self.a))
-        for client in (self._login(self.host), self._login(self.alice)):
-            self.assertNotContains(client.get(self.url), "밥이 쓴 비밀 해석")
-
-    def test_my_own_choice_is_not_echoed_back_on_the_page(self):
-        # 본인이 쓴 내용도 다시 띄우지 않는다 — 어깨 너머로 보이면 익명성이 깨지고,
-        # 집계는 '어느 보기에 몇 명'까지만 알려주면 충분하다.
-        alice = self._login(self.alice)
-        self._vote(alice, DecisionVote.KIND_CUSTOM, "내가 쓴 내용")
-        r = alice.get(self.url)
-        self.assertNotContains(r, "내가 쓴 내용")
-        self.assertContains(r, self.TALLY_MARKER)
-
-    # ---- 선택 저장 규칙 ----
-
-    def test_choosing_an_interpretation_is_stored_with_its_id(self):
-        self._vote(self._login(self.alice), self._interp_choice(self.b))
-        vote = DecisionVote.objects.get(decision=self.decision, user=self.alice)
-        self.assertEqual(vote.kind, DecisionVote.KIND_INTERPRETATION)
-        self.assertEqual(vote.interpretation_id, self.b.id)
-        self.assertEqual(vote.custom_text, "")
-
-    def test_custom_choice_requires_text(self):
-        client = self._login(self.alice)
-        r = self._vote(client, DecisionVote.KIND_CUSTOM, "   ")
-        self.assertContains(r, "한 줄 적어 주세요")
-        self.assertEqual(DecisionVote.objects.count(), 0)
-
-    def test_custom_choice_stores_the_text(self):
-        self._vote(self._login(self.alice), DecisionVote.KIND_CUSTOM, "  금요일 퇴근 전까지  ")
-        vote = DecisionVote.objects.get(user=self.alice)
-        self.assertEqual(vote.kind, DecisionVote.KIND_CUSTOM)
-        self.assertEqual(vote.custom_text, "금요일 퇴근 전까지")
-
-    def test_not_decided_choice_keeps_no_text(self):
-        self._vote(self._login(self.alice), DecisionVote.KIND_NOT_DECIDED, "무시돼야 하는 내용")
-        vote = DecisionVote.objects.get(user=self.alice)
-        self.assertEqual(vote.kind, DecisionVote.KIND_NOT_DECIDED)
-        self.assertEqual(vote.custom_text, "")
-
-    def test_choice_is_required(self):
-        r = self._vote(self._login(self.alice), "")
-        self.assertContains(r, "하나 골라 주세요")
-        self.assertEqual(DecisionVote.objects.count(), 0)
-
-    def test_an_interpretation_from_another_decision_is_rejected(self):
-        other = Decision.objects.create(meeting=self.meeting, order=1, what="다른 항목", status=Decision.STATUS_VOTING)
-        stranger = Interpretation.objects.create(decision=other, order=0, text="남의 해석")
-        r = self._vote(self._login(self.alice), self._interp_choice(stranger))
-        self.assertEqual(r.status_code, 404)
-        self.assertEqual(DecisionVote.objects.count(), 0)
-
-    def test_voting_on_a_draft_item_is_refused(self):
-        Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)
-        r = self._vote(self._login(self.alice), self._interp_choice(self.a))
-        self.assertContains(r, "받고 있는 항목이 아닙니다")
-        self.assertEqual(DecisionVote.objects.count(), 0)
-
-    def test_a_second_submission_cannot_change_my_choice(self):
-        client = self._login(self.alice)
-        self._vote(client, self._interp_choice(self.a))
-        r = self._vote(client, self._interp_choice(self.b))
-        self.assertContains(r, "이미 이 항목에 선택을 제출했습니다")
-        vote = DecisionVote.objects.get(user=self.alice)
-        self.assertEqual(vote.interpretation_id, self.a.id)
-        self.assertEqual(DecisionVote.objects.count(), 1)
-
-    def test_a_decision_from_another_meeting_is_rejected(self):
-        other_meeting = Meeting.objects.create(
-            team=self.team, title="m2", host=self.host, processing_status=Meeting.STATUS_DONE,
-        )
-        stranger = Decision.objects.create(
-            meeting=other_meeting, order=0, what="남의 회의 항목", status=Decision.STATUS_VOTING,
-        )
-        r = self._login(self.alice).post(self.url, {
-            "decision_id": stranger.id, "choice": DecisionVote.KIND_NOT_DECIDED,
-        })
-        self.assertEqual(r.status_code, 404)
-        self.assertEqual(DecisionVote.objects.count(), 0)
-
-    # ---- 화면 상태 ----
-
-    def test_draft_items_are_not_listed_at_all(self):
-        Decision.objects.create(meeting=self.meeting, order=1, what="검토 중인 항목", status=Decision.STATUS_DRAFT)
-        r = self._login(self.alice).get(self.url)
-        self.assertEqual([row["decision"].id for row in r.context["rows"]], [self.decision.id])
-        self.assertNotContains(r, "검토 중인 항목")
-
-    def test_empty_state_before_the_host_starts(self):
-        Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)
-        r = self._login(self.alice).get(self.url)
-        self.assertContains(r, "아직 결정 확인을 시작하지 않았습니다")
-
-    def test_remaining_count_tracks_my_own_progress(self):
-        second = Decision.objects.create(
-            meeting=self.meeting, order=1, what="문서", warnings=["담당자 빈칸"], status=Decision.STATUS_VOTING,
-        )
-        Interpretation.objects.create(decision=second, order=0, text="해석 A")
-        alice = self._login(self.alice)
-        self.assertEqual(alice.get(self.url).context["my_remaining"], 2)
-        self._vote(alice, self._interp_choice(self.a))
-        r = alice.get(self.url)
-        self.assertEqual(r.context["my_remaining"], 1)
-        self.assertEqual(r.context["my_done"], 1)
-        self.assertContains(r, "아직 1개 항목을 고르지 않았습니다")
-
-    def test_host_sees_tabs_to_both_screens_once_voting_started(self):
-        r = self._login(self.host).get(self.url)
-        self.assertContains(r, reverse("decision_review", args=[self.meeting.id]))
-        r = self._login(self.alice).get(self.url)
-        self.assertNotContains(r, reverse("decision_review", args=[self.meeting.id]))
-
-    def test_orphan_votes_are_counted_separately(self):
-        # 해석이 지워진 표는 어느 보기였는지 알 수 없으므로 따로 센다(인원 합이 맞아야 하므로).
-        self._vote(self._login(self.alice), self._interp_choice(self.a))
-        self._vote(self._login(self.host), self._interp_choice(self.b))
-        self.a.delete()
-        tally = self._login(self.host).get(self.url).context["rows"][0]["tally"]
-        self.assertEqual(tally["orphan"], 1)
-        self.assertEqual(tally["voted"], 2)
-
-    def test_tally_uses_a_fixed_number_of_queries(self):
-        for user in (self.alice, self.bob, self.host):
-            self._vote(self._login(user), self._interp_choice(self.a))
-        for order in range(1, 5):
-            extra = Decision.objects.create(
-                meeting=self.meeting, order=order, what="항목 %d" % order,
-                warnings=["담당자 빈칸"], status=Decision.STATUS_VOTING,
-            )
-            Interpretation.objects.create(decision=extra, order=0, text="해석 A")
-            DecisionVote.objects.create(
-                decision=extra, user=self.host, kind=DecisionVote.KIND_NOT_DECIDED,
-            )
-        client = self._login(self.host)
-        with CaptureQueriesContext(connection) as many:
-            client.get(self.url)
-        Decision.objects.filter(order__gt=0).delete()
-        with CaptureQueriesContext(connection) as few:
-            client.get(self.url)
-        # 항목이 1개일 때와 5개일 때 쿼리 수가 같아야 한다(집계는 한 번에 센다).
-        self.assertEqual(len(many.captured_queries), len(few.captured_queries))
-
-
-class DecisionJudgeTests(TestCase):
-    """④ 분기 판정 규칙. 제출된 표만 보고, 미투표자는 판정에서 뺀다."""
-
-    def setUp(self):
-        self.host = User.objects.create_user("hostuser", password="pw12345!")
-        self.alice = User.objects.create_user("aliceuser", password="pw12345!")
-        self.bob = User.objects.create_user("bobuser", password="pw12345!")
-        self.team = Team.objects.create(name="t")
-        self.team.members.add(self.host, self.alice, self.bob)
-        self.meeting = Meeting.objects.create(
-            team=self.team, title="m", host=self.host,
-            processing_status=Meeting.STATUS_DONE, transcript="전사",
-        )
-        self.decision = Decision.objects.create(
-            meeting=self.meeting, order=0, who="민수", what="배포",
-            warnings=["완료 기준 빈칸"], status=Decision.STATUS_VOTING,
-        )
-        self.a = Interpretation.objects.create(decision=self.decision, order=0, text="이번 주 금요일")
-        self.b = Interpretation.objects.create(decision=self.decision, order=1, text="다음 주 금요일")
-
-    def _pick(self, user, interpretation):
-        DecisionVote.objects.create(
-            decision=self.decision, user=user,
-            kind=DecisionVote.KIND_INTERPRETATION, interpretation=interpretation,
-        )
-
-    def _not_decided(self, user):
-        DecisionVote.objects.create(decision=self.decision, user=user, kind=DecisionVote.KIND_NOT_DECIDED)
-
-    def _custom(self, user, text="내가 이해한 내용"):
-        DecisionVote.objects.create(
-            decision=self.decision, user=user, kind=DecisionVote.KIND_CUSTOM, custom_text=text,
-        )
-
-    def _judge(self):
-        return decision_compiler.judge(self.decision, self.meeting.host_id)
-
-    # ---- 규칙 1: 진행자가 '아직 안 정해진 것 같음' → 무조건 미결정 ----
-
-    def test_host_choosing_not_decided_makes_it_undecided_even_if_others_agree(self):
-        self._not_decided(self.host)
-        self._pick(self.alice, self.a)
-        self._pick(self.bob, self.a)
-        self.assertEqual(self._judge(), (Decision.STATUS_UNDECIDED, ""))
-
-    # ---- 규칙 2: 제출한 전원이 같은 해석 → 확정 자동 발행 ----
-
-    def test_everyone_picking_the_same_interpretation_resolves_it(self):
-        for user in (self.host, self.alice, self.bob):
-            self._pick(user, self.b)
-        self.assertEqual(self._judge(), (Decision.STATUS_RESOLVED, self.b.text))
-
-    def test_unanimity_counts_only_submitted_votes(self):
-        # 밥은 아직 안 골랐다 — 판정에서 빼고, 제출한 두 명이 같으면 확정이다.
-        self._pick(self.host, self.a)
-        self._pick(self.alice, self.a)
-        self.assertEqual(self._judge(), (Decision.STATUS_RESOLVED, self.a.text))
-
-    def test_one_custom_entry_breaks_unanimity_regardless_of_its_text(self):
-        # 의미 비교는 하지 않는다 — 문장이 같은 뜻이어도 '직접 쓰기'가 섞이면 갈림이다.
-        self._pick(self.host, self.a)
-        self._pick(self.alice, self.a)
-        self._custom(self.bob, self.a.text)
-        self.assertEqual(self._judge(), (Decision.STATUS_PENDING_HOST, ""))
-
-    def test_everyone_writing_their_own_is_not_unanimity(self):
-        for user in (self.host, self.alice, self.bob):
-            self._custom(user, "같은 문장")
-        self.assertEqual(self._judge(), (Decision.STATUS_PENDING_HOST, ""))
-
-    def test_everyone_choosing_not_decided_is_undecided_via_the_host_rule(self):
-        for user in (self.host, self.alice, self.bob):
-            self._not_decided(user)
-        self.assertEqual(self._judge(), (Decision.STATUS_UNDECIDED, ""))
-
-    # ---- 규칙 3: 진행자 선택이 '해석을 고른 표'의 다수와 다르면 미결정 ----
-
-    def test_host_in_the_minority_of_interpretation_votes_makes_it_undecided(self):
-        self._pick(self.host, self.a)
-        self._pick(self.alice, self.b)
-        self._pick(self.bob, self.b)
-        self.assertEqual(self._judge(), (Decision.STATUS_UNDECIDED, ""))
-
-    def test_participants_choosing_not_decided_do_not_push_the_host_into_a_minority(self):
-        """진행자는 해석을 골랐고 참가자 일부가 '아직 안 정해진 것 같음'을 고른 경우.
-
-        '아직 안 정해진 것 같음' 표는 해석 다수 계산에서 빠지므로 진행자가 소수가 되지 않고,
-        갈림(진행자 확정 대기)으로 간다.
-        """
-        self._pick(self.host, self.a)
-        self._not_decided(self.alice)
-        self._not_decided(self.bob)
-        self.assertEqual(self._judge(), (Decision.STATUS_PENDING_HOST, ""))
-
-    def test_custom_votes_do_not_push_the_host_into_a_minority_either(self):
-        self._pick(self.host, self.a)
-        self._custom(self.alice)
-        self._custom(self.bob)
-        self.assertEqual(self._judge(), (Decision.STATUS_PENDING_HOST, ""))
-
-    def test_a_tie_keeps_the_host_out_of_the_minority(self):
-        self._pick(self.host, self.a)
-        self._pick(self.alice, self.b)
-        self.assertEqual(self._judge(), (Decision.STATUS_PENDING_HOST, ""))
-
-    def test_host_writing_their_own_goes_to_pending_host(self):
-        self._custom(self.host)
-        self._pick(self.alice, self.b)
-        self._pick(self.bob, self.b)
-        self.assertEqual(self._judge(), (Decision.STATUS_PENDING_HOST, ""))
-
-    # ---- 경계 ----
-
-    def test_no_votes_at_all_is_undecided(self):
-        self.assertEqual(self._judge(), (Decision.STATUS_UNDECIDED, ""))
-
-    def test_host_not_voting_skips_rules_one_and_three(self):
-        # 진행자 표가 없으면 참가자 표만으로 판정한다(선투표 강제가 뚫린 경우의 방어선).
-        self._pick(self.alice, self.a)
-        self._pick(self.bob, self.a)
-        self.assertEqual(self._judge(), (Decision.STATUS_RESOLVED, self.a.text))
-
-    def test_meeting_without_a_host_judges_on_participants_only(self):
-        Meeting.objects.filter(pk=self.meeting.pk).update(host=None)
-        self.meeting.refresh_from_db()
-        self._pick(self.alice, self.a)
-        self._pick(self.bob, self.b)
-        self.assertEqual(
-            decision_compiler.judge(self.decision, self.meeting.host_id),
-            (Decision.STATUS_PENDING_HOST, ""),
-        )
-
-    def test_finalize_only_acts_on_a_voting_item(self):
-        for user in (self.host, self.alice, self.bob):
-            self._pick(user, self.a)
-        self.assertEqual(decision_compiler.finalize(self.decision, self.host.id), Decision.STATUS_RESOLVED)
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.final_text, self.a.text)
-        # 두 번째 마감은 이미 판정된 항목을 다시 바꾸지 않는다.
-        Interpretation.objects.filter(pk=self.b.pk).delete()
-        self.assertEqual(decision_compiler.finalize(self.decision, self.host.id), Decision.STATUS_RESOLVED)
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.final_text, self.a.text)
-
-
-class DecisionBranchFlowTests(TestCase):
-    """④ 분기 처리의 화면 흐름 — 자동 발행, 마감, 진행자 한 줄 확정과 동의."""
-
-    def setUp(self):
-        self.host = User.objects.create_user("hostuser", password="pw12345!")
-        self.alice = User.objects.create_user("aliceuser", password="pw12345!")
-        self.bob = User.objects.create_user("bobuser", password="pw12345!")
-        self.team = Team.objects.create(name="t")
-        self.team.members.add(self.host, self.alice, self.bob)
-        self.meeting = Meeting.objects.create(
-            team=self.team, title="m", host=self.host,
-            processing_status=Meeting.STATUS_DONE, record="결정", transcript="전사",
-        )
-        self.decision = Decision.objects.create(
-            meeting=self.meeting, order=0, who="민수", what="배포",
-            warnings=["완료 기준 빈칸"], status=Decision.STATUS_VOTING,
-        )
-        self.a = Interpretation.objects.create(decision=self.decision, order=0, text="이번 주 금요일")
-        self.b = Interpretation.objects.create(decision=self.decision, order=1, text="다음 주 금요일")
-        self.vote_url = reverse("decision_vote", args=[self.meeting.id])
-        self.review_url = reverse("decision_review", args=[self.meeting.id])
-
-    def _login(self, user):
-        client = Client()
-        client.force_login(user)
-        return client
-
-    def _choice(self, interpretation):
-        return "%s%d" % (decision_compiler.VOTE_CHOICE_PREFIX, interpretation.id)
-
-    def _vote(self, user, choice, custom_text=""):
-        return self._login(user).post(self.vote_url, {
-            "decision_id": self.decision.id, "choice": choice, "custom_text": custom_text,
-        })
-
-    # ---- 전원이 골랐을 때 자동 판정 ----
-
-    def test_item_is_published_as_soon_as_everyone_picks_the_same_interpretation(self):
-        self._vote(self.alice, self._choice(self.a))
-        self._vote(self.bob, self._choice(self.a))
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.status, Decision.STATUS_VOTING)
-        self._vote(self.host, self._choice(self.a))
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.status, Decision.STATUS_RESOLVED)
-        self.assertEqual(self.decision.final_text, self.a.text)
-
-    def test_everyone_voting_with_a_split_goes_to_pending_host(self):
-        self._vote(self.alice, self._choice(self.a))
-        self._vote(self.bob, DecisionVote.KIND_CUSTOM, "내 해석")
-        self._vote(self.host, self._choice(self.a))
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.status, Decision.STATUS_PENDING_HOST)
-        self.assertEqual(self.decision.final_text, "")
-
-    def test_host_choosing_not_decided_marks_it_undecided_on_the_spot(self):
-        self._vote(self.alice, self._choice(self.a))
-        self._vote(self.bob, self._choice(self.a))
-        self._vote(self.host, DecisionVote.KIND_NOT_DECIDED)
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.status, Decision.STATUS_UNDECIDED)
-
-    def test_resolved_item_stops_accepting_votes(self):
-        for user in (self.alice, self.bob, self.host):
-            self._vote(user, self._choice(self.a))
-        extra = User.objects.create_user("lateuser", password="pw12345!")
-        self.team.members.add(extra)
-        r = self._vote(extra, self._choice(self.b))
-        self.assertContains(r, "받고 있는 항목이 아닙니다")
-
-    # ---- 진행자 마감과 선투표 강제 ----
-
-    def test_host_cannot_close_before_voting_themselves(self):
-        self._vote(self.alice, self._choice(self.a))
-        r = self._login(self.host).post(self.review_url, {"action": "close_vote"})
-        self.assertContains(r, "본인 선택을 제출해야 마감할 수 있습니다")
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.status, Decision.STATUS_VOTING)
-
-    def test_close_button_is_disabled_until_the_host_votes(self):
-        r = self._login(self.host).get(self.review_url)
-        self.assertFalse(r.context["can_close"])
-        self.assertEqual(r.context["host_remaining"], 1)
-        self.assertContains(r, "disabled")
-        self._vote(self.host, self._choice(self.a))
-        r = self._login(self.host).get(self.review_url)
-        self.assertTrue(r.context["can_close"])
-        self.assertEqual(r.context["host_remaining"], 0)
-
-    def test_closing_judges_with_submitted_votes_only(self):
-        self._vote(self.host, self._choice(self.a))
-        self._vote(self.alice, self._choice(self.a))
-        # 밥은 안 골랐다 — 판정에서 빠지므로 제출한 두 명이 같아서 확정된다.
-        self._login(self.host).post(self.review_url, {"action": "close_vote"})
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.status, Decision.STATUS_RESOLVED)
-
-    def test_missing_voters_are_reported_as_a_count_only(self):
-        self._vote(self.host, self._choice(self.a))
-        self._vote(self.alice, DecisionVote.KIND_CUSTOM, "내 해석")
-        self._login(self.host).post(self.review_url, {"action": "close_vote"})
-        r = self._login(self.host).get(self.vote_url)
-        tally = r.context["rows"][0]["tally"]
-        self.assertEqual(tally["missing"], 1)
-        self.assertContains(r, "1명 미선택")
-        self.assertNotContains(r, self.bob.username)
-
-    def test_closing_with_nothing_open_is_refused(self):
-        self._vote(self.host, self._choice(self.a))
-        self._login(self.host).post(self.review_url, {"action": "close_vote"})
-        r = self._login(self.host).post(self.review_url, {"action": "close_vote"})
-        self.assertContains(r, "마감할 항목이 없습니다")
-
-    def test_non_host_cannot_close(self):
-        self.assertEqual(
-            self._login(self.alice).post(self.review_url, {"action": "close_vote"}).status_code, 403,
-        )
-
-    # ---- 진행자 한 줄 확정과 동의 ----
-
-    def _to_pending_host(self):
-        self._vote(self.host, self._choice(self.a))
-        self._vote(self.alice, self._choice(self.b))
-        self._vote(self.bob, DecisionVote.KIND_CUSTOM, "내 해석")
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.status, Decision.STATUS_PENDING_HOST)
-
-    def test_host_writes_one_line_and_members_agree_to_resolve_it(self):
-        self._to_pending_host()
-        self._login(self.host).post(self.review_url, {
-            "action": "confirm", "decision_id": self.decision.id,
-            "final_text": "금요일 18시까지 스테이징 배포",
-        })
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.status, Decision.STATUS_PENDING_HOST)
-        self.assertEqual(self.decision.final_text, "금요일 18시까지 스테이징 배포")
-
-        self._login(self.alice).post(self.vote_url, {"action": "agree", "decision_id": self.decision.id})
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.status, Decision.STATUS_PENDING_HOST)
-        self._login(self.bob).post(self.vote_url, {"action": "agree", "decision_id": self.decision.id})
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.status, Decision.STATUS_RESOLVED)
-        self.assertEqual(self.decision.final_text, "금요일 18시까지 스테이징 배포")
-
-    def test_members_see_the_confirmed_sentence_and_the_agree_button(self):
-        self._to_pending_host()
-        self._login(self.host).post(self.review_url, {
-            "action": "confirm", "decision_id": self.decision.id, "final_text": "금요일 18시까지",
-        })
-        r = self._login(self.alice).get(self.vote_url)
-        self.assertContains(r, "금요일 18시까지")
-        self.assertContains(r, "이 내용으로 맞춤")
-        self.assertTrue(r.context["rows"][0]["needs_my_agreement"])
-
-    def test_the_host_is_not_an_agreement_target(self):
-        self._to_pending_host()
-        self._login(self.host).post(self.review_url, {
-            "action": "confirm", "decision_id": self.decision.id, "final_text": "금요일 18시까지",
-        })
-        r = self._login(self.host).post(self.vote_url, {"action": "agree", "decision_id": self.decision.id})
-        self.assertContains(r, "진행자는 따로 동의하지 않습니다")
-        self.assertEqual(self.decision.agreements.count(), 0)
-        # 동의가 필요한 인원은 진행자를 뺀 2명이다.
-        self.assertEqual(decision_compiler.agreement_total(self.meeting), 2)
-
-    def test_agreeing_twice_counts_once(self):
-        self._to_pending_host()
-        self._login(self.host).post(self.review_url, {
-            "action": "confirm", "decision_id": self.decision.id, "final_text": "금요일 18시까지",
-        })
-        alice = self._login(self.alice)
-        alice.post(self.vote_url, {"action": "agree", "decision_id": self.decision.id})
-        alice.post(self.vote_url, {"action": "agree", "decision_id": self.decision.id})
-        self.assertEqual(self.decision.agreements.count(), 1)
-
-    def test_rewriting_the_sentence_invalidates_earlier_agreements(self):
-        self._to_pending_host()
-        host = self._login(self.host)
-        host.post(self.review_url, {
-            "action": "confirm", "decision_id": self.decision.id, "final_text": "금요일 18시까지",
-        })
-        self._login(self.alice).post(self.vote_url, {"action": "agree", "decision_id": self.decision.id})
-        self.assertEqual(self.decision.agreements.count(), 1)
-        host.post(self.review_url, {
-            "action": "confirm", "decision_id": self.decision.id, "final_text": "월요일 10시까지",
-        })
-        self.assertEqual(self.decision.agreements.count(), 0)
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.status, Decision.STATUS_PENDING_HOST)
-
-    def test_confirm_requires_a_sentence(self):
-        self._to_pending_host()
-        r = self._login(self.host).post(self.review_url, {
-            "action": "confirm", "decision_id": self.decision.id, "final_text": "   ",
-        })
-        self.assertContains(r, "한 줄 적어 주세요")
-        self.decision.refresh_from_db()
-        self.assertEqual(self.decision.final_text, "")
-
-    def test_confirm_is_refused_on_an_item_that_is_not_pending_host(self):
-        r = self._login(self.host).post(self.review_url, {
-            "action": "confirm", "decision_id": self.decision.id, "final_text": "아무 문장",
-        })
-        self.assertContains(r, "진행자 확정을 기다리는 항목이 아닙니다")
-
-    def test_agreeing_before_the_host_writes_anything_is_refused(self):
-        self._to_pending_host()
-        r = self._login(self.alice).post(self.vote_url, {"action": "agree", "decision_id": self.decision.id})
-        self.assertContains(r, "동의를 받고 있는 항목이 아닙니다")
-        self.assertEqual(self.decision.agreements.count(), 0)
-
-    def test_non_host_cannot_confirm(self):
-        self._to_pending_host()
-        self.assertEqual(
-            self._login(self.alice).post(self.review_url, {
-                "action": "confirm", "decision_id": self.decision.id, "final_text": "내가 확정",
-            }).status_code, 403,
-        )
-
-    def test_solo_team_resolves_as_soon_as_the_host_writes_the_sentence(self):
-        solo_team = Team.objects.create(name="solo")
-        solo_team.members.add(self.host)
-        solo = Meeting.objects.create(
-            team=solo_team, title="solo", host=self.host,
-            processing_status=Meeting.STATUS_DONE, transcript="전사",
-        )
-        decision = Decision.objects.create(
-            meeting=solo, order=0, what="혼자 결정", warnings=["담당자 빈칸"],
-            status=Decision.STATUS_VOTING,
-        )
-        Interpretation.objects.create(decision=decision, order=0, text="해석 A")
-        Interpretation.objects.create(decision=decision, order=1, text="해석 B")
-        host = self._login(self.host)
-        host.post(reverse("decision_vote", args=[solo.id]), {
-            "decision_id": decision.id, "choice": DecisionVote.KIND_CUSTOM, "custom_text": "내 해석",
-        })
-        decision.refresh_from_db()
-        self.assertEqual(decision.status, Decision.STATUS_PENDING_HOST)
-        host.post(reverse("decision_review", args=[solo.id]), {
-            "action": "confirm", "decision_id": decision.id, "final_text": "혼자 확정",
-        })
-        decision.refresh_from_db()
-        self.assertEqual(decision.status, Decision.STATUS_RESOLVED)
-
-
 class DecisionCarryoverTests(TestCase):
     """미결정 안건 이월. 진행자가 "처리됨"을 누를 때까지 이후 회의마다 계속 보인다."""
 
@@ -3143,8 +2444,8 @@ class DecisionCarryoverTests(TestCase):
         r = self._login(self.host).get(reverse("meeting_detail", args=[self.first.id]))
         self.assertNotContains(r, "지난 회의 미결정 안건")
 
-    def test_resolved_and_pending_items_are_not_carried_over(self):
-        for status in (Decision.STATUS_RESOLVED, Decision.STATUS_PENDING_HOST, Decision.STATUS_VOTING, Decision.STATUS_DRAFT):
+    def test_published_and_draft_items_are_not_carried_over(self):
+        for status in (Decision.STATUS_PUBLISHED, Decision.STATUS_DRAFT):
             Decision.objects.filter(pk=self.undecided.pk).update(status=status)
             r = self._login(self.host).get(self.detail_url)
             self.assertNotContains(r, "지난 회의 미결정 안건", msg_prefix=status)
@@ -3212,8 +2513,11 @@ class DecisionCarryoverTests(TestCase):
 
 
 class DecisionModelTests(TestCase):
-    """결정 컴파일러(실험 기능) 모델 테스트. 기존 CheckQuestion/Answer 테이블과 완전히
-    분리된 새 테이블이라는 것과, 중복 투표를 DB가 막아준다는 것을 고정한다."""
+    """결정 컴파일러(실험 기능) 모델 테스트.
+
+    기존 CheckQuestion/Answer 테이블과 완전히 분리된 새 테이블이라는 것, 확인 기록이
+    (항목, 사용자)로 유일하면서 기존 Answer처럼 수정 가능하다는 것을 고정한다.
+    """
 
     def setUp(self):
         self.host = User.objects.create_user("host", password="pw12345!")
@@ -3234,12 +2538,23 @@ class DecisionModelTests(TestCase):
         fields.update(kwargs)
         return Decision.objects.create(meeting=self.meeting, order=order, **fields)
 
-    def test_decision_defaults_to_draft_with_no_carryover(self):
+    # ---- Decision ----
+
+    def test_decision_defaults(self):
         decision = self._decision()
         self.assertEqual(decision.status, Decision.STATUS_DRAFT)
+        self.assertEqual(decision.final_text, "")
+        self.assertFalse(decision.marked_undecided)
+        self.assertFalse(decision.revised)
         # 미결정으로 이월된 안건만 carryover_resolved_at을 쓰므로 기본값은 비어 있어야 한다.
         self.assertIsNone(decision.carryover_resolved_at)
         self.assertTrue(decision.has_warning)
+
+    def test_status_choices_are_only_the_three_we_kept(self):
+        self.assertEqual(
+            [value for value, _ in Decision.STATUS_CHOICES],
+            [Decision.STATUS_DRAFT, Decision.STATUS_PUBLISHED, Decision.STATUS_UNDECIDED],
+        )
 
     def test_warnings_json_round_trips_as_a_list(self):
         decision = self._decision()
@@ -3253,6 +2568,26 @@ class DecisionModelTests(TestCase):
         decision = self._decision(done_criteria="", confirm_state=Decision.CONFIRM_UNSET)
         self.assertEqual(decision.spec_line, "민수 · 배포 준비 · 다음 주쯤 · ? · 미정")
 
+    def test_is_settled_requires_a_sentence_or_the_undecided_mark(self):
+        decision = self._decision()
+        # 경고가 붙었는데 진행자가 아무것도 고르지 않았으면 공개할 수 없다.
+        self.assertFalse(decision.is_settled)
+        decision.final_text = "금요일까지 스테이징 배포"
+        self.assertTrue(decision.is_settled)
+        decision.final_text = ""
+        decision.marked_undecided = True
+        self.assertTrue(decision.is_settled)
+
+    def test_items_without_warnings_are_settled_with_nothing_to_choose(self):
+        decision = self._decision(warnings=[])
+        self.assertTrue(decision.is_settled)
+
+    def test_published_text_falls_back_to_the_spec_line(self):
+        decision = self._decision(warnings=[], done_criteria="스테이징 확인", confirm_state=Decision.CONFIRM_CONFIRMED)
+        self.assertEqual(decision.published_text, decision.spec_line)
+        decision.final_text = "금요일까지 스테이징 배포"
+        self.assertEqual(decision.published_text, "금요일까지 스테이징 배포")
+
     def test_duplicate_decision_order_in_one_meeting_is_rejected_by_db(self):
         self._decision(order=0)
         with self.assertRaises(IntegrityError), transaction.atomic():
@@ -3264,78 +2599,90 @@ class DecisionModelTests(TestCase):
         Decision.objects.create(meeting=other, order=0, who="민수", what="배포 준비")
         self.assertEqual(Decision.objects.filter(order=0).count(), 2)
 
+    # ---- Interpretation ----
+
     def test_interpretation_labels_follow_order(self):
         decision = self._decision()
         labels = [
-            Interpretation.objects.create(decision=decision, order=i, text="해석 %d" % i, evidence="민수가 다음 주쯤").label
+            Interpretation.objects.create(decision=decision, order=i, text="후보 %d" % i, evidence="민수가 다음 주쯤").label
             for i in range(3)
         ]
         self.assertEqual(labels, ["A", "B", "C"])
 
     def test_duplicate_interpretation_order_is_rejected_by_db(self):
         decision = self._decision()
-        Interpretation.objects.create(decision=decision, order=0, text="해석 A")
+        Interpretation.objects.create(decision=decision, order=0, text="후보 A")
         with self.assertRaises(IntegrityError), transaction.atomic():
-            Interpretation.objects.create(decision=decision, order=0, text="해석 B")
+            Interpretation.objects.create(decision=decision, order=0, text="후보 B")
 
-    def test_one_vote_per_user_per_decision(self):
-        decision = self._decision()
-        interpretation = Interpretation.objects.create(decision=decision, order=0, text="해석 A")
-        DecisionVote.objects.create(
+    # ---- DecisionAgreement (확인 / 달랐어요) ----
+
+    def test_agreement_defaults_to_ack_without_a_comment(self):
+        decision = self._decision(status=Decision.STATUS_PUBLISHED, final_text="금요일까지")
+        agreement = DecisionAgreement.objects.create(decision=decision, user=self.member)
+        self.assertEqual(agreement.kind, DecisionAgreement.KIND_ACK)
+        self.assertEqual(agreement.comment, "")
+        self.assertFalse(agreement.differs)
+
+    def test_differ_can_carry_a_one_line_comment(self):
+        decision = self._decision(status=Decision.STATUS_PUBLISHED, final_text="금요일까지")
+        agreement = DecisionAgreement.objects.create(
             decision=decision, user=self.member,
-            kind=DecisionVote.KIND_INTERPRETATION, interpretation=interpretation,
+            kind=DecisionAgreement.KIND_DIFFER, comment="저는 다음 주 금요일로 들었습니다",
         )
-        with self.assertRaises(IntegrityError), transaction.atomic():
-            DecisionVote.objects.create(
-                decision=decision, user=self.member, kind=DecisionVote.KIND_NOT_DECIDED,
-            )
-
-    def test_different_users_vote_on_the_same_decision(self):
-        decision = self._decision()
-        DecisionVote.objects.create(decision=decision, user=self.host, kind=DecisionVote.KIND_NOT_DECIDED)
-        DecisionVote.objects.create(
-            decision=decision, user=self.member, kind=DecisionVote.KIND_CUSTOM, custom_text="금요일까지 스테이징 배포",
-        )
-        self.assertEqual(decision.votes.count(), 2)
-
-    def test_deleting_an_interpretation_keeps_the_vote_row(self):
-        # 진행자가 해석 후보를 지워도 '누가 투표했는지'는 남아야 중복 투표 방지가 유지된다.
-        decision = self._decision()
-        interpretation = Interpretation.objects.create(decision=decision, order=0, text="해석 A")
-        DecisionVote.objects.create(
-            decision=decision, user=self.member,
-            kind=DecisionVote.KIND_INTERPRETATION, interpretation=interpretation,
-        )
-        interpretation.delete()
-        vote = DecisionVote.objects.get(decision=decision, user=self.member)
-        self.assertIsNone(vote.interpretation_id)
+        self.assertTrue(agreement.differs)
+        self.assertEqual(agreement.comment, "저는 다음 주 금요일로 들었습니다")
 
     def test_one_agreement_per_user_per_decision(self):
-        decision = self._decision(status=Decision.STATUS_PENDING_HOST, final_text="금요일까지 스테이징 배포")
+        decision = self._decision(status=Decision.STATUS_PUBLISHED, final_text="금요일까지")
         DecisionAgreement.objects.create(decision=decision, user=self.member)
         with self.assertRaises(IntegrityError), transaction.atomic():
-            DecisionAgreement.objects.create(decision=decision, user=self.member)
+            DecisionAgreement.objects.create(
+                decision=decision, user=self.member, kind=DecisionAgreement.KIND_DIFFER,
+            )
+
+    def test_an_agreement_can_be_changed_like_an_existing_quiz_answer(self):
+        # 블라인드가 없어졌으므로 선택과 의견을 모두 바꿀 수 있다 — 집계는 항상 현재 선택 기준이다.
+        decision = self._decision(status=Decision.STATUS_PUBLISHED, final_text="금요일까지")
+        DecisionAgreement.objects.update_or_create(
+            decision=decision, user=self.member, defaults={"kind": DecisionAgreement.KIND_ACK, "comment": ""},
+        )
+        DecisionAgreement.objects.update_or_create(
+            decision=decision, user=self.member,
+            defaults={"kind": DecisionAgreement.KIND_DIFFER, "comment": "다시 보니 달랐어요"},
+        )
+        agreement = DecisionAgreement.objects.get(decision=decision, user=self.member)
+        self.assertEqual(DecisionAgreement.objects.filter(decision=decision).count(), 1)
+        self.assertTrue(agreement.differs)
+        self.assertEqual(agreement.comment, "다시 보니 달랐어요")
+
+    def test_different_users_keep_separate_agreements(self):
+        decision = self._decision(status=Decision.STATUS_PUBLISHED, final_text="금요일까지")
+        DecisionAgreement.objects.create(decision=decision, user=self.host)
+        DecisionAgreement.objects.create(
+            decision=decision, user=self.member, kind=DecisionAgreement.KIND_DIFFER,
+        )
+        self.assertEqual(decision.agreements.count(), 2)
+
+    # ---- Checkpoint ----
 
     def test_one_checkpoint_per_user_per_decision(self):
-        decision = self._decision(status=Decision.STATUS_RESOLVED, final_text="금요일까지 스테이징 배포")
+        decision = self._decision(status=Decision.STATUS_PUBLISHED, final_text="금요일까지 스테이징 배포")
         checkpoint = Checkpoint.objects.create(decision=decision, user=self.member, expected_text="배포 문서 작성")
         self.assertEqual(checkpoint.verdict, Checkpoint.VERDICT_UNKNOWN)
         with self.assertRaises(IntegrityError), transaction.atomic():
             Checkpoint.objects.create(decision=decision, user=self.member, expected_text="다른 내용")
 
+    # ---- 분리 확인 ----
+
     def test_deleting_the_meeting_removes_the_whole_decision_tree(self):
         decision = self._decision()
-        interpretation = Interpretation.objects.create(decision=decision, order=0, text="해석 A")
-        DecisionVote.objects.create(
-            decision=decision, user=self.member,
-            kind=DecisionVote.KIND_INTERPRETATION, interpretation=interpretation,
-        )
+        Interpretation.objects.create(decision=decision, order=0, text="후보 A")
         DecisionAgreement.objects.create(decision=decision, user=self.member)
         Checkpoint.objects.create(decision=decision, user=self.member, expected_text="배포 문서 작성")
         self.meeting.delete()
         self.assertEqual(Decision.objects.count(), 0)
         self.assertEqual(Interpretation.objects.count(), 0)
-        self.assertEqual(DecisionVote.objects.count(), 0)
         self.assertEqual(DecisionAgreement.objects.count(), 0)
         self.assertEqual(Checkpoint.objects.count(), 0)
 
@@ -3350,3 +2697,11 @@ class DecisionModelTests(TestCase):
         self.assertEqual(self.meeting.check_questions.count(), 1)
         self.assertEqual(self.meeting.decisions.count(), 1)
         self.assertEqual(Answer.objects.filter(question=question).count(), 1)
+
+    def test_the_blind_vote_model_is_gone(self):
+        # 투표 모드는 보류했다. 되살릴 때는 새 마이그레이션으로 DecisionVote를 추가한다
+        # (models.py 상단 메모 참고). 지금은 모델도 테이블도 없어야 한다.
+        from django.apps import apps
+        with self.assertRaises(LookupError):
+            apps.get_model("meetalign", "DecisionVote")
+        self.assertNotIn("meetalign_decisionvote", connection.introspection.table_names())

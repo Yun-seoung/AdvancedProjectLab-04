@@ -226,21 +226,17 @@
       <a class="btn sm secondary" href="{% url 'understanding' meeting.id %}">답하기</a>
     {% endif %}
   </li>
-  {# 결정 컴파일러(실험). 회의록이 완성된 회의에서만 보인다. #}
-  {% if meeting.processing_status == "done" %}
+  {# 결정 컴파일러(실험). 회의록이 완성된 회의에서만, 진행자에게만 보인다 — 팀원 확인 화면은 Phase C. #}
+  {% if meeting.processing_status == "done" and meeting.host_id == user.id %}
   <li class="item">
     <div class="item-main">
       <span class="item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h7"/><path d="m17 15 2 2 3-3"/></svg></span>
       <div class="item-text">
         <span class="title">결정 확인 <span class="badge processing">실험</span></span>
-        <div class="meta">{% if meeting.host_id == user.id %}결정을 실행 명세로 옮기고 해석이 갈리는 항목만 팀원에게 묻습니다{% else %}명세를 어떻게 읽었는지 항목마다 고릅니다 (블라인드){% endif %}</div>
+        <div class="meta">결정을 실행 명세로 옮기고, 모호한 항목을 한 줄로 확정해 팀원에게 공개합니다</div>
       </div>
     </div>
-    {% if meeting.host_id == user.id %}
-      <a class="btn sm secondary" href="{% url 'decision_review' meeting.id %}">열기</a>
-    {% else %}
-      <a class="btn sm secondary" href="{% url 'decision_vote' meeting.id %}">고르기</a>
-    {% endif %}
+    <a class="btn sm secondary" href="{% url 'decision_review' meeting.id %}">열기</a>
   </li>
   {% endif %}
 </ul>

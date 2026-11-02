@@ -164,10 +164,24 @@ class Answer(models.Model):
         return "%s - %s" % (self.user, self.question_id)
 
 
+
+
 # ---------------------------------------------------------------------------
 # 결정 컴파일러 (실험 기능). 기존 CheckQuestion/Answer 흐름과 완전히 분리된 새 테이블이며,
-# 기존 모델은 건드리지 않는다. 회의 원문에서 '실행 명세'를 뽑아 모호한 항목만 블라인드로
-# 동시 선택하게 하고, 갈리면 진행자가 한 줄로 확정한다.
+# 기존 모델은 건드리지 않는다.
+#
+# 흐름: 회의 원문에서 '실행 명세'를 뽑고(①), 모호한 항목마다 해석 후보를 만들어(②)
+# 진행자에게만 참고로 보여준다. 진행자가 항목마다 확정하거나 '아직 미정'으로 넘기고(③),
+# "확정 명세 공개"를 누르면 팀원 전원에게 보인다(④). 팀원은 항목마다 확인했는지 또는
+# 자기 이해와 달랐는지를 남긴다(⑤).
+#
+# ※ 블라인드 투표 모드(보류): 팀원 전원이 해석을 블라인드로 동시 선택하고 집계로 판정하는
+#    방식을 먼저 만들었다가(DecisionVote 모델 + 전원일치/갈림/미결정 판정) 진행자 확정
+#    모드로 방향을 바꿨다. 되살릴 때 참고할 구현은 커밋 7eb074a(블라인드 선택 화면)과
+#    ac6fb89(분기 판정)에 남아 있다. 다시 실험한다면 DecisionVote(decision, user,
+#    kind=interpretation|custom|not_decided, interpretation, custom_text,
+#    unique(decision,user))를 새 마이그레이션으로 추가하면 된다 — 아래 모델들은 그대로 둔
+#    채 옆에 붙일 수 있는 구조다.
 # ---------------------------------------------------------------------------
 
 
@@ -176,9 +190,9 @@ class Decision(models.Model):
 
     [누가 · 무엇을 · 언제까지 · 완료 기준 · 확정 여부]가 한 줄의 명세가 되고, 빈칸이나
     모호어가 있으면 warnings에 경고 사유가 쌓인다(회의당 최대 5개까지만 만든다).
-    status는 진행자 검토(draft) → 투표 중(voting) → 전원 일치면 확정(resolved),
-    갈리면 진행자 확정 대기(pending_host), 진행자가 '아직 안 정해진 것 같음'을 골랐으면
-    미결정(undecided)으로 흐른다.
+
+    status는 draft(진행자 검토 중) → published(확정 명세 공개) 로 가고, 진행자가 '아직
+    미정'으로 넘긴 항목만 undecided가 되어 다음 회의로 이월된다.
     """
 
     CONFIRM_CONFIRMED = "confirmed"
@@ -191,15 +205,11 @@ class Decision(models.Model):
     ]
 
     STATUS_DRAFT = "draft"
-    STATUS_VOTING = "voting"
-    STATUS_PENDING_HOST = "pending_host"
-    STATUS_RESOLVED = "resolved"
+    STATUS_PUBLISHED = "published"
     STATUS_UNDECIDED = "undecided"
     STATUS_CHOICES = [
         (STATUS_DRAFT, "진행자 검토 중"),
-        (STATUS_VOTING, "투표 중"),
-        (STATUS_PENDING_HOST, "진행자 확정 대기"),
-        (STATUS_RESOLVED, "확정"),
+        (STATUS_PUBLISHED, "공개됨"),
         (STATUS_UNDECIDED, "미결정"),
     ]
 
@@ -210,11 +220,18 @@ class Decision(models.Model):
     due_text = models.CharField(max_length=200, blank=True, default="")
     done_criteria = models.TextField(blank=True, default="")
     confirm_state = models.CharField(max_length=12, choices=CONFIRM_CHOICES, default=CONFIRM_UNSET)
-    # 컴파일 경고 사유 문자열 목록. 예: ["담당자 빈칸", "모호어 '쯤'", "같은 대상에 다른 날짜"].
+    # 컴파일 경고 사유 문자열 목록. 예: ["담당자 빈칸", "모호어 '쯤'", "같은 항목에 다른 날짜"].
     warnings = models.JSONField(default=list, blank=True)
-    status = models.CharField(max_length=14, choices=STATUS_CHOICES, default=STATUS_DRAFT)
-    # 갈렸을 때 진행자가 한 줄로 쓴 확정 문장. 전원 일치로 자동 발행된 경우에도 그 해석 문장을 넣는다.
+    status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    # 진행자가 확정한 한 줄. 해석 후보에서 고른 문장이거나 직접 쓴 문장이다.
+    # 경고가 없는 항목은 명세 자체가 확정 내용이라 비어 있을 수 있다.
     final_text = models.TextField(blank=True, default="")
+    # 진행자가 '아직 미정'으로 넘긴 항목. 공개 시점에 status=undecided가 된다.
+    marked_undecided = models.BooleanField(default=False)
+    # 공개 뒤에 확정 문장이 수정된 항목. 팀원 화면에 "내용이 수정되었어요"를 띄우는 데 쓴다.
+    # 수정 시 그 항목의 확인 기록(DecisionAgreement)은 모두 지워지므로, 다시 확인한 사람에게는
+    # 안내가 사라진다(안내는 '내 확인 기록이 없을 때'만 뜬다).
+    revised = models.BooleanField(default=False)
     # 미결정으로 이월된 안건을 진행자가 "처리됨"으로 닫은 시각. null이면 이후 회의 화면에 계속 보인다.
     carryover_resolved_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -238,13 +255,27 @@ class Decision(models.Model):
             self.done_criteria or "?", self.get_confirm_state_display(),
         )
 
+    @property
+    def is_settled(self):
+        """진행자가 이 항목을 처리했는가 — 확정 문장을 썼거나 '아직 미정'으로 넘겼거나.
+
+        경고가 없는 항목은 고를 것이 없으므로 처리된 것으로 본다. 경고 항목 중 하나라도
+        처리되지 않으면 "확정 명세 공개"를 막는다.
+        """
+        return bool(self.final_text) or self.marked_undecided or not self.warnings
+
+    @property
+    def published_text(self):
+        """팀원에게 보여줄 확정 내용. 진행자가 쓴 한 줄이 있으면 그것, 없으면 명세 한 줄."""
+        return self.final_text or self.spec_line
+
 
 class Interpretation(models.Model):
-    """경고가 난 Decision 하나에 대해 AI가 '가상 청자'로서 만든 서로 다른 해석 후보.
+    """경고가 붙은 Decision 하나에 대해 AI가 '가상 청자'로서 만든 서로 다른 해석 후보.
 
     evidence는 전사 원문에 그대로 등장하는 문장이어야 하며, 지어낸 근거가 붙은 해석은
     저장 단계에서 버린다(기존 CheckQuestion.evidence 검증과 같은 방식).
-    정답은 없다 — 어느 해석이 맞는지는 팀원들의 선택으로 드러난다.
+    정답은 없다 — 진행자가 참고해서 고르거나 직접 쓰는 데 쓴다. 팀원에게는 보여주지 않는다.
     """
 
     decision = models.ForeignKey(Decision, on_delete=models.CASCADE, related_name="interpretations")
@@ -258,61 +289,52 @@ class Interpretation(models.Model):
 
     @property
     def label(self):
-        """화면에 쓰는 '해석 A/B/C' 꼬리표."""
+        """화면에 쓰는 '후보 A/B/C' 꼬리표."""
         return chr(ord("A") + self.order) if self.order < 26 else str(self.order + 1)
 
     def __str__(self):
-        return "해석 %s: %s" % (self.label, self.text[:30])
+        return "후보 %s: %s" % (self.label, self.text[:30])
 
 
-class DecisionVote(models.Model):
-    """항목별 블라인드 선택. (항목, 사용자) 쌍으로 유일해서 중복 투표가 막힌다.
+class DecisionAgreement(models.Model):
+    """공개된 확정 명세에 대한 팀원별 확인 기록.
 
-    user를 저장하는 목적은 중복 투표 방지와 '내가 이미 골랐는지' 판정뿐이다. 어떤 화면에도
-    누가 무엇을 골랐는지는 내보내지 않고, 인원 수 집계만 보여준다(진행자에게도 마찬가지).
+    kind=ack는 "확인했어요", kind=differ는 "제 이해와 달랐어요"다. comment는 differ에
+    덧붙이는 한 줄 의견(선택)이다.
+
+    (항목, 사용자) 쌍으로 유일하고 기존 Answer처럼 수정할 수 있다 — 진행자 집계는 항상
+    현재 선택 기준이다. user를 저장하는 목적은 중복 방지와 '아직 확인하지 않은 팀원'
+    명단(진행자 전용)뿐이고, 누가 differ를 골랐는지는 어떤 화면에도 내보내지 않는다.
+    한 줄 의견도 작성자를 비공개로 묶어서 보여준다.
     """
 
-    KIND_INTERPRETATION = "interpretation"
-    KIND_CUSTOM = "custom"
-    KIND_NOT_DECIDED = "not_decided"
+    KIND_ACK = "ack"
+    KIND_DIFFER = "differ"
     KIND_CHOICES = [
-        (KIND_INTERPRETATION, "해석 선택"),
-        (KIND_CUSTOM, "직접 쓰기"),
-        (KIND_NOT_DECIDED, "아직 안 정해진 것 같음"),
+        (KIND_ACK, "확인했어요"),
+        (KIND_DIFFER, "제 이해와 달랐어요"),
     ]
 
-    decision = models.ForeignKey(Decision, on_delete=models.CASCADE, related_name="votes")
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="decision_votes")
-    kind = models.CharField(max_length=16, choices=KIND_CHOICES)
-    # kind가 interpretation일 때만 채워진다. 해석이 지워지면 표는 '직접 쓰기'가 아니라 그냥 끊긴다.
-    interpretation = models.ForeignKey(Interpretation, on_delete=models.SET_NULL, null=True, blank=True, related_name="votes")
-    custom_text = models.TextField(blank=True, default="")
+    decision = models.ForeignKey(Decision, on_delete=models.CASCADE, related_name="agreements")
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="decision_agreements")
+    kind = models.CharField(max_length=10, choices=KIND_CHOICES, default=KIND_ACK)
+    comment = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         unique_together = ("decision", "user")
+
+    @property
+    def differs(self):
+        return self.kind == self.KIND_DIFFER
 
     def __str__(self):
         return "%s - %s" % (self.decision_id, self.kind)
 
 
-class DecisionAgreement(models.Model):
-    """갈린 항목을 진행자가 한 줄로 확정한 뒤, 팀원이 "이 내용으로 맞춤"을 탭한 기록.
-    같은 사람이 여러 번 눌러도 한 건만 남는다."""
-
-    decision = models.ForeignKey(Decision, on_delete=models.CASCADE, related_name="agreements")
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="decision_agreements")
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        unique_together = ("decision", "user")
-
-    def __str__(self):
-        return "%s 동의 (%s)" % (self.decision_id, self.user)
-
-
 class Checkpoint(models.Model):
-    """착수 체크포인트(Phase E). 확정된 명세에서 본인이 담당자인 항목에 "완료 모습 한 줄"을
+    """착수 체크포인트(Phase E). 공개된 확정 명세에서 본인이 담당자인 항목에 "완료 모습 한 줄"을
     쓰면, AI가 확정 명세와 대조해 '맞음 / 차이 있음(이유 한 줄)'을 돌려준다."""
 
     VERDICT_MATCH = "match"
