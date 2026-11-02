@@ -2416,6 +2416,306 @@ class DecisionEntryLinkTests(TestCase):
         r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
         self.assertContains(r, self.link)
 
+    def test_member_gets_the_vote_screen_link_instead(self):
+        self.client.force_login(self.member)
+        vote_link = reverse("decision_vote", args=[self.meeting.id])
+        for name in ("meeting_result", "meeting_detail"):
+            r = self.client.get(reverse(name, args=[self.meeting.id]))
+            self.assertContains(r, vote_link, msg_prefix=name)
+            self.assertNotContains(r, self.link, msg_prefix=name)
+
+
+class DecisionVoteTests(TestCase):
+    """③ 블라인드 동시 선택. 진행자도 참가자로서 똑같이 고른다."""
+
+    def setUp(self):
+        self.host = User.objects.create_user("hostuser", password="pw12345!")
+        self.alice = User.objects.create_user("aliceuser", password="pw12345!")
+        self.bob = User.objects.create_user("bobuser", password="pw12345!")
+        self.outsider = User.objects.create_user("outsideruser", password="pw12345!")
+        self.team = Team.objects.create(name="t")
+        self.team.members.add(self.host, self.alice, self.bob)
+        self.meeting = Meeting.objects.create(
+            team=self.team, title="m", host=self.host,
+            processing_status=Meeting.STATUS_DONE,
+            record="결정", transcript="민수가 금요일까지 배포를 맡기로 했습니다.",
+        )
+        self.decision = Decision.objects.create(
+            meeting=self.meeting, order=0, who="민수", what="배포", due_text="금요일",
+            done_criteria="", warnings=["완료 기준 빈칸"], status=Decision.STATUS_VOTING,
+        )
+        self.a = Interpretation.objects.create(decision=self.decision, order=0, text="이번 주 금요일")
+        self.b = Interpretation.objects.create(decision=self.decision, order=1, text="다음 주 금요일")
+        self.url = reverse("decision_vote", args=[self.meeting.id])
+
+    def _login(self, user):
+        client = Client()
+        client.force_login(user)
+        return client
+
+    def _vote(self, client, choice, custom_text=""):
+        return client.post(self.url, {
+            "decision_id": self.decision.id, "choice": choice, "custom_text": custom_text,
+        })
+
+    def _interp_choice(self, interpretation):
+        return "%s%d" % (decision_compiler.VOTE_CHOICE_PREFIX, interpretation.id)
+
+    # ---- 권한 ----
+
+    def test_outsider_gets_404(self):
+        self.assertEqual(self._login(self.outsider).get(self.url).status_code, 404)
+
+    def test_outsider_cannot_vote(self):
+        r = self._vote(self._login(self.outsider), self._interp_choice(self.a))
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(DecisionVote.objects.count(), 0)
+
+    def test_anonymous_user_is_redirected_to_login(self):
+        self.assertEqual(Client().get(self.url).status_code, 302)
+
+    def test_every_team_member_including_the_host_can_vote(self):
+        for user in (self.host, self.alice, self.bob):
+            client = self._login(user)
+            self.assertEqual(client.get(self.url).status_code, 200)
+            self.assertEqual(self._vote(client, self._interp_choice(self.a)).status_code, 302)
+        self.assertEqual(self.decision.votes.count(), 3)
+
+    def test_meeting_without_a_finished_record_gets_404(self):
+        Meeting.objects.filter(pk=self.meeting.pk).update(processing_status=Meeting.STATUS_PROCESSING)
+        self.assertEqual(self._login(self.alice).get(self.url).status_code, 404)
+
+    # ---- 블라인드: 내가 고르기 전에는 집계가 응답에 없다 ----
+
+    def test_tally_is_absent_from_the_context_before_i_vote(self):
+        self._vote(self._login(self.alice), self._interp_choice(self.a))
+        self._vote(self._login(self.bob), self._interp_choice(self.a))
+        r = self._login(self.host).get(self.url)
+        row = r.context["rows"][0]
+        self.assertFalse(row["voted"])
+        # 숨기는 게 아니라 키 자체가 없어야 한다 — 템플릿 실수로도 샐 수 없게.
+        self.assertNotIn("tally", row)
+        self.assertEqual(r.context["tallies"] if "tallies" in r.context else {}, {})
+
+    # 집계 블록에만 나오는 문구. 그냥 "집계"로 찾으면 base.html의 개발 노트 설명에도 걸린다.
+    TALLY_MARKER = "명 선택)"
+
+    def test_host_sees_no_tally_before_voting_either(self):
+        self._vote(self._login(self.alice), self._interp_choice(self.a))
+        r = self._login(self.host).get(self.url)
+        self.assertNotContains(r, self.TALLY_MARKER)
+        self.assertContains(r, "선택 제출")
+
+    def test_tally_appears_only_after_i_vote(self):
+        alice = self._login(self.alice)
+        self.assertNotContains(alice.get(self.url), self.TALLY_MARKER)
+        self._vote(alice, self._interp_choice(self.a))
+        r = alice.get(self.url)
+        self.assertContains(r, self.TALLY_MARKER)
+        self.assertNotContains(r, "선택 제출")
+
+    def test_tally_is_per_item_not_per_screen(self):
+        # 2번 항목은 안 골랐으므로 1번 항목의 집계만 보여야 한다.
+        second = Decision.objects.create(
+            meeting=self.meeting, order=1, what="문서 정리",
+            warnings=["담당자 빈칸"], status=Decision.STATUS_VOTING,
+        )
+        Interpretation.objects.create(decision=second, order=0, text="해석 A")
+        Interpretation.objects.create(decision=second, order=1, text="해석 B")
+        alice = self._login(self.alice)
+        self._vote(alice, self._interp_choice(self.a))
+        rows = {row["decision"].id: row for row in alice.get(self.url).context["rows"]}
+        self.assertIn("tally", rows[self.decision.id])
+        self.assertNotIn("tally", rows[second.id])
+
+    def test_tally_counts_everyone_once_i_have_voted(self):
+        self._vote(self._login(self.alice), self._interp_choice(self.a))
+        self._vote(self._login(self.bob), self._interp_choice(self.b))
+        self._vote(self._login(self.host), DecisionVote.KIND_NOT_DECIDED)
+        tally = self._login(self.host).get(self.url).context["rows"][0]["tally"]
+        self.assertEqual(tally["total"], 3)
+        self.assertEqual(tally["voted"], 3)
+        self.assertEqual(tally["missing"], 0)
+        self.assertEqual(tally["not_decided"], 1)
+        self.assertEqual([item["count"] for item in tally["interpretations"]], [1, 1])
+
+    def test_tally_reports_how_many_have_not_voted(self):
+        alice = self._login(self.alice)
+        self._vote(alice, self._interp_choice(self.a))
+        tally = alice.get(self.url).context["rows"][0]["tally"]
+        self.assertEqual(tally["voted"], 1)
+        self.assertEqual(tally["missing"], 2)
+        self.assertContains(alice.get(self.url), "2명 미선택")
+
+    # ---- 익명: 이름이 어떤 화면에도 선택과 함께 나오지 않는다 ----
+
+    def test_no_screen_shows_another_persons_name(self):
+        """다른 사람의 이름은 어떤 결정 확인 화면에도 나오지 않는다.
+
+        base.html은 상단 칩에 '보는 사람 본인'의 아이디를 늘 띄우므로(기존 동작) 본인
+        이름은 제외하고, 나머지 참가자의 이름이 한 번도 안 나오는지를 본다.
+        """
+        self._vote(self._login(self.alice), self._interp_choice(self.a))
+        self._vote(self._login(self.bob), DecisionVote.KIND_CUSTOM, "내가 이해한 내용")
+        self._vote(self._login(self.host), self._interp_choice(self.b))
+        review_url = reverse("decision_review", args=[self.meeting.id])
+        cases = [
+            (self.host, self.url),
+            (self.host, review_url),
+            (self.alice, self.url),
+            (self.bob, self.url),
+        ]
+        for viewer, url in cases:
+            page = self._login(viewer).get(url)
+            for other in (self.alice, self.bob, self.host):
+                if other.id == viewer.id:
+                    continue
+                self.assertNotContains(page, other.username, msg_prefix="%s/%s" % (viewer.username, url))
+
+    def test_custom_texts_are_not_shown_to_anyone(self):
+        self._vote(self._login(self.bob), DecisionVote.KIND_CUSTOM, "밥이 쓴 비밀 해석")
+        self._vote(self._login(self.host), self._interp_choice(self.a))
+        for client in (self._login(self.host), self._login(self.alice)):
+            self.assertNotContains(client.get(self.url), "밥이 쓴 비밀 해석")
+
+    def test_my_own_choice_is_not_echoed_back_on_the_page(self):
+        # 본인이 쓴 내용도 다시 띄우지 않는다 — 어깨 너머로 보이면 익명성이 깨지고,
+        # 집계는 '어느 보기에 몇 명'까지만 알려주면 충분하다.
+        alice = self._login(self.alice)
+        self._vote(alice, DecisionVote.KIND_CUSTOM, "내가 쓴 내용")
+        r = alice.get(self.url)
+        self.assertNotContains(r, "내가 쓴 내용")
+        self.assertContains(r, self.TALLY_MARKER)
+
+    # ---- 선택 저장 규칙 ----
+
+    def test_choosing_an_interpretation_is_stored_with_its_id(self):
+        self._vote(self._login(self.alice), self._interp_choice(self.b))
+        vote = DecisionVote.objects.get(decision=self.decision, user=self.alice)
+        self.assertEqual(vote.kind, DecisionVote.KIND_INTERPRETATION)
+        self.assertEqual(vote.interpretation_id, self.b.id)
+        self.assertEqual(vote.custom_text, "")
+
+    def test_custom_choice_requires_text(self):
+        client = self._login(self.alice)
+        r = self._vote(client, DecisionVote.KIND_CUSTOM, "   ")
+        self.assertContains(r, "한 줄 적어 주세요")
+        self.assertEqual(DecisionVote.objects.count(), 0)
+
+    def test_custom_choice_stores_the_text(self):
+        self._vote(self._login(self.alice), DecisionVote.KIND_CUSTOM, "  금요일 퇴근 전까지  ")
+        vote = DecisionVote.objects.get(user=self.alice)
+        self.assertEqual(vote.kind, DecisionVote.KIND_CUSTOM)
+        self.assertEqual(vote.custom_text, "금요일 퇴근 전까지")
+
+    def test_not_decided_choice_keeps_no_text(self):
+        self._vote(self._login(self.alice), DecisionVote.KIND_NOT_DECIDED, "무시돼야 하는 내용")
+        vote = DecisionVote.objects.get(user=self.alice)
+        self.assertEqual(vote.kind, DecisionVote.KIND_NOT_DECIDED)
+        self.assertEqual(vote.custom_text, "")
+
+    def test_choice_is_required(self):
+        r = self._vote(self._login(self.alice), "")
+        self.assertContains(r, "하나 골라 주세요")
+        self.assertEqual(DecisionVote.objects.count(), 0)
+
+    def test_an_interpretation_from_another_decision_is_rejected(self):
+        other = Decision.objects.create(meeting=self.meeting, order=1, what="다른 항목", status=Decision.STATUS_VOTING)
+        stranger = Interpretation.objects.create(decision=other, order=0, text="남의 해석")
+        r = self._vote(self._login(self.alice), self._interp_choice(stranger))
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(DecisionVote.objects.count(), 0)
+
+    def test_voting_on_a_draft_item_is_refused(self):
+        Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)
+        r = self._vote(self._login(self.alice), self._interp_choice(self.a))
+        self.assertContains(r, "받고 있는 항목이 아닙니다")
+        self.assertEqual(DecisionVote.objects.count(), 0)
+
+    def test_a_second_submission_cannot_change_my_choice(self):
+        client = self._login(self.alice)
+        self._vote(client, self._interp_choice(self.a))
+        r = self._vote(client, self._interp_choice(self.b))
+        self.assertContains(r, "이미 이 항목에 선택을 제출했습니다")
+        vote = DecisionVote.objects.get(user=self.alice)
+        self.assertEqual(vote.interpretation_id, self.a.id)
+        self.assertEqual(DecisionVote.objects.count(), 1)
+
+    def test_a_decision_from_another_meeting_is_rejected(self):
+        other_meeting = Meeting.objects.create(
+            team=self.team, title="m2", host=self.host, processing_status=Meeting.STATUS_DONE,
+        )
+        stranger = Decision.objects.create(
+            meeting=other_meeting, order=0, what="남의 회의 항목", status=Decision.STATUS_VOTING,
+        )
+        r = self._login(self.alice).post(self.url, {
+            "decision_id": stranger.id, "choice": DecisionVote.KIND_NOT_DECIDED,
+        })
+        self.assertEqual(r.status_code, 404)
+        self.assertEqual(DecisionVote.objects.count(), 0)
+
+    # ---- 화면 상태 ----
+
+    def test_draft_items_are_not_listed_at_all(self):
+        Decision.objects.create(meeting=self.meeting, order=1, what="검토 중인 항목", status=Decision.STATUS_DRAFT)
+        r = self._login(self.alice).get(self.url)
+        self.assertEqual([row["decision"].id for row in r.context["rows"]], [self.decision.id])
+        self.assertNotContains(r, "검토 중인 항목")
+
+    def test_empty_state_before_the_host_starts(self):
+        Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)
+        r = self._login(self.alice).get(self.url)
+        self.assertContains(r, "아직 결정 확인을 시작하지 않았습니다")
+
+    def test_remaining_count_tracks_my_own_progress(self):
+        second = Decision.objects.create(
+            meeting=self.meeting, order=1, what="문서", warnings=["담당자 빈칸"], status=Decision.STATUS_VOTING,
+        )
+        Interpretation.objects.create(decision=second, order=0, text="해석 A")
+        alice = self._login(self.alice)
+        self.assertEqual(alice.get(self.url).context["my_remaining"], 2)
+        self._vote(alice, self._interp_choice(self.a))
+        r = alice.get(self.url)
+        self.assertEqual(r.context["my_remaining"], 1)
+        self.assertEqual(r.context["my_done"], 1)
+        self.assertContains(r, "아직 1개 항목을 고르지 않았습니다")
+
+    def test_host_sees_tabs_to_both_screens_once_voting_started(self):
+        r = self._login(self.host).get(self.url)
+        self.assertContains(r, reverse("decision_review", args=[self.meeting.id]))
+        r = self._login(self.alice).get(self.url)
+        self.assertNotContains(r, reverse("decision_review", args=[self.meeting.id]))
+
+    def test_orphan_votes_are_counted_separately(self):
+        # 해석이 지워진 표는 어느 보기였는지 알 수 없으므로 따로 센다(인원 합이 맞아야 하므로).
+        self._vote(self._login(self.alice), self._interp_choice(self.a))
+        self._vote(self._login(self.host), self._interp_choice(self.b))
+        self.a.delete()
+        tally = self._login(self.host).get(self.url).context["rows"][0]["tally"]
+        self.assertEqual(tally["orphan"], 1)
+        self.assertEqual(tally["voted"], 2)
+
+    def test_tally_uses_a_fixed_number_of_queries(self):
+        for user in (self.alice, self.bob, self.host):
+            self._vote(self._login(user), self._interp_choice(self.a))
+        for order in range(1, 5):
+            extra = Decision.objects.create(
+                meeting=self.meeting, order=order, what="항목 %d" % order,
+                warnings=["담당자 빈칸"], status=Decision.STATUS_VOTING,
+            )
+            Interpretation.objects.create(decision=extra, order=0, text="해석 A")
+            DecisionVote.objects.create(
+                decision=extra, user=self.host, kind=DecisionVote.KIND_NOT_DECIDED,
+            )
+        client = self._login(self.host)
+        with CaptureQueriesContext(connection) as many:
+            client.get(self.url)
+        Decision.objects.filter(order__gt=0).delete()
+        with CaptureQueriesContext(connection) as few:
+            client.get(self.url)
+        # 항목이 1개일 때와 5개일 때 쿼리 수가 같아야 한다(집계는 한 번에 센다).
+        self.assertEqual(len(many.captured_queries), len(few.captured_queries))
+
 
 class DecisionModelTests(TestCase):
     """결정 컴파일러(실험 기능) 모델 테스트. 기존 CheckQuestion/Answer 테이블과 완전히

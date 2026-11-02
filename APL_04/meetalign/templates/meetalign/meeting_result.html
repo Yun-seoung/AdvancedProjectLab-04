@@ -16,9 +16,11 @@
     <div class="row">
       <a class="btn" href="{% url 'record_file' meeting.id %}">회의록 다운로드</a>
       <a class="btn secondary" href="{% url 'summary' meeting.id %}">회의 요약 보기</a>
+      {# 결정 컴파일러(실험). 회의록이 완성된 회의에서만 보인다. 진행자는 컴파일 화면으로, 팀원은 선택 화면으로. #}
       {% if meeting.host_id == user.id %}
-        {# 결정 컴파일러(실험). 회의록이 완성된 회의에서만 보인다. 팀원 화면은 Phase C에서 붙인다. #}
         <a class="btn secondary" href="{% url 'decision_review' meeting.id %}">결정 확인(실험)</a>
+      {% else %}
+        <a class="btn secondary" href="{% url 'decision_vote' meeting.id %}">결정 확인(실험)</a>
       {% endif %}
     </div>
   {% elif meeting.processing_status == "failed" %}

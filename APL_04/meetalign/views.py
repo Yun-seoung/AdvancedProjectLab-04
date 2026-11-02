@@ -13,7 +13,10 @@ from django.utils.dateparse import parse_date
 from django.utils.http import url_has_allowed_host_and_scheme
 
 from . import decision_compiler, quiz_status, services, tasks
-from .models import Answer, ChatMessage, CheckQuestion, Decision, Meeting, Question, Recording, Team
+from .models import (
+    Answer, ChatMessage, CheckQuestion, Decision, DecisionVote, Interpretation, Meeting,
+    Question, Recording, Team,
+)
 
 ALLOWED_RECORDING_EXTENSIONS = {
     ".mp3", ".m4a", ".wav", ".ogg", ".webm", ".mp4", ".flac",
@@ -556,4 +559,100 @@ def decision_review(request, meeting_id):
         "editable": all(row["decision"].status == Decision.STATUS_DRAFT for row in rows),
         "vote_started": any(row["decision"].status != Decision.STATUS_DRAFT for row in rows),
         "confirm_choices": Decision.CONFIRM_CHOICES,
+    })
+
+
+def _save_decision_vote(request, meeting):
+    """블라인드 선택 한 건을 저장한다. 실패 사유 문자열 또는 None을 돌려준다.
+
+    한 번 제출한 선택은 바꿀 수 없다(update_or_create를 쓰지 않는 이유). 바꿀 수 있으면
+    집계를 본 뒤 다수 쪽으로 옮겨갈 수 있어서, "서로 다르게 이해했는지" 자체를 못 본다.
+    """
+    decision = get_object_or_404(Decision, pk=request.POST.get("decision_id"), meeting=meeting)
+    if decision.status != Decision.STATUS_VOTING:
+        return "지금 선택을 받고 있는 항목이 아닙니다."
+    raw = request.POST.get("choice", "")
+    custom_text = request.POST.get("custom_text", "").strip()
+
+    interpretation = None
+    if raw == DecisionVote.KIND_NOT_DECIDED:
+        kind = DecisionVote.KIND_NOT_DECIDED
+        custom_text = ""
+    elif raw == DecisionVote.KIND_CUSTOM:
+        if not custom_text:
+            return "'직접 쓰기'를 골랐으면 내용을 한 줄 적어 주세요."
+        kind = DecisionVote.KIND_CUSTOM
+    elif raw.startswith(decision_compiler.VOTE_CHOICE_PREFIX):
+        interpretation = get_object_or_404(
+            Interpretation, pk=raw[len(decision_compiler.VOTE_CHOICE_PREFIX):], decision=decision,
+        )
+        kind = DecisionVote.KIND_INTERPRETATION
+        custom_text = ""
+    else:
+        return "선택지를 하나 골라 주세요."
+
+    try:
+        with transaction.atomic():
+            DecisionVote.objects.create(
+                decision=decision, user=request.user, kind=kind,
+                interpretation=interpretation, custom_text=custom_text,
+            )
+    except IntegrityError:
+        # (항목, 사용자) 유일 제약. 창을 두 개 열어 동시에 제출한 경우 먼저 들어온 것을 남긴다.
+        return "이미 이 항목에 선택을 제출했습니다."
+    return None
+
+
+@login_required
+def decision_vote(request, meeting_id):
+    """팀원과 진행자가 같이 쓰는 블라인드 선택 화면.
+
+    권한은 '팀 멤버인가'까지만 본다 — 진행자도 참가자로서 똑같이 고른다. 대신 항목별로
+    내가 이미 골랐는지를 보고, 고른 항목의 집계만 컨텍스트에 담는다.
+    """
+    meeting = _decision_meeting(request, meeting_id)
+    error = None
+    if request.method == "POST":
+        error = _save_decision_vote(request, meeting)
+        if error is None:
+            return redirect("decision_vote", meeting_id=meeting.id)
+
+    decisions = list(
+        meeting.decisions.exclude(status=Decision.STATUS_DRAFT).prefetch_related("interpretations")
+    )
+    # 내가 고른 항목의 id만 가져온다. 다른 사람의 선택은 조회조차 하지 않는다.
+    voted_ids = set(
+        DecisionVote.objects
+        .filter(decision__meeting=meeting, user=request.user)
+        .values_list("decision_id", flat=True)
+    )
+    total = decision_compiler.participant_total(meeting)
+    tallies = decision_compiler.tallies_for(decisions, voted_ids, total)
+
+    rows = []
+    for decision in decisions:
+        row = {
+            "decision": decision,
+            "interpretations": list(decision.interpretations.all()),
+            "voted": decision.id in voted_ids,
+            "open": decision.status == Decision.STATUS_VOTING,
+        }
+        # 내가 고르지 않은 항목에는 tally 키 자체가 없다 — 템플릿에서 꺼낼 수 있는 값이 없다.
+        if decision.id in tallies:
+            row["tally"] = tallies[decision.id]
+        rows.append(row)
+
+    open_rows = [row for row in rows if row["open"]]
+    return render(request, "meetalign/decision_vote.html", {
+        "meeting": meeting,
+        "rows": rows,
+        "error": error,
+        "is_host": meeting.host_id == request.user.id,
+        "participant_total": total,
+        "my_remaining": sum(1 for row in open_rows if not row["voted"]),
+        "my_done": sum(1 for row in open_rows if row["voted"]),
+        "open_count": len(open_rows),
+        "choice_prefix": decision_compiler.VOTE_CHOICE_PREFIX,
+        "kind_custom": DecisionVote.KIND_CUSTOM,
+        "kind_not_decided": DecisionVote.KIND_NOT_DECIDED,
     })

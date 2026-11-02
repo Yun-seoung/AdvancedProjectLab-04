@@ -23,9 +23,10 @@ import json
 import re
 
 from django.db import transaction
+from django.db.models import Count
 
 from . import services
-from .models import Decision, Interpretation
+from .models import Decision, DecisionVote, Interpretation
 
 # 경고는 회의당 최대 5개. 이보다 많이 발견되면 앞쪽(전사 순서) 5개만 경고로 남기고
 # 나머지는 명세로만 보여준다 — 한 회의에서 다룰 수 있는 안건 수를 넘기지 않기 위함.
@@ -412,3 +413,81 @@ def votable_decisions(meeting):
         decision for decision in meeting.decisions.prefetch_related("interpretations")
         if decision.warnings and len(decision.interpretations.all()) >= MIN_INTERPRETATIONS
     ]
+
+
+# ---------------------------------------------------------------------------
+# ③ 블라인드 동시 선택 — 집계
+#
+# 집계에는 인원 수만 담고 user는 절대 담지 않는다. 그리고 "내가 고른 항목"의 집계만
+# 만든다 — 아직 고르지 않은 항목은 화면에서 숨기는 게 아니라 애초에 계산하지 않아야
+# 템플릿 실수로도 새지 않는다. 진행자도 예외가 아니다.
+# ---------------------------------------------------------------------------
+
+# 라디오 버튼 value에서 해석 선택을 가리키는 접두사. "interpretation:12" 형태.
+VOTE_CHOICE_PREFIX = "interpretation:"
+
+
+def participant_total(meeting):
+    """투표 대상 인원 = 팀 멤버 전원(진행자 포함).
+
+    기존 quiz_status.participant_count()는 '독려받을 대상'을 세느라 진행자를 뺐지만,
+    여기서는 진행자도 자기 해석을 골라야 하고 그 선택이 ④ 판정의 입력이 되므로 포함한다.
+    """
+    return meeting.team.members.count()
+
+
+def _empty_tally(decision, total):
+    return {
+        "interpretations": [
+            {"label": interpretation.label, "text": interpretation.text, "count": 0}
+            for interpretation in decision.interpretations.all()
+        ],
+        "by_interpretation_id": {},
+        "custom": 0,
+        "not_decided": 0,
+        # 해석이 지워져 어느 보기였는지 알 수 없게 된 표(DecisionVote.interpretation=SET_NULL).
+        "orphan": 0,
+        "voted": 0,
+        "missing": total,
+        "total": total,
+    }
+
+
+def tallies_for(decisions, voted_ids, total):
+    """{항목 id: 인원 수 집계}. voted_ids(= 내가 이미 고른 항목)에 든 항목만 계산한다.
+
+    쿼리는 항목이 몇 개든 1번이다(N+1 금지). 집계 항목:
+    interpretations[].count / custom / not_decided / orphan / voted / missing / total
+    """
+    wanted = [decision for decision in decisions if decision.id in voted_ids]
+    if not wanted:
+        return {}
+    tallies = {decision.id: _empty_tally(decision, total) for decision in wanted}
+    for decision in wanted:
+        tally = tallies[decision.id]
+        for index, interpretation in enumerate(decision.interpretations.all()):
+            tally["by_interpretation_id"][interpretation.id] = index
+
+    rows = (
+        DecisionVote.objects
+        .filter(decision_id__in=list(tallies))
+        .values("decision_id", "kind", "interpretation_id")
+        .annotate(n=Count("id"))
+    )
+    for row in rows:
+        tally = tallies[row["decision_id"]]
+        count = row["n"]
+        tally["voted"] += count
+        if row["kind"] == DecisionVote.KIND_CUSTOM:
+            tally["custom"] += count
+        elif row["kind"] == DecisionVote.KIND_NOT_DECIDED:
+            tally["not_decided"] += count
+        else:
+            index = tally["by_interpretation_id"].get(row["interpretation_id"])
+            if index is None:
+                tally["orphan"] += count
+            else:
+                tally["interpretations"][index]["count"] += count
+    for tally in tallies.values():
+        tally["missing"] = max(tally["total"] - tally["voted"], 0)
+    return tallies
