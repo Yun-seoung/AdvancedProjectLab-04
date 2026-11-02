@@ -188,6 +188,13 @@
       {# 공개된 뒤: 확정 내용과 수정 폼. 수정하면 그 항목의 팀원 확인 기록이 전부 지워진다. #}
       {% if row.decision.status == status_published %}
       <div class="success" style="margin:0">확정: {{ row.decision.published_text }}</div>
+      {# 작성자 없는 숫자와 의견 문장만 받는다 — 누가 '달랐어요'를 골랐는지는 뷰에서부터 담지 않는다. #}
+      <div class="meta">확인 {{ row.ack.ack }}명 / 달랐어요 {{ row.ack.differ }}명</div>
+      {% if row.comments %}
+      <ul class="plain" style="margin:0">
+        {% for comment in row.comments %}<li class="meta">· "{{ comment }}"</li>{% endfor %}
+      </ul>
+      {% endif %}
       {% if row.decision.final_text %}
       <form method="post" style="margin:0">{% csrf_token %}
         <input type="hidden" name="decision_id" value="{{ row.decision.id }}">

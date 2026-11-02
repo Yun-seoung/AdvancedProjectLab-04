@@ -32,7 +32,7 @@ import re
 from django.db import transaction
 
 from . import services
-from .models import Decision, Interpretation
+from .models import Decision, DecisionAgreement, Interpretation
 
 # 경고는 회의당 최대 5개. 이보다 많이 발견되면 앞쪽(전사 순서) 5개만 경고로 남기고
 # 나머지는 명세로만 보여준다 — 한 회의에서 다룰 수 있는 안건 수를 넘기지 않기 위함.
@@ -482,6 +482,29 @@ def published_decisions(meeting):
         .filter(status__in=[Decision.STATUS_PUBLISHED, Decision.STATUS_UNDECIDED])
         .prefetch_related("agreements")
     )
+
+
+def ack_counts(decisions):
+    """진행자 화면용 공개 항목별 {decision_id: {"ack": n, "differ": m, "comments": [...]}}.
+
+    user는 아예 조회하지 않는다 — 누가 '달랐어요'를 골랐는지, 의견을 누가 썼는지는 결과 어디에도
+    담기지 않는다. 미결정 항목은 읽기 전용이라 세지 않는다.
+    """
+    published_ids = [decision.id for decision in decisions if decision.status == Decision.STATUS_PUBLISHED]
+    counts = {decision_id: {"ack": 0, "differ": 0, "comments": []} for decision_id in published_ids}
+    rows = DecisionAgreement.objects.filter(decision_id__in=published_ids).values_list("decision_id", "kind", "comment")
+    for decision_id, kind, comment in rows:
+        row = counts[decision_id]
+        if kind == DecisionAgreement.KIND_DIFFER:
+            row["differ"] += 1
+            if comment:
+                row["comments"].append(comment)
+        else:
+            row["ack"] += 1
+    for row in counts.values():
+        # 저장 순서대로 보여주면 시점으로 작성자를 짐작할 수 있어서 가나다순으로 섞는다.
+        row["comments"].sort()
+    return counts
 
 
 # ---------------------------------------------------------------------------

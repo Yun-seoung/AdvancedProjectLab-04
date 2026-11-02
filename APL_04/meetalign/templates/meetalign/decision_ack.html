@@ -1,0 +1,64 @@
+{% extends "meetalign/base.html" %}
+{% block note %}
+<li>실험 기능이다. 진행자가 공개한 확정 명세만 보이고, 공개 전 내용은 이 화면에 담기지 않는다.</li>
+<li>"제 이해와 달랐어요"는 익명이다. 진행자에게는 항목별 인원 수와 의견 문장만 보이고 누가 골랐는지는 보이지 않는다.</li>
+<li>다시 누르면 선택이 바뀐다. 미결정 항목은 다음 회의로 넘어간 안건이라 확인 대상이 아니다.</li>
+{% endblock %}
+{% block content %}
+<div class="page-head">
+  <div>
+    <h1><a href="{% url 'meeting_detail' meeting.id %}" class="crumb-link">{{ meeting.title }}</a> <span class="crumb-sep">/</span> 결정 확인 <span class="badge processing">실험</span></h1>
+    <div class="sub">진행자가 확정한 내용이 내가 이해한 것과 같은지 항목마다 한 번씩 눌러 주세요.</div>
+  </div>
+</div>
+
+<div class="card elevated">
+  {% if rows %}
+  {% if published_count %}
+  <div class="progress-row">
+    <span>{{ published_count }}개 중 {{ acked_count }}개 확인</span>
+  </div>
+  {% endif %}
+  <ul class="plain">
+    {% for row in rows %}
+    <li class="item" style="flex-direction:column;align-items:stretch;gap:10px">
+      <div class="item-text">
+        {# 미결정 항목은 확정 문장이 없어 빈칸 명세('? · …')가 되므로 안건 이름만 보인다. #}
+        <span class="title">{{ forloop.counter }}. {% if row.decision.status == status_published %}{{ row.decision.published_text }}{% else %}{{ row.decision.what }}{% endif %}</span>
+        {% if row.decision.status == status_published %}
+          {% if row.mine %}
+            <div class="meta">내 선택: <b>{{ row.mine.get_kind_display }}</b>{% if row.mine.comment %} · "{{ row.mine.comment }}"{% endif %}</div>
+          {% else %}
+            <div class="meta"><span class="badge ended">아직 확인 안 함</span></div>
+          {% endif %}
+        {% endif %}
+      </div>
+
+      {% if row.revised_notice %}
+      <div class="notice" style="margin:0">내용이 수정되었어요. 바뀐 문장을 보고 다시 확인해 주세요.</div>
+      {% endif %}
+
+      {% if row.decision.status == status_published %}
+      <form method="post" style="margin:0">{% csrf_token %}
+        <input type="hidden" name="decision_id" value="{{ row.decision.id }}">
+        <div class="field" style="margin:0 0 8px">
+          <label for="comment_{{ row.decision.id }}">한 줄 의견 (선택, "달랐어요"에만 붙어요)</label>
+          <input type="text" id="comment_{{ row.decision.id }}" name="comment" maxlength="{{ comment_max }}"
+            value="{% if row.mine.comment %}{{ row.mine.comment }}{% endif %}" placeholder="예: 저는 다음 주 월요일로 들었어요">
+        </div>
+        <div class="row">
+          <button name="kind" value="{{ kind_ack }}" class="btn sm{% if row.mine.kind != kind_ack %} secondary{% endif %}">확인했어요</button>
+          <button name="kind" value="{{ kind_differ }}" class="btn sm{% if row.mine.kind != kind_differ %} secondary{% endif %}">제 이해와 달랐어요</button>
+        </div>
+      </form>
+      {% else %}
+      <div class="notice" style="margin:0"><span><b>미결정</b> — 다음 회의로 넘어간 안건이라 확인하지 않아도 돼요.</span></div>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <div class="empty">아직 공개된 확정 명세가 없습니다. 진행자가 확정해서 공개하면 여기에 보여요.</div>
+  {% endif %}
+</div>
+{% endblock %}
