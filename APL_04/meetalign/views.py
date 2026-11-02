@@ -12,8 +12,8 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.http import url_has_allowed_host_and_scheme
 
-from . import quiz_status, services, tasks
-from .models import Answer, ChatMessage, CheckQuestion, Meeting, Question, Recording, Team
+from . import decision_compiler, quiz_status, services, tasks
+from .models import Answer, ChatMessage, CheckQuestion, Decision, Meeting, Question, Recording, Team
 
 ALLOWED_RECORDING_EXTENSIONS = {
     ".mp3", ".m4a", ".wav", ".ogg", ".webm", ".mp4", ".flac",
@@ -422,3 +422,138 @@ def record_file(request, meeting_id):
     response = HttpResponse(meeting.record, content_type="text/plain; charset=utf-8")
     response["Content-Disposition"] = 'attachment; filename="meeting_record.txt"'
     return response
+
+
+# ---------------------------------------------------------------------------
+# 결정 컴파일러 (실험 기능). 기존 이해도 퀴즈 화면(question_review/understanding/
+# verification)은 그대로 두고, 그 옆에 별도 흐름으로 붙인다.
+# ---------------------------------------------------------------------------
+
+
+def _decision_meeting(request, meeting_id):
+    """결정 컴파일러를 쓸 수 있는 회의만 통과시킨다.
+
+    팀 밖 사용자는 _meeting()이 404로 막고, 회의록이 아직 완성되지 않은 회의는 여기서 404다
+    — 컴파일할 전사 원문이 없는 회의에 링크를 노출하지 않기 위함(템플릿 쪽도 같은 조건).
+    """
+    meeting = _meeting(request, meeting_id)
+    if meeting.processing_status != Meeting.STATUS_DONE:
+        raise Http404
+    return meeting
+
+
+def _reset_decisions(meeting):
+    """컴파일 결과를 전부 지운다. 투표가 시작된 뒤에는 거부한다(집계가 꼬이므로)."""
+    if meeting.decisions.exclude(status=Decision.STATUS_DRAFT).exists():
+        return "이미 투표가 시작된 항목이 있어 명세를 지울 수 없습니다."
+    meeting.decisions.all().delete()
+    return None
+
+
+def _recompute_warnings(meeting, decisions):
+    """진행자가 빈칸을 채우거나 모호어를 고치면 경고도 같이 사라져야 한다.
+
+    같은 담당자에게 걸린 날짜 충돌과 "회의당 최대 5개" 제한은 항목 하나만 봐서는 판정할 수
+    없으므로 회의 전체를 한 번에 다시 센다. 단, 저장은 아직 draft인 항목에만 한다 — 투표가
+    시작된 항목의 경고가 바뀌면 참가자가 본 화면과 달라진다.
+    """
+    specs = [
+        {"who": d.who, "what": d.what, "due": d.due_text, "done": d.done_criteria, "state": d.confirm_state}
+        for d in decisions
+    ]
+    for decision, warnings in zip(decisions, decision_compiler.warnings_for(specs)):
+        if decision.status == Decision.STATUS_DRAFT and decision.warnings != warnings:
+            decision.warnings = warnings
+            decision.save(update_fields=["warnings"])
+
+
+def _save_decision_edits(request, meeting):
+    """진행자가 실행 명세와 해석 후보를 고친 것을 저장한다. draft 항목만 대상이다."""
+    decisions = list(meeting.decisions.prefetch_related("interpretations"))
+    valid_states = {choice for choice, _ in Decision.CONFIRM_CHOICES}
+    for decision in decisions:
+        if decision.status != Decision.STATUS_DRAFT:
+            continue
+        what = request.POST.get("what_%d" % decision.id, "").strip()
+        if not what:
+            # '무엇을'이 없으면 실행 명세가 아니다 — 빈칸으로 저장하지 않고 그 항목만 건너뛴다.
+            continue
+        state = request.POST.get("confirm_state_%d" % decision.id, decision.confirm_state)
+        decision.who = request.POST.get("who_%d" % decision.id, "").strip()
+        decision.what = what
+        decision.due_text = request.POST.get("due_%d" % decision.id, "").strip()
+        decision.done_criteria = request.POST.get("done_%d" % decision.id, "").strip()
+        decision.confirm_state = state if state in valid_states else decision.confirm_state
+        decision.save(update_fields=["who", "what", "due_text", "done_criteria", "confirm_state"])
+
+        for interpretation in decision.interpretations.all():
+            if request.POST.get("drop_interpretation_%d" % interpretation.id):
+                interpretation.delete()
+                continue
+            text = request.POST.get("interpretation_%d" % interpretation.id, "").strip()
+            if text and text != interpretation.text:
+                interpretation.text = text
+                interpretation.save(update_fields=["text"])
+    _recompute_warnings(meeting, list(meeting.decisions.all()))
+
+
+def _start_decision_vote(meeting):
+    votable = decision_compiler.votable_decisions(meeting)
+    if not votable:
+        return "투표에 올릴 항목이 없습니다 — 경고가 붙고 해석 후보가 %d개 이상인 항목이 필요합니다." % (
+            decision_compiler.MIN_INTERPRETATIONS
+        )
+    Decision.objects.filter(
+        pk__in=[decision.pk for decision in votable], status=Decision.STATUS_DRAFT,
+    ).update(status=Decision.STATUS_VOTING)
+    return None
+
+
+@login_required
+def decision_review(request, meeting_id):
+    """진행자 전용. "결정 컴파일 실행" → 실행 명세와 경고 확인·수정 → "투표 시작"."""
+    meeting = _decision_meeting(request, meeting_id)
+    _require_host(meeting, request.user)
+    error = None
+    if request.method == "POST":
+        action = request.POST.get("action")
+        if action == "compile":
+            try:
+                decision_compiler.compile_meeting(meeting)
+            except decision_compiler.DecisionCompileError as exc:
+                error = str(exc)
+        elif action == "reset":
+            error = _reset_decisions(meeting)
+        elif action == "save":
+            _save_decision_edits(request, meeting)
+        elif action == "start_vote":
+            error = _start_decision_vote(meeting)
+        if error is None:
+            return redirect("decision_review", meeting_id=meeting.id)
+
+    decisions = list(meeting.decisions.prefetch_related("interpretations"))
+    votable_ids = {decision.id for decision in decision_compiler.votable_decisions(meeting)}
+    rows = [
+        {
+            "decision": decision,
+            "interpretations": list(decision.interpretations.all()),
+            "votable": decision.id in votable_ids,
+        }
+        for decision in decisions
+    ]
+    warned = [row for row in rows if row["decision"].warnings]
+    return render(request, "meetalign/decision_review.html", {
+        "meeting": meeting,
+        "rows": rows,
+        "error": error,
+        "compiled": bool(decisions),
+        "warned_count": len(warned),
+        "votable_count": len(votable_ids),
+        # 경고는 났지만 근거 검증을 통과한 해석이 부족해 투표에 올릴 수 없는 항목.
+        "unvotable_count": len(warned) - len(votable_ids),
+        "max_warnings": decision_compiler.MAX_WARNED_DECISIONS,
+        "min_interpretations": decision_compiler.MIN_INTERPRETATIONS,
+        "editable": all(row["decision"].status == Decision.STATUS_DRAFT for row in rows),
+        "vote_started": any(row["decision"].status != Decision.STATUS_DRAFT for row in rows),
+        "confirm_choices": Decision.CONFIRM_CHOICES,
+    })

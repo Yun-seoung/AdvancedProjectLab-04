@@ -15,7 +15,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 
-from . import quiz_status, services, tasks, views, whisper_worker
+from . import decision_compiler, quiz_status, services, tasks, views, whisper_worker
 from .models import (
     Answer, ChatMessage, CheckQuestion, Checkpoint, Decision, DecisionAgreement, DecisionVote,
     Interpretation, Meeting, Question, Recording, SttUsage, Team,
@@ -1979,6 +1979,442 @@ class PartialAnswerNoticeTests(TestCase):
         r = self.client.get(self.url)
         self.assertContains(r, "4문항 중 3문항 답함")
         self.assertContains(r, "아직 1문항이 남았습니다")
+
+
+def _spec(who="민수", what="배포 준비", due="금요일", done="스테이징 확인", state=Decision.CONFIRM_CONFIRMED):
+    return {"who": who, "what": what, "due": due, "done": done, "state": state}
+
+
+class DecisionWarningTests(TestCase):
+    """① 컴파일의 경고 판정. LLM이 아니라 decision_compiler의 규칙으로 세므로 DB도 LLM도 필요 없다."""
+
+    def test_blank_fields_each_raise_their_own_warning(self):
+        warnings = decision_compiler.warnings_for([_spec(who="", due="", done="")])[0]
+        self.assertEqual(warnings, ["담당자 빈칸", "기한 빈칸", "완료 기준 빈칸"])
+
+    def test_fully_filled_spec_has_no_warning(self):
+        self.assertEqual(decision_compiler.warnings_for([_spec()])[0], [])
+
+    def test_each_ambiguous_phrase_is_detected(self):
+        for phrase in decision_compiler.AMBIGUOUS_PHRASES:
+            warnings = decision_compiler.warnings_for([_spec(due="%s 끝내기" % phrase)])[0]
+            self.assertIn("모호어 '%s'" % phrase, warnings, phrase)
+
+    def test_two_dates_in_one_spec_raise_a_conflict_warning(self):
+        warnings = decision_compiler.warnings_for([_spec(due="금요일 아니면 다음 주 월요일")])[0]
+        self.assertTrue(any(w.startswith("같은 항목에 다른 날짜") for w in warnings), warnings)
+
+    def test_a_single_date_written_as_month_and_day_is_not_a_conflict(self):
+        # "12월 5일"을 "12월"과 "5일"로 쪼개 세면 날짜가 하나인 명세에도 경고가 붙는다.
+        warnings = decision_compiler.warnings_for([_spec(due="12월 5일")])[0]
+        self.assertFalse(any(w.startswith("같은 항목에 다른 날짜") for w in warnings), warnings)
+
+    def test_two_quantities_in_one_spec_raise_a_conflict_warning(self):
+        warnings = decision_compiler.warnings_for([_spec(what="테스트 3개 작성", done="5개 통과")])[0]
+        self.assertTrue(any(w.startswith("같은 항목에 다른 숫자") for w in warnings), warnings)
+
+    def test_same_owner_with_different_due_dates_warns_on_both_items(self):
+        rows = decision_compiler.warnings_for([
+            _spec(who="민수", what="배포", due="금요일"),
+            _spec(who="민수", what="문서", due="다음 주 화요일"),
+        ])
+        for warnings in rows:
+            self.assertTrue(any("'민수'에게 다른 날짜" in w for w in warnings), warnings)
+
+    def test_same_owner_with_the_same_due_date_does_not_warn(self):
+        rows = decision_compiler.warnings_for([
+            _spec(who="민수", what="배포", due="금요일"),
+            _spec(who="민수", what="문서", due="금요일"),
+        ])
+        self.assertEqual(rows, [[], []])
+
+    def test_different_owners_are_not_compared_with_each_other(self):
+        rows = decision_compiler.warnings_for([
+            _spec(who="민수", due="금요일"),
+            _spec(who="영희", due="다음 주 화요일"),
+        ])
+        self.assertEqual(rows, [[], []])
+
+    def test_at_most_five_items_keep_their_warnings(self):
+        specs = [_spec(what="할 일 %d" % i, done="") for i in range(7)]
+        rows = decision_compiler.warnings_for(specs)
+        self.assertEqual(sum(1 for warnings in rows if warnings), decision_compiler.MAX_WARNED_DECISIONS)
+        # 잘릴 때는 뒤쪽(전사본에서 나중에 나온) 항목의 경고를 비운다.
+        self.assertTrue(all(rows[i] for i in range(5)))
+        self.assertEqual(rows[5], [])
+        self.assertEqual(rows[6], [])
+
+    def test_items_without_warnings_do_not_use_up_the_five_slots(self):
+        specs = [_spec(done="") for _ in range(3)] + [_spec() for _ in range(4)] + [_spec(done="") for _ in range(3)]
+        rows = decision_compiler.warnings_for(specs)
+        self.assertEqual(sum(1 for warnings in rows if warnings), 5)
+
+    def test_the_same_warning_reason_is_not_listed_twice(self):
+        warnings = decision_compiler.warnings_for([_spec(who="각자", what="각자 정리", due="", done="")])[0]
+        self.assertEqual(warnings.count("모호어 '각자'"), 1)
+
+
+class DecisionParseTests(TestCase):
+    """LLM 응답의 JSON 스키마 검증과 근거 검증."""
+
+    def test_parse_decisions_reads_the_documented_schema(self):
+        raw = json.dumps([{"who": "민수", "what": "배포", "due": "금요일", "done": "확인", "state": "확정"}], ensure_ascii=False)
+        specs = decision_compiler.parse_decisions(raw)
+        self.assertEqual(specs, [{
+            "who": "민수", "what": "배포", "due": "금요일", "done": "확인",
+            "state": Decision.CONFIRM_CONFIRMED,
+        }])
+
+    def test_parse_decisions_survives_code_fences_and_prose(self):
+        raw = "네, 정리했습니다.\n```json\n[{\"what\": \"배포\"}]\n```\n이상입니다."
+        self.assertEqual(len(decision_compiler.parse_decisions(raw)), 1)
+
+    def test_parse_decisions_drops_items_without_what(self):
+        raw = json.dumps([{"who": "민수", "what": "", "due": "금요일"}, {"what": "배포"}], ensure_ascii=False)
+        specs = decision_compiler.parse_decisions(raw)
+        self.assertEqual([spec["what"] for spec in specs], ["배포"])
+
+    def test_parse_decisions_keeps_blank_who_and_due(self):
+        # 빈칸은 버릴 흠이 아니라 경고의 재료이므로 그대로 남아야 한다.
+        specs = decision_compiler.parse_decisions(json.dumps([{"what": "배포"}]))
+        self.assertEqual(specs[0]["who"], "")
+        self.assertEqual(specs[0]["due"], "")
+
+    def test_parse_decisions_defaults_unknown_state_to_unset(self):
+        specs = decision_compiler.parse_decisions(json.dumps([{"what": "배포", "state": "아마도"}], ensure_ascii=False))
+        self.assertEqual(specs[0]["state"], Decision.CONFIRM_UNSET)
+
+    def test_parse_decisions_returns_empty_on_broken_json(self):
+        self.assertEqual(decision_compiler.parse_decisions("JSON 못 만들겠습니다"), [])
+        self.assertEqual(decision_compiler.parse_decisions('[{"what": "배포",]'), [])
+        self.assertEqual(decision_compiler.parse_decisions('{"what": "배포"}'), [])
+
+    def test_parse_decisions_caps_the_number_of_items(self):
+        raw = json.dumps([{"what": "할 일 %d" % i} for i in range(30)], ensure_ascii=False)
+        self.assertEqual(len(decision_compiler.parse_decisions(raw)), decision_compiler.MAX_DECISIONS)
+
+    def test_interpretation_with_evidence_missing_from_the_transcript_is_dropped(self):
+        source = "민수가 금요일까지 배포를 맡기로 했습니다."
+        raw = json.dumps([
+            {"text": "금요일 퇴근 전까지라는 뜻", "evidence": "민수가 금요일까지 배포를 맡기로 했습니다."},
+            {"text": "다음 주 금요일이라는 뜻", "evidence": "다음 주 금요일까지라고 했습니다."},
+        ], ensure_ascii=False)
+        results = decision_compiler.parse_interpretations(raw, source_text=source)
+        self.assertEqual([r["text"] for r in results], ["금요일 퇴근 전까지라는 뜻"])
+
+    def test_evidence_matching_ignores_whitespace_differences(self):
+        source = "민수가 금요일까지 배포를 맡기로 했습니다."
+        raw = json.dumps([{"text": "해석", "evidence": "민수가  금요일까지\n배포를 맡기로"}], ensure_ascii=False)
+        self.assertEqual(len(decision_compiler.parse_interpretations(raw, source_text=source)), 1)
+
+    def test_blank_evidence_skips_verification(self):
+        raw = json.dumps([{"text": "해석", "evidence": ""}], ensure_ascii=False)
+        self.assertEqual(len(decision_compiler.parse_interpretations(raw, source_text="아무 내용")), 1)
+
+    def test_interpretations_without_text_or_duplicated_are_dropped(self):
+        raw = json.dumps([{"text": ""}, {"text": "같은 해석"}, {"text": "같은 해석"}], ensure_ascii=False)
+        results = decision_compiler.parse_interpretations(raw)
+        self.assertEqual([r["text"] for r in results], ["같은 해석"])
+
+    def test_interpretations_are_capped(self):
+        raw = json.dumps([{"text": "해석 %d" % i} for i in range(8)], ensure_ascii=False)
+        self.assertEqual(len(decision_compiler.parse_interpretations(raw)), decision_compiler.MAX_INTERPRETATIONS)
+
+
+class DecisionCompileTests(TestCase):
+    """①+② 전체. LLM 유무, 파싱 실패 재시도, 가짜 응답 모드를 본다."""
+
+    def setUp(self):
+        self.host = User.objects.create_user("host", password="pw12345!")
+        self.team = Team.objects.create(name="t")
+        self.team.members.add(self.host)
+        self.meeting = Meeting.objects.create(
+            team=self.team, title="m", host=self.host,
+            processing_status=Meeting.STATUS_DONE,
+            transcript="민수가 금요일까지 배포를 맡기로 했습니다. 디자인은 각자 보기로 했습니다.",
+        )
+
+    def test_fake_mode_runs_the_whole_flow_without_any_llm(self):
+        with patch.dict(os.environ, {}, clear=True):
+            summary = decision_compiler.compile_meeting(self.meeting)
+        self.assertEqual(summary["decisions"], len(decision_compiler.FAKE_DECISIONS))
+        self.assertEqual(self.meeting.decisions.count(), len(decision_compiler.FAKE_DECISIONS))
+        # 가짜 명세 3개 중 완전히 채워진 1개는 경고가 없고, 나머지 2개는 해석 후보까지 생긴다.
+        self.assertEqual(summary["warned"], 2)
+        self.assertEqual(summary["unvotable"], 0)
+        self.assertEqual(Interpretation.objects.filter(decision__meeting=self.meeting).count(), 4)
+        self.assertEqual(len(decision_compiler.votable_decisions(self.meeting)), 2)
+
+    def test_items_without_warnings_get_no_interpretations(self):
+        with patch.dict(os.environ, {}, clear=True):
+            decision_compiler.compile_meeting(self.meeting)
+        for decision in self.meeting.decisions.all():
+            if decision.warnings:
+                self.assertGreater(decision.interpretations.count(), 0, decision.spec_line)
+            else:
+                self.assertEqual(decision.interpretations.count(), 0, decision.spec_line)
+
+    def _llm(self, *responses):
+        return patch.object(services, "_generate", side_effect=list(responses))
+
+    def test_compile_uses_the_llm_response_when_a_model_is_configured(self):
+        compiled = json.dumps([{"who": "민수", "what": "배포", "due": "금요일", "done": "", "state": "확정"}], ensure_ascii=False)
+        interpretations = json.dumps([
+            {"text": "이번 주 금요일이라는 뜻", "evidence": "민수가 금요일까지 배포를 맡기로 했습니다."},
+            {"text": "다음 주 금요일이라는 뜻", "evidence": "디자인은 각자 보기로 했습니다."},
+        ], ensure_ascii=False)
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), self._llm(compiled, interpretations):
+            decision_compiler.compile_meeting(self.meeting)
+        decision = self.meeting.decisions.get()
+        self.assertEqual(decision.who, "민수")
+        self.assertEqual(decision.warnings, ["완료 기준 빈칸"])
+        self.assertEqual(decision.interpretations.count(), 2)
+
+    def test_transcript_is_sent_in_the_compile_prompt(self):
+        compiled = json.dumps([{"what": "배포", "who": "민수", "due": "금요일", "done": "확인"}], ensure_ascii=False)
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), self._llm(compiled) as gen:
+            decision_compiler.compile_meeting(self.meeting)
+        self.assertIn(self.meeting.transcript, gen.call_args_list[0][0][0])
+
+    def test_broken_json_is_retried_once_then_fails(self):
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), self._llm("못 하겠습니다", "역시 못 하겠습니다") as gen:
+            with self.assertRaises(decision_compiler.DecisionCompileError):
+                decision_compiler.compile_meeting(self.meeting)
+        self.assertEqual(gen.call_count, decision_compiler.PARSE_RETRIES + 1)
+        # 실패했으면 반쯤 저장된 명세가 남아 있어서는 안 된다.
+        self.assertEqual(self.meeting.decisions.count(), 0)
+
+    def test_second_attempt_succeeding_is_accepted(self):
+        good = json.dumps([{"what": "배포", "who": "민수", "due": "금요일", "done": "확인"}], ensure_ascii=False)
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), self._llm("못 하겠습니다", good) as gen:
+            decision_compiler.compile_meeting(self.meeting)
+        self.assertEqual(gen.call_count, 2)
+        self.assertEqual(self.meeting.decisions.count(), 1)
+
+    def test_connection_failure_falls_back_to_fake_specs(self):
+        # 기존 퀴즈 생성과 같은 처리 — 연결 실패는 실패 표시 대신 가짜 응답으로 흐름을 잇는다.
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", side_effect=OSError("연결 실패")):
+            summary = decision_compiler.compile_meeting(self.meeting)
+        self.assertEqual(summary["decisions"], len(decision_compiler.FAKE_DECISIONS))
+
+    def test_interpretations_with_fabricated_evidence_leave_the_item_unvotable(self):
+        compiled = json.dumps([{"who": "민수", "what": "배포", "due": "금요일", "done": "", "state": "확정"}], ensure_ascii=False)
+        # 두 해석 모두 전사 원문에 없는 문장을 근거로 달았으므로 전부 버려진다.
+        interpretations = json.dumps([
+            {"text": "해석 1", "evidence": "회의에 없던 문장입니다."},
+            {"text": "해석 2", "evidence": "이것도 없습니다."},
+        ], ensure_ascii=False)
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), self._llm(compiled, interpretations, interpretations):
+            summary = decision_compiler.compile_meeting(self.meeting)
+        self.assertEqual(summary["warned"], 1)
+        self.assertEqual(summary["unvotable"], 1)
+        self.assertEqual(Interpretation.objects.filter(decision__meeting=self.meeting).count(), 0)
+        self.assertEqual(decision_compiler.votable_decisions(self.meeting), [])
+
+    def test_recompiling_an_already_compiled_meeting_is_refused(self):
+        with patch.dict(os.environ, {}, clear=True):
+            decision_compiler.compile_meeting(self.meeting)
+            with self.assertRaises(decision_compiler.DecisionCompileError):
+                decision_compiler.compile_meeting(self.meeting)
+
+    def test_compile_fails_when_no_decision_can_be_extracted(self):
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), self._llm("[]", "[]"):
+            with self.assertRaises(decision_compiler.DecisionCompileError):
+                decision_compiler.compile_meeting(self.meeting)
+
+    def test_dropped_warning_count_is_reported(self):
+        specs = [_spec(what="할 일 %d" % i, done="") for i in range(7)]
+        with patch.dict(os.environ, {}, clear=True), patch.object(decision_compiler, "compile_specs", return_value=specs):
+            summary = decision_compiler.compile_meeting(self.meeting)
+        self.assertEqual(summary["decisions"], 7)
+        self.assertEqual(summary["warned"], decision_compiler.MAX_WARNED_DECISIONS)
+        self.assertEqual(summary["dropped_warnings"], 2)
+
+
+class DecisionReviewTests(TestCase):
+    """진행자 화면의 권한과 동작."""
+
+    def setUp(self):
+        self.host = User.objects.create_user("host", password="pw12345!")
+        self.member = User.objects.create_user("member", password="pw12345!")
+        self.outsider = User.objects.create_user("outsider", password="pw12345!")
+        self.team = Team.objects.create(name="t")
+        self.team.members.add(self.host, self.member)
+        self.meeting = Meeting.objects.create(
+            team=self.team, title="m", host=self.host,
+            processing_status=Meeting.STATUS_DONE,
+            record="결정: 배포는 금요일",
+            transcript="민수가 금요일까지 배포를 맡기로 했습니다.",
+        )
+        self.url = reverse("decision_review", args=[self.meeting.id])
+        self.client.force_login(self.host)
+
+    def _compile(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.client.post(self.url, {"action": "compile"})
+
+    def test_outsider_gets_404(self):
+        client = Client()
+        client.force_login(self.outsider)
+        self.assertEqual(client.get(self.url).status_code, 404)
+
+    def test_non_host_member_gets_403(self):
+        client = Client()
+        client.force_login(self.member)
+        self.assertEqual(client.get(self.url).status_code, 403)
+
+    def test_anonymous_user_is_redirected_to_login(self):
+        client = Client()
+        self.assertEqual(client.get(self.url).status_code, 302)
+
+    def test_meeting_without_a_finished_record_gets_404(self):
+        Meeting.objects.filter(pk=self.meeting.pk).update(processing_status=Meeting.STATUS_PROCESSING)
+        self.assertEqual(self.client.get(self.url).status_code, 404)
+
+    def test_first_visit_offers_the_compile_button_only(self):
+        r = self.client.get(self.url)
+        self.assertContains(r, "결정 컴파일 실행")
+        self.assertNotContains(r, "투표 시작")
+        self.assertFalse(r.context["compiled"])
+
+    def test_compile_action_saves_specs_and_redirects(self):
+        with patch.dict(os.environ, {}, clear=True):
+            r = self.client.post(self.url, {"action": "compile"})
+        self.assertRedirects(r, self.url)
+        self.assertEqual(self.meeting.decisions.count(), len(decision_compiler.FAKE_DECISIONS))
+        r = self.client.get(self.url)
+        self.assertTrue(r.context["compiled"])
+        self.assertEqual(r.context["warned_count"], 2)
+        self.assertEqual(r.context["votable_count"], 2)
+
+    def test_compile_failure_is_shown_on_the_page(self):
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="안 되겠습니다"):
+            r = self.client.post(self.url, {"action": "compile"})
+        self.assertEqual(r.status_code, 200)
+        self.assertContains(r, "읽지 못했습니다")
+        self.assertEqual(self.meeting.decisions.count(), 0)
+
+    def test_editing_a_spec_clears_the_warnings_it_fixes(self):
+        self._compile()
+        decision = self.meeting.decisions.filter(who="").first()
+        self.assertIn("담당자 빈칸", decision.warnings)
+        self.client.post(self.url, {
+            "action": "save",
+            "who_%d" % decision.id: "민수",
+            "what_%d" % decision.id: decision.what,
+            "due_%d" % decision.id: "금요일",
+            "done_%d" % decision.id: "스테이징 배포 확인",
+            "confirm_state_%d" % decision.id: Decision.CONFIRM_CONFIRMED,
+        })
+        decision.refresh_from_db()
+        self.assertEqual(decision.who, "민수")
+        self.assertEqual(decision.warnings, [])
+        self.assertEqual(decision.confirm_state, Decision.CONFIRM_CONFIRMED)
+
+    def test_saving_a_blank_what_leaves_the_item_untouched(self):
+        self._compile()
+        decision = self.meeting.decisions.first()
+        before = decision.what
+        self.client.post(self.url, {"action": "save", "what_%d" % decision.id: "   "})
+        decision.refresh_from_db()
+        self.assertEqual(decision.what, before)
+
+    def test_dropping_interpretations_makes_the_item_unvotable(self):
+        self._compile()
+        decision = decision_compiler.votable_decisions(self.meeting)[0]
+        fields = {"action": "save", "what_%d" % decision.id: decision.what}
+        for interpretation in decision.interpretations.all():
+            fields["drop_interpretation_%d" % interpretation.id] = "1"
+        self.client.post(self.url, fields)
+        # decision은 prefetch_related로 받아온 객체라서 .interpretations.count()가 캐시된
+        # 옛 값을 돌려준다. 삭제가 실제로 됐는지는 새 쿼리로 확인한다.
+        self.assertEqual(Interpretation.objects.filter(decision=decision).count(), 0)
+        self.assertNotIn(decision.id, {d.id for d in decision_compiler.votable_decisions(self.meeting)})
+
+    def test_start_vote_moves_only_votable_items_to_voting(self):
+        self._compile()
+        votable_ids = {d.id for d in decision_compiler.votable_decisions(self.meeting)}
+        self.client.post(self.url, {"action": "start_vote"})
+        for decision in self.meeting.decisions.all():
+            expected = Decision.STATUS_VOTING if decision.id in votable_ids else Decision.STATUS_DRAFT
+            self.assertEqual(decision.status, expected, decision.spec_line)
+
+    def test_start_vote_without_any_votable_item_shows_an_error(self):
+        self._compile()
+        Interpretation.objects.filter(decision__meeting=self.meeting).delete()
+        r = self.client.post(self.url, {"action": "start_vote"})
+        self.assertContains(r, "투표에 올릴 항목이 없습니다")
+        self.assertFalse(self.meeting.decisions.filter(status=Decision.STATUS_VOTING).exists())
+
+    def test_specs_cannot_be_edited_once_voting_started(self):
+        self._compile()
+        self.client.post(self.url, {"action": "start_vote"})
+        decision = self.meeting.decisions.filter(status=Decision.STATUS_VOTING).first()
+        before = decision.who
+        self.client.post(self.url, {
+            "action": "save",
+            "who_%d" % decision.id: "바뀐 담당자",
+            "what_%d" % decision.id: decision.what,
+        })
+        decision.refresh_from_db()
+        self.assertEqual(decision.who, before)
+        self.assertFalse(self.client.get(self.url).context["editable"])
+
+    def test_reset_is_refused_after_voting_started(self):
+        self._compile()
+        self.client.post(self.url, {"action": "start_vote"})
+        r = self.client.post(self.url, {"action": "reset"})
+        self.assertContains(r, "지울 수 없습니다")
+        self.assertGreater(self.meeting.decisions.count(), 0)
+
+    def test_reset_clears_everything_while_still_draft(self):
+        self._compile()
+        self.client.post(self.url, {"action": "reset"})
+        self.assertEqual(self.meeting.decisions.count(), 0)
+        self.assertEqual(Interpretation.objects.count(), 0)
+
+    def test_review_page_never_prints_member_names(self):
+        self._compile()
+        r = self.client.get(self.url)
+        for name in ("member", "outsider"):
+            self.assertNotContains(r, name)
+
+
+class DecisionEntryLinkTests(TestCase):
+    """회의록이 완성된 회의에서만, 진행자에게만 "결정 확인(실험)" 링크가 보인다."""
+
+    def setUp(self):
+        self.host = User.objects.create_user("host", password="pw12345!")
+        self.member = User.objects.create_user("member", password="pw12345!")
+        self.team = Team.objects.create(name="t")
+        self.team.members.add(self.host, self.member)
+        self.meeting = Meeting.objects.create(
+            team=self.team, title="m", host=self.host,
+            processing_status=Meeting.STATUS_DONE, record="결정", transcript="전사",
+        )
+        self.link = reverse("decision_review", args=[self.meeting.id])
+
+    def test_result_page_shows_the_link_to_the_host(self):
+        self.client.force_login(self.host)
+        r = self.client.get(reverse("meeting_result", args=[self.meeting.id]))
+        self.assertContains(r, "결정 확인(실험)")
+        self.assertContains(r, self.link)
+
+    def test_result_page_hides_the_link_from_a_non_host_member(self):
+        self.client.force_login(self.member)
+        r = self.client.get(reverse("meeting_result", args=[self.meeting.id]))
+        self.assertNotContains(r, self.link)
+
+    def test_detail_page_hides_the_link_until_the_record_is_finished(self):
+        self.client.force_login(self.host)
+        Meeting.objects.filter(pk=self.meeting.pk).update(processing_status=Meeting.STATUS_PROCESSING)
+        r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
+        self.assertNotContains(r, self.link)
+
+    def test_detail_page_shows_the_link_when_the_record_is_finished(self):
+        self.client.force_login(self.host)
+        r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
+        self.assertContains(r, self.link)
 
 
 class DecisionModelTests(TestCase):
