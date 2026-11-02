@@ -3189,3 +3189,86 @@ class DecisionReviseTests(TestCase):
         r = self.client.get(self.url)
         for name in (self.alice.username, self.bob.username):
             self.assertNotContains(r, name)
+
+
+class DecisionUnpublishTests(TestCase):
+    """공개 취소 — 잘못 누른 공개를 수습하는 통로. 팀원 확인이 하나라도 있으면 막는다."""
+
+    def setUp(self):
+        self.host = User.objects.create_user("hostuser", password="pw12345!")
+        self.member = User.objects.create_user("memberuser", password="pw12345!")
+        self.team = Team.objects.create(name="t")
+        self.team.members.add(self.host, self.member)
+        self.meeting = Meeting.objects.create(
+            team=self.team, title="m", host=self.host,
+            processing_status=Meeting.STATUS_DONE, record="결정", transcript="전사",
+        )
+        self.decision = Decision.objects.create(
+            meeting=self.meeting, order=0, who="민수", what="배포", due_text="금요일",
+            warnings=["완료 기준 빈칸"], status=Decision.STATUS_PUBLISHED, final_text="금요일 18시까지",
+        )
+        self.url = reverse("decision_review", args=[self.meeting.id])
+        self.client.force_login(self.host)
+
+    def test_unpublishing_puts_items_back_into_draft(self):
+        r = self.client.post(self.url, {"action": "unpublish"})
+        self.assertRedirects(r, self.url)
+        self.decision.refresh_from_db()
+        self.assertEqual(self.decision.status, Decision.STATUS_DRAFT)
+        # 확정 내용은 남겨 둔다 — 공개만 되돌리는 것이고 다시 고를 필요는 없다.
+        self.assertEqual(self.decision.final_text, "금요일 18시까지")
+        self.assertTrue(self.client.get(self.url).context["editable"])
+
+    def test_the_spec_edit_section_comes_back_after_unpublishing(self):
+        # 이게 공개 취소를 넣은 이유다 — 공개 뒤에는 명세 수정 영역이 사라진다.
+        self.assertNotContains(self.client.get(self.url), "무엇을")
+        self.client.post(self.url, {"action": "unpublish"})
+        self.assertContains(self.client.get(self.url), "무엇을")
+
+    def test_undecided_items_are_restored_too(self):
+        Decision.objects.filter(pk=self.decision.pk).update(
+            status=Decision.STATUS_UNDECIDED, marked_undecided=True,
+        )
+        self.client.post(self.url, {"action": "unpublish"})
+        self.decision.refresh_from_db()
+        self.assertEqual(self.decision.status, Decision.STATUS_DRAFT)
+        self.assertTrue(self.decision.marked_undecided)
+
+    def test_the_revised_flag_is_cleared(self):
+        Decision.objects.filter(pk=self.decision.pk).update(revised=True)
+        self.client.post(self.url, {"action": "unpublish"})
+        self.decision.refresh_from_db()
+        self.assertFalse(self.decision.revised)
+
+    def test_unpublishing_is_refused_once_a_member_has_confirmed(self):
+        DecisionAgreement.objects.create(decision=self.decision, user=self.member)
+        r = self.client.post(self.url, {"action": "unpublish"})
+        self.assertContains(r, "공개를 취소할 수 없습니다")
+        self.decision.refresh_from_db()
+        self.assertEqual(self.decision.status, Decision.STATUS_PUBLISHED)
+        self.assertFalse(self.client.get(self.url).context["can_unpublish"])
+
+    def test_the_button_is_hidden_while_still_in_draft(self):
+        Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)
+        r = self.client.get(self.url)
+        self.assertFalse(r.context["can_unpublish"])
+        self.assertNotContains(r, "공개 취소")
+
+    def test_unpublishing_with_nothing_published_is_refused(self):
+        Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)
+        r = self.client.post(self.url, {"action": "unpublish"})
+        self.assertContains(r, "공개된 항목이 없습니다")
+
+    def test_reset_message_points_at_unpublishing(self):
+        # 공개된 뒤 "명세 지우고 다시 컴파일"을 시도하면 다음에 뭘 눌러야 하는지 알려줘야 한다.
+        r = self.client.post(self.url, {"action": "reset"})
+        self.assertContains(r, "이미 공개된 항목이 있어 명세를 지울 수 없습니다")
+        self.assertContains(r, "공개 취소")
+        self.assertEqual(self.meeting.decisions.count(), 1)
+
+    def test_non_host_cannot_unpublish(self):
+        client = Client()
+        client.force_login(self.member)
+        self.assertEqual(client.post(self.url, {"action": "unpublish"}).status_code, 403)
+        self.decision.refresh_from_db()
+        self.assertEqual(self.decision.status, Decision.STATUS_PUBLISHED)

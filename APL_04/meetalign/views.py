@@ -14,7 +14,8 @@ from django.utils.http import url_has_allowed_host_and_scheme
 
 from . import decision_compiler, quiz_status, services, tasks
 from .models import (
-    Answer, ChatMessage, CheckQuestion, Decision, Interpretation, Meeting, Question, Recording, Team,
+    Answer, ChatMessage, CheckQuestion, Decision, DecisionAgreement, Interpretation, Meeting,
+    Question, Recording, Team,
 )
 
 ALLOWED_RECORDING_EXTENSIONS = {
@@ -450,10 +451,29 @@ def _decision_meeting(request, meeting_id):
 
 
 def _reset_decisions(meeting):
-    """컴파일 결과를 전부 지운다. 투표가 시작된 뒤에는 거부한다(집계가 꼬이므로)."""
+    """컴파일 결과를 전부 지운다. 공개된 뒤에는 거부한다.
+
+    팀원이 이미 확인한 내용이 사라지면 안 되기 때문이다. 공개를 되돌리려면 먼저 '공개 취소'로
+    draft로 내려야 한다(확인 기록이 하나도 없을 때만 가능).
+    """
     if meeting.decisions.exclude(status=Decision.STATUS_DRAFT).exists():
-        return "이미 투표가 시작된 항목이 있어 명세를 지울 수 없습니다."
+        return "이미 공개된 항목이 있어 명세를 지울 수 없습니다. '공개 취소'를 먼저 눌러 주세요."
     meeting.decisions.all().delete()
+    return None
+
+
+def _unpublish_decisions(meeting):
+    """공개를 되돌려 draft로 내린다 — 공개 직후 "잘못 눌렀다"를 수습하는 통로.
+
+    팀원이 한 명이라도 확인을 남겼으면 거부한다. 그 뒤에 명세가 바뀌면 팀원이 확인한 내용과
+    달라지는데, 그건 공개 취소가 아니라 '확정 문장 수정'(revise)이 다룰 일이다.
+    """
+    published = meeting.decisions.exclude(status=Decision.STATUS_DRAFT)
+    if not published.exists():
+        return "공개된 항목이 없습니다."
+    if DecisionAgreement.objects.filter(decision__meeting=meeting).exists():
+        return "팀원이 이미 확인한 항목이 있어 공개를 취소할 수 없습니다. 내용을 고치려면 '확정 문장 수정'을 쓰세요."
+    published.update(status=Decision.STATUS_DRAFT, revised=False)
     return None
 
 
@@ -638,6 +658,8 @@ def decision_review(request, meeting_id):
             error = _save_decision_edits(request, meeting)
         elif action == "publish":
             error = _publish_decisions(meeting)
+        elif action == "unpublish":
+            error = _unpublish_decisions(meeting)
         elif action == "revise":
             error = _revise_final_text(request, meeting)
         if error is None:
@@ -678,6 +700,11 @@ def decision_review(request, meeting_id):
         "can_publish": bool(drafts) and not blockers,
         "published_count": sum(1 for row in rows if row["decision"].status == Decision.STATUS_PUBLISHED),
         "undecided_count": sum(1 for row in rows if row["decision"].status == Decision.STATUS_UNDECIDED),
+        # 공개 취소는 팀원 확인이 하나도 없을 때만 — 잘못 누른 공개를 수습하는 통로다.
+        "can_unpublish": (
+            bool(decisions) and not drafts
+            and not DecisionAgreement.objects.filter(decision__meeting=meeting).exists()
+        ),
         "choice_candidate_prefix": decision_compiler.CHOICE_CANDIDATE_PREFIX,
         "choice_custom": decision_compiler.CHOICE_CUSTOM,
         "choice_undecided": decision_compiler.CHOICE_UNDECIDED,

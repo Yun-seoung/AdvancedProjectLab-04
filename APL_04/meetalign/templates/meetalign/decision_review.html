@@ -48,6 +48,11 @@
       <button name="action" value="reset" class="btn sm ghost" style="color:var(--danger)"
         onclick="return confirm('컴파일 결과를 모두 지우고 처음부터 다시 할까요?');">명세 지우고 다시 컴파일</button>
     </form>
+    {% elif can_unpublish %}
+    <form method="post">{% csrf_token %}
+      <button name="action" value="unpublish" class="btn sm secondary"
+        onclick="return confirm('공개를 취소하고 수정 가능한 상태로 되돌릴까요?');">공개 취소</button>
+    </form>
     {% endif %}
   </div>
 
