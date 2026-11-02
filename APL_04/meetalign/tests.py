@@ -16,7 +16,10 @@ from django.urls import reverse
 from django.utils import timezone
 
 from . import quiz_status, services, tasks, views, whisper_worker
-from .models import Answer, ChatMessage, CheckQuestion, Meeting, Question, Recording, SttUsage, Team
+from .models import (
+    Answer, ChatMessage, CheckQuestion, Checkpoint, Decision, DecisionAgreement, DecisionVote,
+    Interpretation, Meeting, Question, Recording, SttUsage, Team,
+)
 
 # 셸에 실행용 LLM/STT 환경변수가 설정돼 있어도 테스트가 실제 모델/API를 호출하지 않고 항상 같은 결과가
 # 나오도록, 모듈 시작 시 잠시 치웠다가 끝나면 되돌린다. 필요한 테스트는 각자 patch.dict로 값을 넣는다.
@@ -1976,3 +1979,144 @@ class PartialAnswerNoticeTests(TestCase):
         r = self.client.get(self.url)
         self.assertContains(r, "4문항 중 3문항 답함")
         self.assertContains(r, "아직 1문항이 남았습니다")
+
+
+class DecisionModelTests(TestCase):
+    """결정 컴파일러(실험 기능) 모델 테스트. 기존 CheckQuestion/Answer 테이블과 완전히
+    분리된 새 테이블이라는 것과, 중복 투표를 DB가 막아준다는 것을 고정한다."""
+
+    def setUp(self):
+        self.host = User.objects.create_user("host", password="pw12345!")
+        self.member = User.objects.create_user("member", password="pw12345!")
+        self.team = Team.objects.create(name="t")
+        self.team.members.add(self.host, self.member)
+        self.meeting = Meeting.objects.create(
+            team=self.team, title="m", host=self.host,
+            transcript="민수가 다음 주쯤 배포 준비를 맡기로 했다.",
+        )
+
+    def _decision(self, order=0, **kwargs):
+        fields = {
+            "who": "민수", "what": "배포 준비", "due_text": "다음 주쯤",
+            "done_criteria": "", "confirm_state": Decision.CONFIRM_DISCUSSING,
+            "warnings": ["모호어 '쯤'", "완료 기준 빈칸"],
+        }
+        fields.update(kwargs)
+        return Decision.objects.create(meeting=self.meeting, order=order, **fields)
+
+    def test_decision_defaults_to_draft_with_no_carryover(self):
+        decision = self._decision()
+        self.assertEqual(decision.status, Decision.STATUS_DRAFT)
+        # 미결정으로 이월된 안건만 carryover_resolved_at을 쓰므로 기본값은 비어 있어야 한다.
+        self.assertIsNone(decision.carryover_resolved_at)
+        self.assertTrue(decision.has_warning)
+
+    def test_warnings_json_round_trips_as_a_list(self):
+        decision = self._decision()
+        reloaded = Decision.objects.get(pk=decision.pk)
+        self.assertEqual(reloaded.warnings, ["모호어 '쯤'", "완료 기준 빈칸"])
+        empty = self._decision(order=1, warnings=[])
+        self.assertEqual(Decision.objects.get(pk=empty.pk).warnings, [])
+        self.assertFalse(empty.has_warning)
+
+    def test_spec_line_shows_blank_fields_as_question_marks(self):
+        decision = self._decision(done_criteria="", confirm_state=Decision.CONFIRM_UNSET)
+        self.assertEqual(decision.spec_line, "민수 · 배포 준비 · 다음 주쯤 · ? · 미정")
+
+    def test_duplicate_decision_order_in_one_meeting_is_rejected_by_db(self):
+        self._decision(order=0)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            self._decision(order=0, who="다른 사람")
+
+    def test_same_order_is_allowed_in_a_different_meeting(self):
+        other = Meeting.objects.create(team=self.team, title="m2", host=self.host)
+        self._decision(order=0)
+        Decision.objects.create(meeting=other, order=0, who="민수", what="배포 준비")
+        self.assertEqual(Decision.objects.filter(order=0).count(), 2)
+
+    def test_interpretation_labels_follow_order(self):
+        decision = self._decision()
+        labels = [
+            Interpretation.objects.create(decision=decision, order=i, text="해석 %d" % i, evidence="민수가 다음 주쯤").label
+            for i in range(3)
+        ]
+        self.assertEqual(labels, ["A", "B", "C"])
+
+    def test_duplicate_interpretation_order_is_rejected_by_db(self):
+        decision = self._decision()
+        Interpretation.objects.create(decision=decision, order=0, text="해석 A")
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Interpretation.objects.create(decision=decision, order=0, text="해석 B")
+
+    def test_one_vote_per_user_per_decision(self):
+        decision = self._decision()
+        interpretation = Interpretation.objects.create(decision=decision, order=0, text="해석 A")
+        DecisionVote.objects.create(
+            decision=decision, user=self.member,
+            kind=DecisionVote.KIND_INTERPRETATION, interpretation=interpretation,
+        )
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            DecisionVote.objects.create(
+                decision=decision, user=self.member, kind=DecisionVote.KIND_NOT_DECIDED,
+            )
+
+    def test_different_users_vote_on_the_same_decision(self):
+        decision = self._decision()
+        DecisionVote.objects.create(decision=decision, user=self.host, kind=DecisionVote.KIND_NOT_DECIDED)
+        DecisionVote.objects.create(
+            decision=decision, user=self.member, kind=DecisionVote.KIND_CUSTOM, custom_text="금요일까지 스테이징 배포",
+        )
+        self.assertEqual(decision.votes.count(), 2)
+
+    def test_deleting_an_interpretation_keeps_the_vote_row(self):
+        # 진행자가 해석 후보를 지워도 '누가 투표했는지'는 남아야 중복 투표 방지가 유지된다.
+        decision = self._decision()
+        interpretation = Interpretation.objects.create(decision=decision, order=0, text="해석 A")
+        DecisionVote.objects.create(
+            decision=decision, user=self.member,
+            kind=DecisionVote.KIND_INTERPRETATION, interpretation=interpretation,
+        )
+        interpretation.delete()
+        vote = DecisionVote.objects.get(decision=decision, user=self.member)
+        self.assertIsNone(vote.interpretation_id)
+
+    def test_one_agreement_per_user_per_decision(self):
+        decision = self._decision(status=Decision.STATUS_PENDING_HOST, final_text="금요일까지 스테이징 배포")
+        DecisionAgreement.objects.create(decision=decision, user=self.member)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            DecisionAgreement.objects.create(decision=decision, user=self.member)
+
+    def test_one_checkpoint_per_user_per_decision(self):
+        decision = self._decision(status=Decision.STATUS_RESOLVED, final_text="금요일까지 스테이징 배포")
+        checkpoint = Checkpoint.objects.create(decision=decision, user=self.member, expected_text="배포 문서 작성")
+        self.assertEqual(checkpoint.verdict, Checkpoint.VERDICT_UNKNOWN)
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            Checkpoint.objects.create(decision=decision, user=self.member, expected_text="다른 내용")
+
+    def test_deleting_the_meeting_removes_the_whole_decision_tree(self):
+        decision = self._decision()
+        interpretation = Interpretation.objects.create(decision=decision, order=0, text="해석 A")
+        DecisionVote.objects.create(
+            decision=decision, user=self.member,
+            kind=DecisionVote.KIND_INTERPRETATION, interpretation=interpretation,
+        )
+        DecisionAgreement.objects.create(decision=decision, user=self.member)
+        Checkpoint.objects.create(decision=decision, user=self.member, expected_text="배포 문서 작성")
+        self.meeting.delete()
+        self.assertEqual(Decision.objects.count(), 0)
+        self.assertEqual(Interpretation.objects.count(), 0)
+        self.assertEqual(DecisionVote.objects.count(), 0)
+        self.assertEqual(DecisionAgreement.objects.count(), 0)
+        self.assertEqual(Checkpoint.objects.count(), 0)
+
+    def test_existing_quiz_tables_are_untouched_by_the_new_feature(self):
+        # 새 기능은 기존 퀴즈 흐름 옆에 추가만 한다 — 같은 회의에 둘이 공존해야 한다.
+        question = CheckQuestion.objects.create(
+            meeting=self.meeting, text="q", choices=["1", "2", "3", "4"],
+            correct_choice=0, status=CheckQuestion.STATUS_PUBLISHED, order=0,
+        )
+        Answer.objects.create(question=question, user=self.member, selected_choice=0)
+        self._decision()
+        self.assertEqual(self.meeting.check_questions.count(), 1)
+        self.assertEqual(self.meeting.decisions.count(), 1)
+        self.assertEqual(Answer.objects.filter(question=question).count(), 1)
