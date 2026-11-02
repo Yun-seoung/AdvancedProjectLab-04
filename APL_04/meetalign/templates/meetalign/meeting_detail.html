@@ -23,6 +23,33 @@
   {% endif %}
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
+  {# 결정 컴파일러(실험): 지난 회의에서 미결정으로 남은 안건. 진행자가 "처리됨"을 누를 때까지 계속 보인다. #}
+  {% if carryover_decisions %}
+  <div class="notice" style="flex-direction:column;align-items:stretch">
+    <div class="row" style="gap:8px">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto"><path d="M12 9v4M12 17h.01M10.3 3.86 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.86a2 2 0 0 0-3.4 0Z"/></svg>
+      <span><b>지난 회의 미결정 안건 {{ carryover_decisions|length }}개</b></span>
+    </div>
+    <ul class="plain" style="margin:10px 0 0">
+      {% for decision in carryover_decisions %}
+      <li style="padding:9px 0;border-top:1px solid var(--line)">
+        <div class="row" style="justify-content:space-between;gap:10px">
+          <div class="item-text">
+            <span class="title">{{ decision.what }}</span>
+            <div class="meta">{{ decision.meeting.title }} · {{ decision.spec_line }}</div>
+          </div>
+          {% if meeting.host_id == user.id %}
+          <form method="post" action="{% url 'decision_carryover_resolve' meeting.id decision.id %}">{% csrf_token %}
+            <button type="submit" class="btn sm secondary">처리됨</button>
+          </form>
+          {% endif %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+  </div>
+  {% endif %}
+
   {% if meeting.recordings.all %}
     <h2 class="section-title">업로드된 녹음 ({{ meeting.recordings.count }})</h2>
     <ul class="plain" style="margin-bottom:8px">
@@ -199,6 +226,19 @@
       <a class="btn sm secondary" href="{% url 'understanding' meeting.id %}">답하기</a>
     {% endif %}
   </li>
+  {# 결정 컴파일러(실험). 회의록이 완성된 회의에서만, 진행자에게만 보인다 — 팀원 확인 화면은 Phase C. #}
+  {% if meeting.processing_status == "done" and meeting.host_id == user.id %}
+  <li class="item">
+    <div class="item-main">
+      <span class="item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h7"/><path d="m17 15 2 2 3-3"/></svg></span>
+      <div class="item-text">
+        <span class="title">결정 확인 <span class="badge processing">실험</span></span>
+        <div class="meta">결정을 실행 명세로 옮기고, 모호한 항목을 한 줄로 확정해 팀원에게 공개합니다</div>
+      </div>
+    </div>
+    <a class="btn sm secondary" href="{% url 'decision_review' meeting.id %}">열기</a>
+  </li>
+  {% endif %}
 </ul>
 {% if meeting.host_id == user.id %}
 <form method="post" style="margin-top:28px">{% csrf_token %}

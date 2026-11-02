@@ -12,8 +12,11 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.http import url_has_allowed_host_and_scheme
 
-from . import quiz_status, services, tasks
-from .models import Answer, ChatMessage, CheckQuestion, Meeting, Question, Recording, Team
+from . import decision_compiler, quiz_status, services, tasks
+from .models import (
+    Answer, ChatMessage, CheckQuestion, Decision, DecisionAgreement, Interpretation, Meeting,
+    Question, Recording, Team,
+)
 
 ALLOWED_RECORDING_EXTENSIONS = {
     ".mp3", ".m4a", ".wav", ".ogg", ".webm", ".mp4", ".flac",
@@ -184,7 +187,12 @@ def meeting_detail(request, meeting_id):
                 return redirect("question_review", meeting_id=meeting.id)
             return redirect("understanding", meeting_id=meeting.id)
         return redirect("meeting_result", meeting_id=meeting.id)
-    return render(request, "meetalign/meeting_detail.html", {"meeting": meeting, "stt_status": services.stt_status_text()})
+    return render(request, "meetalign/meeting_detail.html", {
+        "meeting": meeting, "stt_status": services.stt_status_text(),
+        # 결정 컴파일러(실험): 지난 회의의 미결정 안건. 읽기만 하므로 위 POST 흐름은 건드리지 않는다.
+        # '처리됨' 버튼은 별도 URL(decision_carryover_resolve)로 보낸다.
+        "carryover_decisions": decision_compiler.carryover_decisions(meeting),
+    })
 
 
 @login_required
@@ -422,3 +430,289 @@ def record_file(request, meeting_id):
     response = HttpResponse(meeting.record, content_type="text/plain; charset=utf-8")
     response["Content-Disposition"] = 'attachment; filename="meeting_record.txt"'
     return response
+
+
+# ---------------------------------------------------------------------------
+# 결정 컴파일러 (실험 기능). 기존 이해도 퀴즈 화면(question_review/understanding/
+# verification)은 그대로 두고, 그 옆에 별도 흐름으로 붙인다.
+# ---------------------------------------------------------------------------
+
+
+def _decision_meeting(request, meeting_id):
+    """결정 컴파일러를 쓸 수 있는 회의만 통과시킨다.
+
+    팀 밖 사용자는 _meeting()이 404로 막고, 회의록이 아직 완성되지 않은 회의는 여기서 404다
+    — 컴파일할 전사 원문이 없는 회의에 링크를 노출하지 않기 위함(템플릿 쪽도 같은 조건).
+    """
+    meeting = _meeting(request, meeting_id)
+    if meeting.processing_status != Meeting.STATUS_DONE:
+        raise Http404
+    return meeting
+
+
+def _reset_decisions(meeting):
+    """컴파일 결과를 전부 지운다. 공개된 뒤에는 거부한다.
+
+    팀원이 이미 확인한 내용이 사라지면 안 되기 때문이다. 공개를 되돌리려면 먼저 '공개 취소'로
+    draft로 내려야 한다(확인 기록이 하나도 없을 때만 가능).
+    """
+    if meeting.decisions.exclude(status=Decision.STATUS_DRAFT).exists():
+        return "이미 공개된 항목이 있어 명세를 지울 수 없습니다. '공개 취소'를 먼저 눌러 주세요."
+    meeting.decisions.all().delete()
+    return None
+
+
+def _unpublish_decisions(meeting):
+    """공개를 되돌려 draft로 내린다 — 공개 직후 "잘못 눌렀다"를 수습하는 통로.
+
+    팀원이 한 명이라도 확인을 남겼으면 거부한다. 그 뒤에 명세가 바뀌면 팀원이 확인한 내용과
+    달라지는데, 그건 공개 취소가 아니라 '확정 문장 수정'(revise)이 다룰 일이다.
+    """
+    published = meeting.decisions.exclude(status=Decision.STATUS_DRAFT)
+    if not published.exists():
+        return "공개된 항목이 없습니다."
+    if DecisionAgreement.objects.filter(decision__meeting=meeting).exists():
+        return "팀원이 이미 확인한 항목이 있어 공개를 취소할 수 없습니다. 내용을 고치려면 '확정 문장 수정'을 쓰세요."
+    published.update(status=Decision.STATUS_DRAFT, revised=False)
+    return None
+
+
+def _recompute_warnings(meeting, decisions):
+    """진행자가 빈칸을 채우거나 모호어를 고치면 경고도 같이 사라져야 한다.
+
+    같은 담당자에게 걸린 날짜 충돌과 "회의당 최대 5개" 제한은 항목 하나만 봐서는 판정할 수
+    없으므로 회의 전체를 한 번에 다시 센다. 단, 저장은 아직 draft인 항목에만 한다 — 투표가
+    시작된 항목의 경고가 바뀌면 참가자가 본 화면과 달라진다.
+    """
+    specs = [
+        {"who": d.who, "what": d.what, "due": d.due_text, "done": d.done_criteria, "state": d.confirm_state}
+        for d in decisions
+    ]
+    for decision, warnings in zip(decisions, decision_compiler.warnings_for(specs)):
+        if decision.status == Decision.STATUS_DRAFT and decision.warnings != warnings:
+            decision.warnings = warnings
+            decision.save(update_fields=["warnings"])
+
+
+def _apply_host_choice(request, decision):
+    """경고 항목에 대한 진행자의 확정 선택 하나를 적용한다.
+
+    선택을 보내지 않은 항목은 손대지 않는다 — 한 항목을 고치려고 저장했다가 다른 항목의
+    확정이 날아가면 안 된다. 실패 사유 문자열 또는 None을 돌려준다.
+    """
+    raw = request.POST.get("choice_%d" % decision.id, "")
+    if not raw:
+        return None
+
+    if raw == decision_compiler.CHOICE_UNDECIDED:
+        decision.final_text = ""
+        decision.marked_undecided = True
+    elif raw == decision_compiler.CHOICE_CUSTOM:
+        text = request.POST.get("custom_text_%d" % decision.id, "").strip()
+        if not text:
+            return "'직접 작성'을 골랐으면 확정 문장을 한 줄 적어 주세요."
+        decision.final_text = text
+        decision.marked_undecided = False
+    elif raw.startswith(decision_compiler.CHOICE_CANDIDATE_PREFIX):
+        interpretation = get_object_or_404(
+            Interpretation,
+            pk=raw[len(decision_compiler.CHOICE_CANDIDATE_PREFIX):], decision=decision,
+        )
+        # 고른 시점의 문장을 복사해 둔다. 뒤에 후보 문장을 고쳐도 확정 내용은 따라 바뀌지 않는다.
+        decision.final_text = interpretation.text
+        decision.marked_undecided = False
+    else:
+        return "확정 방법을 하나 골라 주세요."
+
+    decision.save(update_fields=["final_text", "marked_undecided"])
+    return None
+
+
+def _save_decision_edits(request, meeting):
+    """진행자가 실행 명세·해석 후보·확정 선택을 고친 것을 저장한다. draft 항목만 대상이다.
+
+    실패 사유 문자열 또는 None을 돌려준다. 명세 수정은 항목별로 독립이라 한 항목이 비어
+    있어도 건너뛰고 계속하지만, 확정 선택이 잘못된 경우는 진행자가 알아야 하므로 사유를 올린다.
+    """
+    decisions = list(meeting.decisions.prefetch_related("interpretations"))
+    valid_states = {choice for choice, _ in Decision.CONFIRM_CHOICES}
+    error = None
+    for decision in decisions:
+        if decision.status != Decision.STATUS_DRAFT:
+            continue
+        what = request.POST.get("what_%d" % decision.id, "").strip()
+        if what:
+            state = request.POST.get("confirm_state_%d" % decision.id, decision.confirm_state)
+            decision.who = request.POST.get("who_%d" % decision.id, "").strip()
+            decision.what = what
+            decision.due_text = request.POST.get("due_%d" % decision.id, "").strip()
+            decision.done_criteria = request.POST.get("done_%d" % decision.id, "").strip()
+            decision.confirm_state = state if state in valid_states else decision.confirm_state
+            decision.save(update_fields=["who", "what", "due_text", "done_criteria", "confirm_state"])
+        # '무엇을'이 비어 있으면 실행 명세가 아니다 — 그 항목의 명세만 건너뛰고 확정 선택은 그대로 받는다.
+
+        for interpretation in decision.interpretations.all():
+            if request.POST.get("drop_interpretation_%d" % interpretation.id):
+                interpretation.delete()
+                continue
+            text = request.POST.get("interpretation_%d" % interpretation.id, "").strip()
+            if text and text != interpretation.text:
+                interpretation.text = text
+                interpretation.save(update_fields=["text"])
+
+        failed = _apply_host_choice(request, decision)
+        if failed and error is None:
+            error = failed
+    _recompute_warnings(meeting, list(meeting.decisions.all()))
+    return error
+
+
+def _publish_decisions(meeting):
+    """"확정 명세 공개" — draft 항목을 팀원에게 공개한다.
+
+    경고가 붙었는데 진행자가 아직 고르지 않은 항목이 하나라도 있으면 거부한다(화면의 버튼도
+    같은 조건으로 비활성화된다).
+    """
+    drafts = list(meeting.decisions.filter(status=Decision.STATUS_DRAFT))
+    if not drafts:
+        return "공개할 항목이 없습니다."
+    blockers = decision_compiler.publish_blockers(drafts)
+    if blockers:
+        return "아직 확정하지 않은 항목이 %d개 있습니다. 후보를 고르거나 직접 작성하거나 '아직 미정'으로 넘겨 주세요." % len(blockers)
+    decision_compiler.publish_decisions(meeting)
+    return None
+
+
+def _revise_final_text(request, meeting):
+    """공개된 항목의 확정 문장을 고친다. 그 항목의 확인 기록은 모두 지워지고 다시 받는다."""
+    decision = get_object_or_404(
+        Decision, pk=request.POST.get("decision_id"), meeting=meeting,
+        status=Decision.STATUS_PUBLISHED,
+    )
+    text = request.POST.get("final_text", "").strip()
+    if not text:
+        return "확정 문장을 한 줄 적어 주세요."
+    if text == decision.final_text:
+        # 같은 문장으로 저장하면 팀원 확인만 날아가므로 아무것도 하지 않는다.
+        return None
+    decision_compiler.revise_final_text(decision, text)
+    return None
+
+
+def _resolve_carryover(meeting, decision_id):
+    """이월된 미결정 안건을 '처리됨'으로 닫는다. 이후 회의 화면에서 사라진다."""
+    decision = get_object_or_404(
+        Decision, pk=decision_id, meeting__team_id=meeting.team_id,
+        status=Decision.STATUS_UNDECIDED, carryover_resolved_at__isnull=True,
+    )
+    Decision.objects.filter(pk=decision.pk).update(carryover_resolved_at=timezone.now())
+
+
+@login_required
+def decision_carryover_resolve(request, meeting_id, decision_id):
+    """이월 안건 '처리됨' 전용 엔드포인트.
+
+    회의 상세 화면(meeting_detail)의 기존 POST 흐름(녹음 업로드/종료/삭제)을 건드리지 않기
+    위해 별도 URL로 뺐다. 지금 보고 있는 회의의 진행자만 누를 수 있다.
+    """
+    meeting = _meeting(request, meeting_id)
+    _require_host(meeting, request.user)
+    if request.method == "POST":
+        _resolve_carryover(meeting, decision_id)
+    return redirect("meeting_detail", meeting_id=meeting.id)
+
+
+
+def _current_choice(decision, interpretations):
+    """진행자 확정 라디오에서 지금 선택돼 있어야 하는 값과, '직접 작성' 입력칸에 넣을 문장.
+
+    고른 시점에 후보 문장을 final_text로 복사해 두므로, 같은 문장을 가진 후보가 있으면 그
+    후보가 선택된 것으로 본다. 어느 후보와도 다르면 직접 작성한 것이다.
+    """
+    if decision.marked_undecided:
+        return decision_compiler.CHOICE_UNDECIDED, ""
+    if not decision.final_text:
+        return "", ""
+    for interpretation in interpretations:
+        if interpretation.text == decision.final_text:
+            return "%s%d" % (decision_compiler.CHOICE_CANDIDATE_PREFIX, interpretation.id), ""
+    return decision_compiler.CHOICE_CUSTOM, decision.final_text
+
+
+@login_required
+def decision_review(request, meeting_id):
+    """진행자 전용. 컴파일 → 명세·경고 확인과 수정 → 항목별 확정 → "확정 명세 공개"."""
+    meeting = _decision_meeting(request, meeting_id)
+    _require_host(meeting, request.user)
+    error = None
+    if request.method == "POST":
+        action = request.POST.get("action")
+        if action == "compile":
+            try:
+                decision_compiler.compile_meeting(meeting)
+            except decision_compiler.DecisionCompileError as exc:
+                error = str(exc)
+        elif action == "reset":
+            error = _reset_decisions(meeting)
+        elif action == "save":
+            error = _save_decision_edits(request, meeting)
+        elif action == "publish":
+            error = _publish_decisions(meeting)
+        elif action == "unpublish":
+            error = _unpublish_decisions(meeting)
+        elif action == "revise":
+            error = _revise_final_text(request, meeting)
+        if error is None:
+            return redirect("decision_review", meeting_id=meeting.id)
+
+    decisions = list(meeting.decisions.prefetch_related("interpretations"))
+    rows = []
+    for decision in decisions:
+        interpretations = list(decision.interpretations.all())
+        choice, custom_text = _current_choice(decision, interpretations)
+        for interpretation in interpretations:
+            # 라디오 value와 선택 여부는 템플릿 필터로 만들기 까다로워서(접두사 + 정수 id)
+            # 여기서 붙여 둔다. 저장되지 않는 임시 속성이다.
+            interpretation.choice_value = "%s%d" % (
+                decision_compiler.CHOICE_CANDIDATE_PREFIX, interpretation.id,
+            )
+            interpretation.chosen = choice == interpretation.choice_value
+        rows.append({
+            "decision": decision,
+            "interpretations": interpretations,
+            "choice": choice,
+            "custom_text": custom_text,
+            # 경고가 붙었는데 아직 고르지 않은 항목 — 공개를 막는다.
+            "blocking": not decision.is_settled,
+        })
+    warned = [row for row in rows if row["decision"].warnings]
+    drafts = [row for row in rows if row["decision"].status == Decision.STATUS_DRAFT]
+    blockers = [row for row in drafts if row["blocking"]]
+    return render(request, "meetalign/decision_review.html", {
+        "meeting": meeting,
+        "rows": rows,
+        "error": error,
+        "compiled": bool(decisions),
+        "warned_count": len(warned),
+        "draft_count": len(drafts),
+        "blocker_count": len(blockers),
+        # 확정하지 않은 경고 항목이 하나도 없어야 공개할 수 있다(서버도 같은 조건으로 거부).
+        "can_publish": bool(drafts) and not blockers,
+        "published_count": sum(1 for row in rows if row["decision"].status == Decision.STATUS_PUBLISHED),
+        "undecided_count": sum(1 for row in rows if row["decision"].status == Decision.STATUS_UNDECIDED),
+        # 공개 취소는 팀원 확인이 하나도 없을 때만 — 잘못 누른 공개를 수습하는 통로다.
+        "can_unpublish": (
+            bool(decisions) and not drafts
+            and not DecisionAgreement.objects.filter(decision__meeting=meeting).exists()
+        ),
+        "choice_candidate_prefix": decision_compiler.CHOICE_CANDIDATE_PREFIX,
+        "choice_custom": decision_compiler.CHOICE_CUSTOM,
+        "choice_undecided": decision_compiler.CHOICE_UNDECIDED,
+        "max_warnings": decision_compiler.MAX_WARNED_DECISIONS,
+        "min_interpretations": decision_compiler.MIN_INTERPRETATIONS,
+        "editable": all(row["decision"].status == Decision.STATUS_DRAFT for row in rows),
+        "confirm_choices": Decision.CONFIRM_CHOICES,
+        "status_draft": Decision.STATUS_DRAFT,
+        "status_published": Decision.STATUS_PUBLISHED,
+        "status_undecided": Decision.STATUS_UNDECIDED,
+    })
