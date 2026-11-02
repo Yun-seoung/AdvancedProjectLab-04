@@ -666,6 +666,7 @@ def decision_review(request, meeting_id):
             return redirect("decision_review", meeting_id=meeting.id)
 
     decisions = list(meeting.decisions.prefetch_related("interpretations"))
+    ack_counts = decision_compiler.ack_counts(decisions)
     rows = []
     for decision in decisions:
         interpretations = list(decision.interpretations.all())
@@ -684,6 +685,9 @@ def decision_review(request, meeting_id):
             "custom_text": custom_text,
             # 경고가 붙었는데 아직 고르지 않은 항목 — 공개를 막는다.
             "blocking": not decision.is_settled,
+            # 공개 항목의 "확인 N명 / 달랐어요 M명". 작성자 없는 숫자와 의견 문자열만 담는다.
+            "ack": ack_counts.get(decision.id),
+            "comments": ack_counts.get(decision.id, {}).get("comments", []),
         })
     warned = [row for row in rows if row["decision"].warnings]
     drafts = [row for row in rows if row["decision"].status == Decision.STATUS_DRAFT]
@@ -715,4 +719,59 @@ def decision_review(request, meeting_id):
         "status_draft": Decision.STATUS_DRAFT,
         "status_published": Decision.STATUS_PUBLISHED,
         "status_undecided": Decision.STATUS_UNDECIDED,
+    })
+
+
+ACK_COMMENT_MAX = 200
+
+
+def _save_ack(request, meeting):
+    """팀원 한 명의 확인 하나를 저장한다. 공개 항목만 대상이고 미결정 항목은 읽기 전용이다.
+
+    다시 누르면 덮어쓴다(진행자 집계는 항상 현재 선택 기준). 의견은 '달랐어요'에만 붙는다.
+    """
+    decision = get_object_or_404(
+        Decision, pk=request.POST.get("decision_id"), meeting=meeting, status=Decision.STATUS_PUBLISHED,
+    )
+    kind = request.POST.get("kind")
+    if kind not in (DecisionAgreement.KIND_ACK, DecisionAgreement.KIND_DIFFER):
+        return
+    comment = " ".join(request.POST.get("comment", "").split())[:ACK_COMMENT_MAX] if kind == DecisionAgreement.KIND_DIFFER else ""
+    DecisionAgreement.objects.update_or_create(
+        decision=decision, user=request.user, defaults={"kind": kind, "comment": comment},
+    )
+
+
+@login_required
+def decision_ack(request, meeting_id):
+    """팀원 확인 화면. 공개된 확정 명세마다 [확인했어요] / [제 이해와 달랐어요]를 고른다.
+
+    진행자는 확인 대상이 아니라 진행자 화면으로 보낸다. 공개 전(draft) 항목은
+    published_decisions()가 아예 돌려주지 않으므로 응답에 담기지 않는다.
+    """
+    meeting = _decision_meeting(request, meeting_id)
+    if meeting.host_id == request.user.id:
+        return redirect("decision_review", meeting_id=meeting.id)
+    if request.method == "POST":
+        _save_ack(request, meeting)
+        return redirect("decision_ack", meeting_id=meeting.id)
+    decisions = decision_compiler.published_decisions(meeting)
+    # 내 기록만 따로 조회한다 — 다른 팀원의 선택은 이 화면에 필요 없다.
+    mine = {a.decision_id: a for a in DecisionAgreement.objects.filter(decision__meeting=meeting, user=request.user)}
+    rows = [{
+        "decision": decision,
+        "mine": mine.get(decision.id),
+        # 공개 뒤 문장이 바뀌면 기존 확인이 지워지므로, 다시 확인하기 전까지만 안내한다.
+        "revised_notice": decision.revised and decision.id not in mine,
+    } for decision in decisions]
+    published = [row for row in rows if row["decision"].status == Decision.STATUS_PUBLISHED]
+    return render(request, "meetalign/decision_ack.html", {
+        "meeting": meeting,
+        "rows": rows,
+        "published_count": len(published),
+        "acked_count": sum(1 for row in published if row["mine"]),
+        "kind_ack": DecisionAgreement.KIND_ACK,
+        "kind_differ": DecisionAgreement.KIND_DIFFER,
+        "status_published": Decision.STATUS_PUBLISHED,
+        "comment_max": ACK_COMMENT_MAX,
     })

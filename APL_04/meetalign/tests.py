@@ -2403,12 +2403,21 @@ class DecisionEntryLinkTests(TestCase):
         r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
         self.assertContains(r, self.link)
 
-    def test_member_sees_no_decision_link_before_the_ack_screen_exists(self):
-        # 팀원 확인 화면(decision_ack)은 Phase C에서 붙인다. 그때까지 팀원에게는 링크가 없다.
+    def test_member_sees_the_ack_link_instead_of_the_review_link(self):
         self.client.force_login(self.member)
+        ack_link = reverse("decision_ack", args=[self.meeting.id])
         for name in ("meeting_result", "meeting_detail"):
             r = self.client.get(reverse(name, args=[self.meeting.id]))
+            self.assertContains(r, ack_link, msg_prefix=name)
             self.assertNotContains(r, self.link, msg_prefix=name)
+
+    def test_member_sees_no_ack_link_until_the_record_is_finished(self):
+        self.client.force_login(self.member)
+        Meeting.objects.filter(pk=self.meeting.pk).update(processing_status=Meeting.STATUS_PROCESSING)
+        r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
+        self.assertNotContains(r, reverse("decision_ack", args=[self.meeting.id]))
+
+
 class DecisionCarryoverTests(TestCase):
     """미결정 안건 이월. 진행자가 "처리됨"을 누를 때까지 이후 회의마다 계속 보인다."""
 
@@ -3272,3 +3281,130 @@ class DecisionUnpublishTests(TestCase):
         self.assertEqual(client.post(self.url, {"action": "unpublish"}).status_code, 403)
         self.decision.refresh_from_db()
         self.assertEqual(self.decision.status, Decision.STATUS_PUBLISHED)
+
+
+class DecisionAckTests(TestCase):
+    """팀원 확인 화면(decision_ack)과 진행자 화면의 확인 집계."""
+
+    def setUp(self):
+        self.host = User.objects.create_user("hostuser", password="pw12345!")
+        self.alice = User.objects.create_user("aliceuser", password="pw12345!")
+        self.bob = User.objects.create_user("bobuser", password="pw12345!")
+        self.team = Team.objects.create(name="t")
+        self.team.members.add(self.host, self.alice, self.bob)
+        self.meeting = Meeting.objects.create(
+            team=self.team, title="m", host=self.host,
+            processing_status=Meeting.STATUS_DONE, record="결정", transcript="전사",
+        )
+        self.decision = Decision.objects.create(
+            meeting=self.meeting, order=0, who="민수", what="배포",
+            warnings=["완료 기준 빈칸"], status=Decision.STATUS_PUBLISHED, final_text="금요일 18시까지 스테이징 배포",
+        )
+        self.url = reverse("decision_ack", args=[self.meeting.id])
+        self.review_url = reverse("decision_review", args=[self.meeting.id])
+
+    def _as(self, user):
+        client = Client()
+        client.force_login(user)
+        return client
+
+    def _post(self, user, decision, kind, comment=""):
+        return self._as(user).post(self.url, {"decision_id": decision.id, "kind": kind, "comment": comment})
+
+    def test_member_sees_the_published_text(self):
+        self.assertContains(self._as(self.alice).get(self.url), "금요일 18시까지 스테이징 배포")
+
+    def test_draft_items_are_not_in_the_member_response_before_publishing(self):
+        Decision.objects.create(
+            meeting=self.meeting, order=1, who="지은", what="비공개 초안 작업",
+            warnings=["담당자 빈칸"], status=Decision.STATUS_DRAFT, final_text="아직 공개 안 된 문장",
+        )
+        r = self._as(self.alice).get(self.url)
+        self.assertNotContains(r, "아직 공개 안 된 문장")
+        self.assertNotContains(r, "비공개 초안 작업")
+        self.assertEqual(len(r.context["rows"]), 1)
+
+    def test_nothing_published_shows_the_empty_state(self):
+        Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)
+        r = self._as(self.alice).get(self.url)
+        self.assertNotContains(r, "금요일 18시까지 스테이징 배포")
+        self.assertContains(r, "아직 공개된 확정 명세가 없습니다")
+
+    def test_ack_is_saved_and_can_be_changed_to_differ(self):
+        self._post(self.alice, self.decision, DecisionAgreement.KIND_ACK)
+        self._post(self.alice, self.decision, DecisionAgreement.KIND_DIFFER, "저는 다음 주로 들었어요")
+        agreement = DecisionAgreement.objects.get(decision=self.decision, user=self.alice)
+        self.assertEqual(agreement.kind, DecisionAgreement.KIND_DIFFER)
+        self.assertEqual(agreement.comment, "저는 다음 주로 들었어요")
+
+    def test_switching_back_to_ack_drops_the_comment(self):
+        self._post(self.alice, self.decision, DecisionAgreement.KIND_DIFFER, "저는 다음 주로 들었어요")
+        self._post(self.alice, self.decision, DecisionAgreement.KIND_ACK, "남은 의견")
+        agreement = DecisionAgreement.objects.get(decision=self.decision, user=self.alice)
+        self.assertEqual(agreement.kind, DecisionAgreement.KIND_ACK)
+        self.assertEqual(agreement.comment, "")
+
+    def test_comment_is_one_line_and_capped(self):
+        self._post(self.alice, self.decision, DecisionAgreement.KIND_DIFFER, "첫 줄\n둘째 줄  " + "가" * 500)
+        comment = DecisionAgreement.objects.get(decision=self.decision, user=self.alice).comment
+        self.assertNotIn("\n", comment)
+        self.assertEqual(len(comment), 200)
+
+    def test_unknown_kind_is_ignored(self):
+        self._post(self.alice, self.decision, "maybe")
+        self.assertFalse(DecisionAgreement.objects.exists())
+
+    def test_undecided_items_are_read_only(self):
+        undecided = Decision.objects.create(
+            meeting=self.meeting, order=1, what="미정 안건", status=Decision.STATUS_UNDECIDED, marked_undecided=True,
+        )
+        r = self._post(self.alice, undecided, DecisionAgreement.KIND_ACK)
+        self.assertEqual(r.status_code, 404)
+        self.assertFalse(DecisionAgreement.objects.filter(decision=undecided).exists())
+        page = self._as(self.alice).get(self.url)
+        self.assertContains(page, "미결정")
+        self.assertNotContains(page, 'value="%d"' % undecided.id)
+
+    def test_draft_items_cannot_be_acked(self):
+        Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)
+        self.assertEqual(self._post(self.alice, self.decision, DecisionAgreement.KIND_ACK).status_code, 404)
+
+    def test_revised_notice_shows_until_the_member_acks_again(self):
+        Decision.objects.filter(pk=self.decision.pk).update(revised=True)
+        self.assertContains(self._as(self.alice).get(self.url), "내용이 수정되었어요")
+        self._post(self.alice, self.decision, DecisionAgreement.KIND_ACK)
+        self.assertNotContains(self._as(self.alice).get(self.url), "내용이 수정되었어요")
+
+    def test_unrevised_item_shows_no_notice(self):
+        self.assertNotContains(self._as(self.alice).get(self.url), "내용이 수정되었어요")
+
+    def test_host_is_sent_to_the_review_screen(self):
+        self.assertRedirects(self._as(self.host).get(self.url), self.review_url)
+
+    def test_outsider_gets_404(self):
+        outsider = User.objects.create_user("outsider", password="pw12345!")
+        self.assertEqual(self._as(outsider).get(self.url).status_code, 404)
+
+    def test_unfinished_record_gets_404(self):
+        Meeting.objects.filter(pk=self.meeting.pk).update(processing_status=Meeting.STATUS_PROCESSING)
+        self.assertEqual(self._as(self.alice).get(self.url).status_code, 404)
+
+    def test_host_sees_counts_and_comments_per_item(self):
+        self._post(self.alice, self.decision, DecisionAgreement.KIND_DIFFER, "저는 다음 주로 들었어요")
+        self._post(self.bob, self.decision, DecisionAgreement.KIND_ACK)
+        r = self._as(self.host).get(self.review_url)
+        self.assertContains(r, "확인 1명 / 달랐어요 1명")
+        self.assertContains(r, "저는 다음 주로 들었어요")
+
+    def test_no_screen_names_who_chose_differ(self):
+        self._post(self.alice, self.decision, DecisionAgreement.KIND_DIFFER, "저는 다음 주로 들었어요")
+        self._post(self.bob, self.decision, DecisionAgreement.KIND_ACK)
+        host_page = self._as(self.host).get(self.review_url)
+        bob_page = self._as(self.bob).get(self.url)
+        for page in (host_page, bob_page):
+            self.assertNotContains(page, self.alice.username)
+        # 다른 팀원의 의견이 팀원 화면에 새어 나가지도 않는다.
+        self.assertNotContains(bob_page, "저는 다음 주로 들었어요")
+
+    def test_member_cannot_open_the_review_screen(self):
+        self.assertEqual(self._as(self.alice).get(self.review_url).status_code, 403)
