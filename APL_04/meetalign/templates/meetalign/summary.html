@@ -17,6 +17,5 @@
   {% if meeting.transcript %}
     <details><summary>전사 원문 보기</summary><div class="record" style="margin-top:8px">{{ meeting.transcript }}</div></details>
   {% endif %}
-  <p class="muted" style="margin-top:18px"><a href="{% url 'understanding' meeting.id %}">이해도 질문에 답하기</a></p>
 </div>
 {% endblock %}

@@ -20,6 +20,6 @@
   {% empty %}
     <div class="empty"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11V6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v5"/><path d="M4 11h4.5a1 1 0 0 1 .9.55L10.5 14h3l1.1-2.45a1 1 0 0 1 .9-.55H20"/><path d="M4 11v6a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6"/></svg>답할 질문이 없습니다.</div>
   {% endfor %}
-  <p class="muted" style="margin-top:16px"><a href="{% url 'meeting_detail' meeting.id %}">회의로 돌아가기</a> · <a href="{% url 'summary' meeting.id %}">회의 요약</a> · <a href="{% url 'understanding' meeting.id %}">이해도 검증</a></p>
+  <p class="muted" style="margin-top:16px"><a href="{% url 'meeting_detail' meeting.id %}">회의로 돌아가기</a> · <a href="{% url 'summary' meeting.id %}">회의 요약</a></p>
 </div>
 {% endblock %}

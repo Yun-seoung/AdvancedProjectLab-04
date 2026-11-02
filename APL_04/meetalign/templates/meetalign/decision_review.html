@@ -1,6 +1,6 @@
 {% extends "meetalign/base.html" %}
 {% block note %}
-<li>실험 기능이다. 기존 이해도 퀴즈(객관식)와는 별도 흐름이며 서로 영향을 주지 않는다.</li>
+<li>기존 이해도 퀴즈(객관식)와는 별도 흐름이며 서로 영향을 주지 않는다.</li>
 <li>경고 판정(빈칸·모호어·날짜 충돌)은 LLM이 아니라 decision_compiler.py의 규칙으로 센다. 회의당 최대 {{ max_warnings }}개.</li>
 <li>해석 후보의 근거 문장이 전사 원문에 없으면 저장 단계에서 버려진다. 후보는 진행자 참고용이며 팀원에게는 보이지 않는다.</li>
 <li>공개 전에는 팀원 화면에 확정 명세가 아예 담기지 않는다. 경고 항목을 하나라도 확정하지 않으면 공개 버튼이 막힌다.</li>
@@ -9,7 +9,7 @@
 {% block content %}
 <div class="page-head">
   <div>
-    <h1><a href="{% url 'meeting_detail' meeting.id %}" class="crumb-link">{{ meeting.title }}</a> <span class="crumb-sep">/</span> 결정 확인 <span class="badge processing">실험</span></h1>
+    <h1><a href="{% url 'meeting_detail' meeting.id %}" class="crumb-link">{{ meeting.title }}</a> <span class="crumb-sep">/</span> 결정 확인</h1>
     <div class="sub">회의에서 나온 결정을 실행 명세로 옮기고, 모호한 항목을 진행자가 한 줄로 확정해 팀원에게 공개합니다.</div>
   </div>
 </div>
