@@ -14,7 +14,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 
 from . import decision_compiler, quiz_status, services, tasks
 from .models import (
-    Answer, ChatMessage, CheckQuestion, Decision, Meeting, Question, Recording, Team,
+    Answer, ChatMessage, CheckQuestion, Decision, Interpretation, Meeting, Question, Recording, Team,
 )
 
 ALLOWED_RECORDING_EXTENSIONS = {
@@ -474,24 +474,62 @@ def _recompute_warnings(meeting, decisions):
             decision.save(update_fields=["warnings"])
 
 
+def _apply_host_choice(request, decision):
+    """경고 항목에 대한 진행자의 확정 선택 하나를 적용한다.
+
+    선택을 보내지 않은 항목은 손대지 않는다 — 한 항목을 고치려고 저장했다가 다른 항목의
+    확정이 날아가면 안 된다. 실패 사유 문자열 또는 None을 돌려준다.
+    """
+    raw = request.POST.get("choice_%d" % decision.id, "")
+    if not raw:
+        return None
+
+    if raw == decision_compiler.CHOICE_UNDECIDED:
+        decision.final_text = ""
+        decision.marked_undecided = True
+    elif raw == decision_compiler.CHOICE_CUSTOM:
+        text = request.POST.get("custom_text_%d" % decision.id, "").strip()
+        if not text:
+            return "'직접 작성'을 골랐으면 확정 문장을 한 줄 적어 주세요."
+        decision.final_text = text
+        decision.marked_undecided = False
+    elif raw.startswith(decision_compiler.CHOICE_CANDIDATE_PREFIX):
+        interpretation = get_object_or_404(
+            Interpretation,
+            pk=raw[len(decision_compiler.CHOICE_CANDIDATE_PREFIX):], decision=decision,
+        )
+        # 고른 시점의 문장을 복사해 둔다. 뒤에 후보 문장을 고쳐도 확정 내용은 따라 바뀌지 않는다.
+        decision.final_text = interpretation.text
+        decision.marked_undecided = False
+    else:
+        return "확정 방법을 하나 골라 주세요."
+
+    decision.save(update_fields=["final_text", "marked_undecided"])
+    return None
+
+
 def _save_decision_edits(request, meeting):
-    """진행자가 실행 명세와 해석 후보를 고친 것을 저장한다. draft 항목만 대상이다."""
+    """진행자가 실행 명세·해석 후보·확정 선택을 고친 것을 저장한다. draft 항목만 대상이다.
+
+    실패 사유 문자열 또는 None을 돌려준다. 명세 수정은 항목별로 독립이라 한 항목이 비어
+    있어도 건너뛰고 계속하지만, 확정 선택이 잘못된 경우는 진행자가 알아야 하므로 사유를 올린다.
+    """
     decisions = list(meeting.decisions.prefetch_related("interpretations"))
     valid_states = {choice for choice, _ in Decision.CONFIRM_CHOICES}
+    error = None
     for decision in decisions:
         if decision.status != Decision.STATUS_DRAFT:
             continue
         what = request.POST.get("what_%d" % decision.id, "").strip()
-        if not what:
-            # '무엇을'이 없으면 실행 명세가 아니다 — 빈칸으로 저장하지 않고 그 항목만 건너뛴다.
-            continue
-        state = request.POST.get("confirm_state_%d" % decision.id, decision.confirm_state)
-        decision.who = request.POST.get("who_%d" % decision.id, "").strip()
-        decision.what = what
-        decision.due_text = request.POST.get("due_%d" % decision.id, "").strip()
-        decision.done_criteria = request.POST.get("done_%d" % decision.id, "").strip()
-        decision.confirm_state = state if state in valid_states else decision.confirm_state
-        decision.save(update_fields=["who", "what", "due_text", "done_criteria", "confirm_state"])
+        if what:
+            state = request.POST.get("confirm_state_%d" % decision.id, decision.confirm_state)
+            decision.who = request.POST.get("who_%d" % decision.id, "").strip()
+            decision.what = what
+            decision.due_text = request.POST.get("due_%d" % decision.id, "").strip()
+            decision.done_criteria = request.POST.get("done_%d" % decision.id, "").strip()
+            decision.confirm_state = state if state in valid_states else decision.confirm_state
+            decision.save(update_fields=["who", "what", "due_text", "done_criteria", "confirm_state"])
+        # '무엇을'이 비어 있으면 실행 명세가 아니다 — 그 항목의 명세만 건너뛰고 확정 선택은 그대로 받는다.
 
         for interpretation in decision.interpretations.all():
             if request.POST.get("drop_interpretation_%d" % interpretation.id):
@@ -501,7 +539,44 @@ def _save_decision_edits(request, meeting):
             if text and text != interpretation.text:
                 interpretation.text = text
                 interpretation.save(update_fields=["text"])
+
+        failed = _apply_host_choice(request, decision)
+        if failed and error is None:
+            error = failed
     _recompute_warnings(meeting, list(meeting.decisions.all()))
+    return error
+
+
+def _publish_decisions(meeting):
+    """"확정 명세 공개" — draft 항목을 팀원에게 공개한다.
+
+    경고가 붙었는데 진행자가 아직 고르지 않은 항목이 하나라도 있으면 거부한다(화면의 버튼도
+    같은 조건으로 비활성화된다).
+    """
+    drafts = list(meeting.decisions.filter(status=Decision.STATUS_DRAFT))
+    if not drafts:
+        return "공개할 항목이 없습니다."
+    blockers = decision_compiler.publish_blockers(drafts)
+    if blockers:
+        return "아직 확정하지 않은 항목이 %d개 있습니다. 후보를 고르거나 직접 작성하거나 '아직 미정'으로 넘겨 주세요." % len(blockers)
+    decision_compiler.publish_decisions(meeting)
+    return None
+
+
+def _revise_final_text(request, meeting):
+    """공개된 항목의 확정 문장을 고친다. 그 항목의 확인 기록은 모두 지워지고 다시 받는다."""
+    decision = get_object_or_404(
+        Decision, pk=request.POST.get("decision_id"), meeting=meeting,
+        status=Decision.STATUS_PUBLISHED,
+    )
+    text = request.POST.get("final_text", "").strip()
+    if not text:
+        return "확정 문장을 한 줄 적어 주세요."
+    if text == decision.final_text:
+        # 같은 문장으로 저장하면 팀원 확인만 날아가므로 아무것도 하지 않는다.
+        return None
+    decision_compiler.revise_final_text(decision, text)
+    return None
 
 
 def _resolve_carryover(meeting, decision_id):
@@ -528,9 +603,25 @@ def decision_carryover_resolve(request, meeting_id, decision_id):
 
 
 
+def _current_choice(decision, interpretations):
+    """진행자 확정 라디오에서 지금 선택돼 있어야 하는 값과, '직접 작성' 입력칸에 넣을 문장.
+
+    고른 시점에 후보 문장을 final_text로 복사해 두므로, 같은 문장을 가진 후보가 있으면 그
+    후보가 선택된 것으로 본다. 어느 후보와도 다르면 직접 작성한 것이다.
+    """
+    if decision.marked_undecided:
+        return decision_compiler.CHOICE_UNDECIDED, ""
+    if not decision.final_text:
+        return "", ""
+    for interpretation in interpretations:
+        if interpretation.text == decision.final_text:
+            return "%s%d" % (decision_compiler.CHOICE_CANDIDATE_PREFIX, interpretation.id), ""
+    return decision_compiler.CHOICE_CUSTOM, decision.final_text
+
+
 @login_required
 def decision_review(request, meeting_id):
-    """진행자 전용. "결정 컴파일 실행" → 실행 명세와 경고 확인·수정 → "투표 시작"."""
+    """진행자 전용. 컴파일 → 명세·경고 확인과 수정 → 항목별 확정 → "확정 명세 공개"."""
     meeting = _decision_meeting(request, meeting_id)
     _require_host(meeting, request.user)
     error = None
@@ -544,25 +635,52 @@ def decision_review(request, meeting_id):
         elif action == "reset":
             error = _reset_decisions(meeting)
         elif action == "save":
-            _save_decision_edits(request, meeting)
+            error = _save_decision_edits(request, meeting)
+        elif action == "publish":
+            error = _publish_decisions(meeting)
+        elif action == "revise":
+            error = _revise_final_text(request, meeting)
         if error is None:
             return redirect("decision_review", meeting_id=meeting.id)
 
     decisions = list(meeting.decisions.prefetch_related("interpretations"))
-    rows = [
-        {
+    rows = []
+    for decision in decisions:
+        interpretations = list(decision.interpretations.all())
+        choice, custom_text = _current_choice(decision, interpretations)
+        for interpretation in interpretations:
+            # 라디오 value와 선택 여부는 템플릿 필터로 만들기 까다로워서(접두사 + 정수 id)
+            # 여기서 붙여 둔다. 저장되지 않는 임시 속성이다.
+            interpretation.choice_value = "%s%d" % (
+                decision_compiler.CHOICE_CANDIDATE_PREFIX, interpretation.id,
+            )
+            interpretation.chosen = choice == interpretation.choice_value
+        rows.append({
             "decision": decision,
-            "interpretations": list(decision.interpretations.all()),
-        }
-        for decision in decisions
-    ]
+            "interpretations": interpretations,
+            "choice": choice,
+            "custom_text": custom_text,
+            # 경고가 붙었는데 아직 고르지 않은 항목 — 공개를 막는다.
+            "blocking": not decision.is_settled,
+        })
     warned = [row for row in rows if row["decision"].warnings]
+    drafts = [row for row in rows if row["decision"].status == Decision.STATUS_DRAFT]
+    blockers = [row for row in drafts if row["blocking"]]
     return render(request, "meetalign/decision_review.html", {
         "meeting": meeting,
         "rows": rows,
         "error": error,
         "compiled": bool(decisions),
         "warned_count": len(warned),
+        "draft_count": len(drafts),
+        "blocker_count": len(blockers),
+        # 확정하지 않은 경고 항목이 하나도 없어야 공개할 수 있다(서버도 같은 조건으로 거부).
+        "can_publish": bool(drafts) and not blockers,
+        "published_count": sum(1 for row in rows if row["decision"].status == Decision.STATUS_PUBLISHED),
+        "undecided_count": sum(1 for row in rows if row["decision"].status == Decision.STATUS_UNDECIDED),
+        "choice_candidate_prefix": decision_compiler.CHOICE_CANDIDATE_PREFIX,
+        "choice_custom": decision_compiler.CHOICE_CUSTOM,
+        "choice_undecided": decision_compiler.CHOICE_UNDECIDED,
         "max_warnings": decision_compiler.MAX_WARNED_DECISIONS,
         "min_interpretations": decision_compiler.MIN_INTERPRETATIONS,
         "editable": all(row["decision"].status == Decision.STATUS_DRAFT for row in rows),

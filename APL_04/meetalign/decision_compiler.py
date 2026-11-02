@@ -415,7 +415,77 @@ def compile_meeting(meeting):
 
 
 # ---------------------------------------------------------------------------
-# ④ 분기 처리 — 미결정 이월
+# ③ 진행자 확정 + ④ 확정 명세 공개
+#
+# 진행자는 경고가 붙은 항목마다 [후보 선택 | 직접 작성 | 아직 미정] 중 하나를 고른다.
+# 경고가 없는 항목은 명세 자체가 확정 내용이라 고를 것이 없고(Decision.is_settled), 공개
+# 대상에는 똑같이 포함된다 — 팀원은 그 항목도 확인한다.
+# ---------------------------------------------------------------------------
+
+# 진행자 확정 라디오 버튼 value. "candidate:12" 형태.
+CHOICE_CANDIDATE_PREFIX = "candidate:"
+CHOICE_CUSTOM = "custom"
+CHOICE_UNDECIDED = "undecided"
+
+
+def publish_blockers(decisions):
+    """공개를 막는 항목 — 경고가 붙었는데 진행자가 아직 아무것도 고르지 않은 것.
+
+    이 목록이 비어 있어야 "확정 명세 공개"를 누를 수 있다. 화면의 버튼 비활성화와 서버의
+    거부가 같은 판정을 쓰도록 여기 한 곳에서만 센다.
+    """
+    return [decision for decision in decisions if not decision.is_settled]
+
+
+def publish_decisions(meeting):
+    """draft 항목을 공개로 넘긴다. 호출 전에 publish_blockers()가 비어 있어야 한다.
+
+    '아직 미정'으로 넘긴 항목은 undecided가 되어 다음 회의로 이월되고(Phase D), 나머지는
+    경고 유무와 무관하게 published가 되어 팀원 확인 대상이 된다.
+    (공개된 수, 미결정으로 넘어간 수) 를 돌려준다.
+    """
+    drafts = list(meeting.decisions.filter(status=Decision.STATUS_DRAFT))
+    undecided_ids = [decision.pk for decision in drafts if decision.marked_undecided]
+    published_ids = [decision.pk for decision in drafts if not decision.marked_undecided]
+    with transaction.atomic():
+        if undecided_ids:
+            Decision.objects.filter(pk__in=undecided_ids).update(status=Decision.STATUS_UNDECIDED)
+        if published_ids:
+            Decision.objects.filter(pk__in=published_ids).update(status=Decision.STATUS_PUBLISHED)
+    return len(published_ids), len(undecided_ids)
+
+
+def revise_final_text(decision, text):
+    """공개된 항목의 확정 문장을 고친다.
+
+    그 항목의 확인 기록(DecisionAgreement)을 모두 지우고 revised를 세운다 — 팀원이 확인한
+    문장과 내용이 달라졌으므로 다시 받아야 하고, revised가 있어야 팀원 화면에서 "처음 보는
+    항목"과 "내용이 바뀐 항목"을 구별해 안내할 수 있다.
+    지워진 확인 기록 수를 돌려준다.
+    """
+    with transaction.atomic():
+        Decision.objects.filter(pk=decision.pk).update(final_text=text, revised=True)
+        removed = decision.agreements.all().delete()[0]
+    decision.final_text = text
+    decision.revised = True
+    return removed
+
+
+def published_decisions(meeting):
+    """팀원에게 보여줄 항목 — 공개된 것과 미결정으로 넘어간 것.
+
+    draft는 절대 포함되지 않는다. 공개 전에는 팀원 화면에 확정 명세가 아예 담기지 않아야
+    하므로, 팀원 쪽 조회는 반드시 이 함수를 거친다.
+    """
+    return list(
+        meeting.decisions
+        .filter(status__in=[Decision.STATUS_PUBLISHED, Decision.STATUS_UNDECIDED])
+        .prefetch_related("agreements")
+    )
+
+
+# ---------------------------------------------------------------------------
+# ④ 미결정 이월
 # ---------------------------------------------------------------------------
 
 
