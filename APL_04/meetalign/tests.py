@@ -129,19 +129,24 @@ class PrototypeFlowTests(TestCase):
         url = reverse("meeting_detail", args=[self.meeting.id])
         self.assertRedirects(self.client.post(url, {"action": "submit"}),
                              reverse("meeting_result", args=[self.meeting.id]))
-        self.assertRedirects(self.client.post(url, {"action": "end"}),
-                             reverse("question_review", args=[self.meeting.id]))
+        self.assertRedirects(self.client.post(url, {"action": "end"}), url)
         self.meeting.refresh_from_db()
         self.assertTrue(self.meeting.ended)
 
-    def test_non_host_redirected_to_understanding_after_end(self):
+    def test_non_host_stays_on_the_meeting_after_end(self):
         other = User.objects.create_user("b", password="pw12345!")
         self.team.members.add(other)
         member = Client()
         member.force_login(other)
         url = reverse("meeting_detail", args=[self.meeting.id])
-        self.assertRedirects(member.post(url, {"action": "end"}),
-                             reverse("understanding", args=[self.meeting.id]))
+        self.assertRedirects(member.post(url, {"action": "end"}), url)
+
+    def test_meeting_screen_has_no_quiz_entry(self):
+        Meeting.objects.filter(pk=self.meeting.pk).update(ended=True)
+        r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
+        for name in ("question_review", "understanding"):
+            self.assertNotContains(r, reverse(name, args=[self.meeting.id]), msg_prefix=name)
+        self.assertNotContains(r, "이해도 검증")
 
     @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
     def test_recording_upload_is_saved(self):
@@ -2368,7 +2373,7 @@ class DecisionReviewTests(TestCase):
 
 
 class DecisionEntryLinkTests(TestCase):
-    """회의록이 완성된 회의에서만, 진행자에게만 "결정 확인(실험)" 링크가 보인다."""
+    """회의록이 완성된 회의에서만 "결정 확인" 링크가 보인다. 진행자는 확정 화면, 팀원은 확인 화면."""
 
     def setUp(self):
         self.host = User.objects.create_user("host", password="pw12345!")
@@ -2384,7 +2389,8 @@ class DecisionEntryLinkTests(TestCase):
     def test_result_page_shows_the_link_to_the_host(self):
         self.client.force_login(self.host)
         r = self.client.get(reverse("meeting_result", args=[self.meeting.id]))
-        self.assertContains(r, "결정 확인(실험)")
+        self.assertContains(r, "결정 확인")
+        self.assertNotContains(r, "실험")
         self.assertContains(r, self.link)
 
     def test_result_page_hides_the_link_from_a_non_host_member(self):

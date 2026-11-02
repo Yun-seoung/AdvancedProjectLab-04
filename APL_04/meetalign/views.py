@@ -183,9 +183,7 @@ def meeting_detail(request, meeting_id):
             tasks.start_processing(added.id)
         if request.POST.get("action") == "end":
             Meeting.objects.filter(pk=meeting.pk).update(ended=True)
-            if meeting.host_id == request.user.id:
-                return redirect("question_review", meeting_id=meeting.id)
-            return redirect("understanding", meeting_id=meeting.id)
+            return redirect("meeting_detail", meeting_id=meeting.id)
         return redirect("meeting_result", meeting_id=meeting.id)
     return render(request, "meetalign/meeting_detail.html", {
         "meeting": meeting, "stt_status": services.stt_status_text(),

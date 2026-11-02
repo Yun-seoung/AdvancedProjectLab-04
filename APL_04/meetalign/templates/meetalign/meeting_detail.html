@@ -1,7 +1,7 @@
 {% extends "meetalign/base.html" %}
 {% block note %}
 <li>녹음 파일은 실제로 서버에 저장되고, 로그인한 회의 멤버만 받을 수 있다.</li>
-<li>제출 → 회의록 생성 화면, 종료 → 이해도 질문 답변 화면(3.5)으로 이동한다.</li>
+<li>제출 → 회의록 생성 화면, 종료 → 이 화면에 머문다.</li>
 {% endblock %}
 {% block content %}
 <div class="page-head">
@@ -23,7 +23,7 @@
   {% endif %}
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
-  {# 결정 컴파일러(실험): 지난 회의에서 미결정으로 남은 안건. 진행자가 "처리됨"을 누를 때까지 계속 보인다. #}
+  {# 결정 확인: 지난 회의에서 미결정으로 남은 안건. 진행자가 "처리됨"을 누를 때까지 계속 보인다. #}
   {% if carryover_decisions %}
   <div class="notice" style="flex-direction:column;align-items:stretch">
     <div class="row" style="gap:8px">
@@ -86,13 +86,8 @@
 
   {% if meeting.ended %}
     <div class="notice" style="background:var(--surface-sunken);color:var(--ink-soft);border-color:var(--line)">
-      회의가 종료되었습니다. 녹음 업로드와 익명 질문은 더 이상 받지 않습니다. 이해도 질문에 답해 주세요.
+      회의가 종료되었습니다. 녹음 업로드와 익명 질문은 더 이상 받지 않습니다.
     </div>
-    {% if meeting.host_id == user.id %}
-      <a class="btn" href="{% url 'question_review' meeting.id %}">문제 검토하고 공개하기</a>
-    {% else %}
-      <a class="btn" href="{% url 'understanding' meeting.id %}">이해도 질문 답하기</a>
-    {% endif %}
   {% else %}
   <h2 class="section-title">{% if meeting.recordings.all %}녹음 추가 업로드{% else %}회의 녹음{% endif %}</h2>
   {% if stt_status %}<p class="muted" style="margin:-4px 0 10px">{{ stt_status }}</p>{% endif %}
@@ -212,27 +207,13 @@
     </div>
     <a class="btn sm secondary" href="{% url 'summary' meeting.id %}">보기</a>
   </li>
-  <li class="item">
-    <div class="item-main">
-      <span class="item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 12 2 2 4-4"/><circle cx="12" cy="12" r="9"/></svg></span>
-      <div class="item-text">
-        <span class="title">이해도 검증</span>
-        {% if meeting.host_id == user.id %}<div class="meta">AI가 낸 객관식 문제를 검토하고 공개합니다</div>{% endif %}
-      </div>
-    </div>
-    {% if meeting.host_id == user.id %}
-      <a class="btn sm secondary" href="{% url 'question_review' meeting.id %}">문제 검토</a>
-    {% else %}
-      <a class="btn sm secondary" href="{% url 'understanding' meeting.id %}">답하기</a>
-    {% endif %}
-  </li>
-  {# 결정 컴파일러(실험). 회의록이 완성된 회의에서만 보인다. 진행자는 확정 화면, 팀원은 확인 화면. #}
+  {# 결정 확인. 회의록이 완성된 회의에서만 보인다. 진행자는 확정 화면, 팀원은 확인 화면. #}
   {% if meeting.processing_status == "done" %}
   <li class="item">
     <div class="item-main">
       <span class="item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h7"/><path d="m17 15 2 2 3-3"/></svg></span>
       <div class="item-text">
-        <span class="title">결정 확인 <span class="badge processing">실험</span></span>
+        <span class="title">결정 확인</span>
         {% if meeting.host_id == user.id %}
         <div class="meta">결정을 실행 명세로 옮기고, 모호한 항목을 한 줄로 확정해 팀원에게 공개합니다</div>
         {% else %}
