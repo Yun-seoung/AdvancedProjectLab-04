@@ -233,5 +233,36 @@
   </form>
   {% endif %}
 </div>
+
+{% if decision_open %}
+<div class="card elevated">
+  <h2 class="section-title">아직 확인하지 않은 팀원</h2>
+  <div class="progress-row">
+    <span>{{ participant_total }}명 중 {{ participant_done }}명 확인</span>
+    <span>{{ participant_pct }}%</span>
+  </div>
+  <div class="progress-track"><div class="progress-fill" style="width:{{ participant_pct }}%"></div></div>
+  {% if pending_rows %}
+  <ul class="plain" style="margin-top:16px">
+    {% for row in pending_rows %}
+    <li class="item">
+      <div class="item-main">
+        <span class="item-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="3.6"/><path d="M5 20c0-3.3 3.1-5.4 7-5.4s7 2.1 7 5.4"/></svg>
+        </span>
+        <div class="item-text">
+          <div class="title">{{ row.name }}</div>
+          <div class="meta">{{ row.acked }}/{{ row.total }}개 확인</div>
+        </div>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="muted" style="margin:12px 0 0">독려용 명단입니다. 누가 '제 이해와 달랐어요'를 골랐는지는 이 화면에서도 보이지 않습니다.</p>
+  {% else %}
+  <div class="success" style="margin-top:16px">모든 팀원이 결정을 확인했어요</div>
+  {% endif %}
+</div>
+{% endif %}
 {% endif %}
 {% endblock %}

@@ -12,7 +12,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.http import url_has_allowed_host_and_scheme
 
-from . import decision_compiler, quiz_status, services, tasks
+from . import decision_compiler, decision_status, quiz_status, services, tasks
 from .models import (
     Answer, ChatMessage, CheckQuestion, Decision, DecisionAgreement, Interpretation, Meeting,
     Question, Recording, Team,
@@ -690,6 +690,12 @@ def decision_review(request, meeting_id):
     warned = [row for row in rows if row["decision"].warnings]
     drafts = [row for row in rows if row["decision"].status == Decision.STATUS_DRAFT]
     blockers = [row for row in drafts if row["blocking"]]
+    # 미확인 팀원 이름은 이 화면(진행자 전용)에서만 모은다. 함수 앞머리의 _require_host를
+    # 통과한 뒤에만 조회하므로, 팀원 요청에는 이름이 담긴 HTML이 애초에 만들어지지 않는다.
+    decision_open = any(row["decision"].status == Decision.STATUS_PUBLISHED for row in rows)
+    pending = decision_status.pending_participants(meeting) if decision_open else []
+    participant_total = decision_status.participant_count(meeting) if decision_open else 0
+    participant_done = participant_total - len(pending)
     return render(request, "meetalign/decision_review.html", {
         "meeting": meeting,
         "rows": rows,
@@ -698,6 +704,12 @@ def decision_review(request, meeting_id):
         "warned_count": len(warned),
         "draft_count": len(drafts),
         "blocker_count": len(blockers),
+        "decision_open": decision_open,
+        # 이름은 '확인 여부'에만 연결한다 — 누가 '제 이해와 달랐어요'를 골랐는지는 담지 않는다.
+        "pending_rows": [{"name": user.username, "acked": acked, "total": total} for user, acked, total in pending],
+        "participant_total": participant_total,
+        "participant_done": participant_done,
+        "participant_pct": round(participant_done * 100 / participant_total) if participant_total else 0,
         # 확정하지 않은 경고 항목이 하나도 없어야 공개할 수 있다(서버도 같은 조건으로 거부).
         "can_publish": bool(drafts) and not blockers,
         "published_count": sum(1 for row in rows if row["decision"].status == Decision.STATUS_PUBLISHED),
