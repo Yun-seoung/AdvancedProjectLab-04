@@ -36,7 +36,7 @@
         <div class="row" style="justify-content:space-between;gap:10px">
           <div class="item-text">
             <span class="title">{{ decision.what }}</span>
-            <div class="meta">{{ decision.meeting.title }} · {{ decision.spec_line }}</div>
+            <div class="meta">{{ decision.meeting.title }} · {{ decision.published_text }}</div>
           </div>
           {% if meeting.host_id == user.id %}
           <form method="post" action="{% url 'decision_carryover_resolve' meeting.id decision.id %}">{% csrf_token %}

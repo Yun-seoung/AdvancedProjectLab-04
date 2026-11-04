@@ -202,14 +202,6 @@ class Decision(models.Model):
         return bool(self.warnings or self.divergence_reason)
 
     @property
-    def spec_line(self):
-        """화면과 프롬프트에서 같이 쓰는 한 줄 명세. 빈칸은 '?'로 드러낸다."""
-        return "%s · %s · %s · %s · %s" % (
-            self.who or "?", self.what or "?", self.due_text or "?",
-            self.done_criteria or "?", self.get_confirm_state_display(),
-        )
-
-    @property
     def is_settled(self):
         """진행자가 이 항목을 처리했는가 — 확정 문장을 골랐거나 '다음 회의로' 넘겼거나.
 
@@ -220,8 +212,12 @@ class Decision(models.Model):
 
     @property
     def published_text(self):
-        """팀원에게 보여줄 확정 내용. 진행자가 쓴 한 줄이 있으면 그것, 없으면 명세 한 줄."""
-        return self.final_text or self.spec_line
+        """팀원에게 보여줄 확정 내용. 어떤 상태에서나 이 문장 하나다 — 폴백은 없다.
+
+        명확한 결정은 AI가 쓴 문장, 확인이 필요했던 결정은 진행자가 고른 문장, '다음 회의로
+        넘김'은 undecided_sentence()가 만든 문장이 여기 들어온다.
+        """
+        return self.final_text
 
 
 class Interpretation(models.Model):

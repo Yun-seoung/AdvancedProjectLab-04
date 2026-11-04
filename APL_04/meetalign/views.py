@@ -336,23 +336,6 @@ def _unpublish_decisions(meeting):
     return None
 
 
-def _recompute_warnings(meeting, decisions):
-    """진행자가 빈칸을 채우거나 모호어를 고치면 경고도 같이 사라져야 한다.
-
-    같은 담당자에게 걸린 날짜 충돌과 "회의당 최대 5개" 제한은 항목 하나만 봐서는 판정할 수
-    없으므로 회의 전체를 한 번에 다시 센다. 단, 저장은 아직 draft인 항목에만 한다 — 투표가
-    시작된 항목의 경고가 바뀌면 참가자가 본 화면과 달라진다.
-    """
-    specs = [
-        {"who": d.who, "what": d.what, "due": d.due_text, "done": d.done_criteria, "state": d.confirm_state}
-        for d in decisions
-    ]
-    for decision, warnings in zip(decisions, decision_compiler.warnings_for(specs)):
-        if decision.status == Decision.STATUS_DRAFT and decision.warnings != warnings:
-            decision.warnings = warnings
-            decision.save(update_fields=["warnings"])
-
-
 def _apply_host_choice(request, decision):
     """경고 항목에 대한 진행자의 확정 선택 하나를 적용한다.
 
@@ -423,7 +406,6 @@ def _save_decision_edits(request, meeting):
         failed = _apply_host_choice(request, decision)
         if failed and error is None:
             error = failed
-    _recompute_warnings(meeting, list(meeting.decisions.all()))
     return error
 
 
@@ -598,8 +580,6 @@ def decision_review(request, meeting_id):
         "choice_candidate_prefix": decision_compiler.CHOICE_CANDIDATE_PREFIX,
         "choice_custom": decision_compiler.CHOICE_CUSTOM,
         "choice_undecided": decision_compiler.CHOICE_UNDECIDED,
-        "max_warnings": decision_compiler.MAX_WARNED_DECISIONS,
-        "min_interpretations": decision_compiler.MIN_INTERPRETATIONS,
         "editable": all(row["decision"].status == Decision.STATUS_DRAFT for row in rows),
         "confirm_choices": Decision.CONFIRM_CHOICES,
         "status_draft": Decision.STATUS_DRAFT,
