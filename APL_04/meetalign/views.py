@@ -12,9 +12,9 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.http import url_has_allowed_host_and_scheme
 
-from . import decision_compiler, decision_status, quiz_status, services, tasks
+from . import decision_compiler, decision_status, services, tasks
 from .models import (
-    Answer, ChatMessage, CheckQuestion, Decision, DecisionAgreement, Interpretation, Meeting,
+    ChatMessage, Decision, DecisionAgreement, Interpretation, Meeting,
     Question, Recording, Team,
 )
 
@@ -282,145 +282,6 @@ def answers(request, meeting_id):
     return render(request, "meetalign/answers.html", {"meeting": meeting, "questions": meeting.questions.all()})
 
 
-def _find_discrepancies(meeting):
-    found = []
-    for question in meeting.check_questions.filter(status=CheckQuestion.STATUS_PUBLISHED):
-        answers = list(question.answers.select_related("user"))
-        if answers and any(a.selected_choice != question.correct_choice for a in answers):
-            rows = [{"username": a.user.username, "text": question.choices[a.selected_choice], "correct": a.is_correct} for a in answers]
-            found.append((question, rows))
-    return found
-
-
-def _create_check_questions(meeting, generated, batch):
-    for order, q in enumerate(generated):
-        try:
-            with transaction.atomic():
-                CheckQuestion.objects.create(
-                    meeting=meeting, text=q["text"], choices=q["choices"],
-                    correct_choice=q["correct_choice"], evidence=q.get("evidence", ""),
-                    order=order, batch=batch,
-                )
-        except IntegrityError:
-            break
-
-
-@login_required
-def question_review(request, meeting_id):
-    """주최자가 AI가 낸 객관식 문제를 검토·수정하고, 준비되면 참가자에게 공개한다."""
-    meeting = _meeting(request, meeting_id)
-    _require_host(meeting, request.user)
-    if meeting.transcript and not meeting.check_questions.exists():
-        _create_check_questions(meeting, services.generate_check_questions(meeting), batch=0)
-        Meeting.objects.filter(pk=meeting.pk).update(check_questions_transcript=meeting.transcript)
-        meeting.check_questions_transcript = meeting.transcript
-    if request.method == "POST":
-        if request.POST.get("action") == "publish":
-            meeting.check_questions.filter(status=CheckQuestion.STATUS_DRAFT).update(status=CheckQuestion.STATUS_PUBLISHED)
-        elif request.POST.get("action") == "generate_more":
-            new_text = meeting.transcript[len(meeting.check_questions_transcript):].strip()
-            last = meeting.check_questions.order_by("-batch").first()
-            next_batch = (last.batch + 1) if last else 0
-            _create_check_questions(meeting, services.generate_check_questions_from_text(new_text), batch=next_batch)
-            Meeting.objects.filter(pk=meeting.pk).update(check_questions_transcript=meeting.transcript)
-        else:
-            for question in meeting.check_questions.all():
-                text = request.POST.get("text_%d" % question.id, "").strip()
-                choices = [request.POST.get("choice_%d_%d" % (question.id, i), "").strip() for i in range(4)]
-                evidence = request.POST.get("evidence_%d" % question.id, "").strip()
-                try:
-                    correct_choice = int(request.POST.get("correct_choice_%d" % question.id, question.correct_choice))
-                except ValueError:
-                    correct_choice = question.correct_choice
-                if text and all(choices) and 0 <= correct_choice < 4:
-                    question.text = text
-                    question.choices = choices
-                    question.correct_choice = correct_choice
-                    question.evidence = evidence
-                    question.save()
-        return redirect("question_review", meeting_id=meeting.id)
-    questions = list(meeting.check_questions.all())
-    all_published = bool(questions) and all(q.status == CheckQuestion.STATUS_PUBLISHED for q in questions)
-    has_new_transcript = bool(
-        meeting.check_questions_transcript and meeting.transcript != meeting.check_questions_transcript
-    )
-    # 미완료 참가자 이름은 이 화면(진행자 전용)에서만 모은다. 위 _require_host를 통과한
-    # 뒤에만 조회하므로, 참가자 요청에는 이름이 담긴 HTML이 애초에 만들어지지 않는다.
-    quiz_open = any(q.status == CheckQuestion.STATUS_PUBLISHED for q in questions)
-    pending = quiz_status.pending_participants(meeting) if quiz_open else []
-    participant_total = quiz_status.participant_count(meeting) if quiz_open else 0
-    participant_done = participant_total - len(pending)
-    return render(request, "meetalign/question_review.html", {
-        "meeting": meeting, "questions": questions, "all_published": all_published,
-        "has_new_transcript": has_new_transcript,
-        "quiz_open": quiz_open,
-        # 이름은 '완료 여부'에만 연결한다 — 누가 어떤 보기를 골랐는지는 담지 않는다.
-        "pending_rows": [{"name": user.username, "answered": done, "total": total} for user, done, total in pending],
-        "participant_total": participant_total,
-        "participant_done": participant_done,
-        "participant_pct": round(participant_done * 100 / participant_total) if participant_total else 0,
-    })
-
-
-@login_required
-def understanding(request, meeting_id):
-    meeting = _meeting(request, meeting_id)
-    user = request.user
-    questions = list(meeting.check_questions.filter(status=CheckQuestion.STATUS_PUBLISHED))
-    if request.method == "POST":
-        for question in questions:
-            raw = request.POST.get("q%d" % question.id)
-            if raw is None or raw == "":
-                continue
-            try:
-                selected = int(raw)
-            except ValueError:
-                continue
-            if 0 <= selected < len(question.choices):
-                Answer.objects.update_or_create(question=question, user=user, defaults={"selected_choice": selected})
-        return redirect("understanding", meeting_id=meeting.id)
-    my_answers = {a.question_id: a.selected_choice for a in Answer.objects.filter(question__meeting=meeting, user=user)}
-    rows = [(q, my_answers.get(q.id)) for q in questions]
-    # 한 문항도 안 고르고 저장해도 넘어가기 때문에(위 continue), 본인은 다 answered고 생각하는데
-    # 실제로는 남아 있는 경우가 생긴다. 녹음을 추가해 batch가 늘어난 경우도 마찬가지라서,
-    # 몇 문항이 남았는지 당사자 화면에서 바로 보이게 한다.
-    answered_count = sum(1 for _, selected in rows if selected is not None)
-    total_count = len(rows)
-    return render(request, "meetalign/understanding.html", {
-        "meeting": meeting, "rows": rows,
-        "answered_count": answered_count,
-        "total_count": total_count,
-        "remaining_count": total_count - answered_count,
-        "progress_pct": round(answered_count * 100 / total_count) if total_count else 0,
-        # 한 번도 답한 적 없으면 문항마다 '미응답'을 달아봐야 시끄럽기만 하다.
-        "started": answered_count > 0,
-    })
-
-
-@login_required
-def verification(request, meeting_id):
-    meeting = _meeting(request, meeting_id)
-    members = list(meeting.team.members.all())
-    questions = list(meeting.check_questions.filter(status=CheckQuestion.STATUS_PUBLISHED))
-    pending = []
-    answered_slots = 0
-    for question in questions:
-        answered = set(question.answers.values_list("user_id", flat=True))
-        missing = [member for member in members if member.id not in answered]
-        answered_slots += len(members) - len(missing)
-        if missing:
-            pending.append((question, missing))
-    total_slots = len(members) * len(questions)
-    return render(request, "meetalign/verification.html", {
-        "meeting": meeting,
-        "discrepancies": _find_discrepancies(meeting),
-        "pending": pending,
-        "answered_slots": answered_slots,
-        "total_slots": total_slots,
-        "progress_pct": round(answered_slots * 100 / total_slots) if total_slots else 0,
-    })
-
-
 @login_required
 def record_file(request, meeting_id):
     meeting = _meeting(request, meeting_id)
@@ -432,8 +293,8 @@ def record_file(request, meeting_id):
 
 
 # ---------------------------------------------------------------------------
-# 결정 컴파일러 (실험 기능). 기존 이해도 퀴즈 화면(question_review/understanding/
-# verification)은 그대로 두고, 그 옆에 별도 흐름으로 붙인다.
+# 결정 컴파일러. 회의 원문에서 뽑은 실행 명세를 진행자가 확정해 공개하고, 팀원이
+# 항목마다 확인 여부를 남기는 흐름이다.
 # ---------------------------------------------------------------------------
 
 

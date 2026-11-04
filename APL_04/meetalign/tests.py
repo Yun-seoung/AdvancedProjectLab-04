@@ -12,7 +12,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, connection, transaction
 from django.test import Client, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import reverse
+from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 
 from . import decision_compiler, decision_status, services, tasks, views, whisper_worker
@@ -132,6 +132,27 @@ class PrototypeFlowTests(TestCase):
         self.assertRedirects(self.client.post(url, {"action": "end"}), url)
         self.meeting.refresh_from_db()
         self.assertTrue(self.meeting.ended)
+
+    def test_old_quiz_urls_are_gone(self):
+        # 앱 URL은 setting/urls.py에서 meetalign/ 아래 마운트된다. 접두사를 하드코딩하면
+        # 경로가 틀려도 404가 나와 테스트가 엉뚱한 이유로 통과하므로 reverse에서 파생시킨다.
+        base = reverse("meeting_detail", args=[self.meeting.id])
+        for suffix in ("understanding/", "questions/review/", "verification/"):
+            r = self.client.get(base + suffix)
+            self.assertEqual(r.status_code, 404, suffix)
+
+    def test_quiz_url_names_no_longer_resolve(self):
+        for name in ("understanding", "question_review", "verification"):
+            with self.assertRaises(NoReverseMatch, msg=name):
+                reverse(name, args=[self.meeting.id])
+
+    def test_anonymous_question_flow_survives_quiz_removal(self):
+        self.client.post(reverse("chat", args=[self.meeting.id]), {"mode": "anon", "text": "질문입니다"})
+        q = Question.objects.get(meeting=self.meeting)
+        self.client.post(reverse("answers", args=[self.meeting.id]), {"question_id": q.id, "answer": "답변입니다"})
+        q.refresh_from_db()
+        self.assertEqual(q.answer, "답변입니다")
+        self.assertContains(self.client.get(reverse("inbox", args=[self.meeting.id])), "답변입니다")
 
     def test_non_host_stays_on_the_meeting_after_end(self):
         other = User.objects.create_user("b", password="pw12345!")

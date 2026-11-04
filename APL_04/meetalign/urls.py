@@ -18,9 +18,6 @@ urlpatterns = [
     path("meetings/<int:meeting_id>/inbox/", views.inbox, name="inbox"),
     path("meetings/<int:meeting_id>/summary/", views.summary, name="summary"),
     path("meetings/<int:meeting_id>/answers/", views.answers, name="answers"),
-    path("meetings/<int:meeting_id>/understanding/", views.understanding, name="understanding"),
-    path("meetings/<int:meeting_id>/questions/review/", views.question_review, name="question_review"),
-    path("meetings/<int:meeting_id>/verification/", views.verification, name="verification"),
     path("meetings/<int:meeting_id>/record.txt", views.record_file, name="record_file"),
     # 결정 컴파일러 (실험 기능)
     path("meetings/<int:meeting_id>/decisions/", views.decision_ack, name="decision_ack"),
