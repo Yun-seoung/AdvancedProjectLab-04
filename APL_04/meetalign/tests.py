@@ -3203,6 +3203,20 @@ class DecisionReviseTests(TestCase):
         for name in (self.alice.username, self.bob.username):
             self.assertNotContains(r, name)
 
+    def test_the_review_screen_names_partly_finished_members_without_their_choice(self):
+        # 부분 응답 — alice만 '달랐어요'를 골랐다. 명단에서 alice가 유일한 응답자(1/2)로
+        # 드러나지만, 그 선택이 무엇인지는 어디에도 없어야 한다.
+        self._ack(self.decision, self.alice, DecisionAgreement.KIND_DIFFER, "저는 다음 주로 들었어요")
+        r = self.client.get(self.url)
+        self.assertEqual(
+            [(row["name"], row["acked"]) for row in r.context["pending_rows"]],
+            [("aliceuser", 1), ("bobuser", 0)],
+        )
+        # 두 항목 모두 아직 전원이 응답하지 않았으므로 숫자와 의견이 담기지 않는다.
+        self.assertEqual([row["ack"] for row in r.context["rows"]], [None, None])
+        self.assertNotContains(r, "/ 달랐어요")
+        self.assertNotContains(r, "저는 다음 주로 들었어요")
+
 
 class DecisionUnpublishTests(TestCase):
     """공개 취소 — 잘못 누른 공개를 수습하는 통로. 팀원 확인이 하나라도 있으면 막는다."""
@@ -3505,6 +3519,106 @@ class DecisionPendingTests(TestCase):
             {"name": "dec-beta", "acked": 1, "total": 2},
             {"name": "dec-gamma", "acked": 1, "total": 2},
         ])
+
+    def test_non_host_member_sees_no_names_when_the_meeting_has_no_host(self):
+        # host가 비면 _require_host는 팀원 누구나 통과시킨다(기존 정책). 그 통로로 이름 명단이
+        # 팀원 전원에게 나가면 안 된다 — 진행자 계정이 삭제되면(SET_NULL) 실제로 일어난다.
+        self.meeting.host = None
+        self.meeting.save(update_fields=["host"])
+        client = Client()
+        client.force_login(self.alpha)
+        review = client.get(reverse("decision_review", args=[self.meeting.id]))
+        self.assertEqual(review.status_code, 200)
+        self.assertEqual(review.context["pending_rows"], [])
+        for name in ("dec-beta", "dec-gamma"):
+            self.assertNotContains(review, name)
+
+    def test_host_cannot_attribute_differ_to_a_named_member(self):
+        # 공개 항목 1개 + 응답자 1명(달랐어요). 명단에서 빠진 사람이 곧 그 응답자이므로,
+        # 같은 화면에 항목별 '달랐어요 1명'이 함께 있으면 진행자가 특정할 수 있다.
+        Decision.objects.filter(pk=self.d2.pk).update(status=Decision.STATUS_DRAFT)
+        self._ack(self.beta, [self.d1], kind=DecisionAgreement.KIND_DIFFER)
+        review = self._review()
+        names = {row["name"] for row in review.context["pending_rows"]}
+        # 응답자가 한 명으로 특정된다.
+        self.assertEqual({"dec-alpha", "dec-beta", "dec-gamma"} - names, {"dec-beta"})
+        # 그 상태에서 differ 신호가 같은 화면에 있으면 '누가 달랐어요를 골랐는지'가 드러난다.
+        self.assertNotContains(review, "달랐어요 1명")
+
+    def test_item_counts_are_withheld_until_every_target_has_responded(self):
+        # 팀원 3명이 한 명씩 응답하는 동안에는 응답 HTML에 differ 숫자가 없어야 한다.
+        # 마지막 사람이 응답한 뒤에만 숫자가 나온다.
+        Decision.objects.filter(pk=self.d2.pk).update(status=Decision.STATUS_DRAFT)
+        for member in (self.alpha, self.beta):
+            self._ack(member, [self.d1], kind=DecisionAgreement.KIND_DIFFER)
+            review = self._review()
+            row = review.context["rows"][0]
+            self.assertIsNone(row["ack"])
+            self.assertEqual(row["comments"], [])
+            # 유출 신호는 항목별 "확인 N명 / 달랐어요 M명" 한 줄이다.
+            self.assertNotContains(review, "/ 달랐어요")
+            self.assertContains(review, "3명 중 %d명 응답" % row["responded"])
+        self._ack(self.gamma, [self.d1])
+        review = self._review()
+        row = review.context["rows"][0]
+        self.assertEqual(row["ack"], {"ack": 1, "differ": 2, "comments": []})
+        self.assertContains(review, "확인 1명 / 달랐어요 2명")
+        self.assertNotContains(review, "결과는 모두 응답하면 보여요")
+
+    def test_revise_hides_the_item_counts_again(self):
+        Decision.objects.filter(pk=self.d2.pk).update(status=Decision.STATUS_DRAFT)
+        for member in (self.alpha, self.beta, self.gamma):
+            self._ack(member, [self.d1])
+        self.assertContains(self._review(), "확인 3명")
+        decision_compiler.revise_final_text(self.d1, "고친 문장")
+        review = self._review()
+        self.assertIsNone(review.context["rows"][0]["ack"])
+        self.assertNotContains(review, "확인 3명")
+        self.assertContains(review, "3명 중 0명 응답")
+
+    def test_comments_are_ordered_by_text_not_by_when_they_were_written(self):
+        Decision.objects.filter(pk=self.d2.pk).update(status=Decision.STATUS_DRAFT)
+        written_in_order = ["힘든 일정이에요", "같은 뜻인가요", "다음 주로 들었어요"]
+        for member, comment in zip((self.alpha, self.beta, self.gamma), written_in_order):
+            DecisionAgreement.objects.create(
+                decision=self.d1, user=member,
+                kind=DecisionAgreement.KIND_DIFFER, comment=comment,
+            )
+        comments = self._review().context["rows"][0]["comments"]
+        self.assertEqual(comments, sorted(written_in_order))
+        self.assertNotEqual(comments, written_in_order)
+
+    def test_progress_numbers_stay_consistent_and_zero_target_says_so(self):
+        # 대상 인원은 명단과 같은 조회에서 나와야 한다 — 합이 어긋나면 진행바 너비가 음수가 된다.
+        self._ack(self.alpha, [self.d1, self.d2])
+        review = self._review()
+        self.assertEqual(
+            review.context["participant_total"],
+            review.context["participant_done"] + len(review.context["pending_rows"]),
+        )
+        self.team.members.remove(self.alpha, self.beta, self.gamma)
+        review = self._review()
+        self.assertEqual(review.context["participant_total"], 0)
+        self.assertContains(review, "확인할 팀원이 없어요")
+        self.assertNotContains(review, "명 중 0명 확인")
+
+    def test_pending_participants_ignores_other_meetings(self):
+        other = Meeting.objects.create(
+            team=self.team, title="other", host=self.host,
+            processing_status=Meeting.STATUS_DONE, transcript="전사본",
+        )
+        other_decision = self._decision(order=0, status=Decision.STATUS_PUBLISHED, meeting=other)
+        self._ack(self.alpha, [self.d1, self.d2])
+        # 이 회의를 전부 확인한 alpha도 other 회의에서는 여전히 미확인이다.
+        self.assertEqual(
+            [user.username for user, _, _ in decision_status.pending_participants(other)],
+            ["dec-alpha", "dec-beta", "dec-gamma"],
+        )
+        self.assertEqual(
+            [user.username for user, _, _ in decision_status.pending_participants(self.meeting)],
+            ["dec-beta", "dec-gamma"],
+        )
+        self.assertEqual(other_decision.agreements.count(), 0)
 
     def test_undecided_items_are_not_counted(self):
         # 공개 2개만 분모다. 미결정 d3을 확인하지 않아도 alpha는 완료로 잡힌다.

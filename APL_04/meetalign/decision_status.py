@@ -16,6 +16,8 @@ revise_final_text), 이미 확인했던 팀원도 다시 미확인으로 집계�
 pending_count_for_meetings()를 쓴다.
 """
 
+from collections import namedtuple
+
 from django.db.models import Count
 
 from .models import Decision, DecisionAgreement, Team
@@ -106,16 +108,21 @@ def participant_count(meeting):
     return members.exclude(pk=meeting.host_id).count() if meeting.host_id else members.count()
 
 
-def pending_participants(meeting):
-    """[(user, 확인한 항목 수, 전체 공개 항목 수), ...] — 아직 다 확인하지 않은 사람만, 이름순.
+# 진행자 화면이 한 번에 쓰는 묶음. 대상 인원과 미확인 명단이 같은 조회에서 나와야
+# "N명 중 M명 확인"의 합이 어긋나지 않는다(멤버가 중간에 가입해도 음수가 되지 않는다).
+ReviewSummary = namedtuple("ReviewSummary", "targets published_total pending responded")
 
-    ※ 진행자 화면 전용. 이름이 들어 있으므로 호출 전에 반드시 진행자 권한을 확인해야 한다.
-    공개된 항목이 없으면 빈 목록을 돌려준다.
-    """
-    total = meeting.decisions.filter(status=Decision.STATUS_PUBLISHED).count()
-    if not total:
-        return []
-    acked = {
+
+def _target_members(meeting):
+    """집계 대상(진행자 제외 참가자) user 목록 — 이름순. 멤버 집합은 여기서 한 번만 읽는다."""
+    members = meeting.team.members
+    targets = members.exclude(pk=meeting.host_id) if meeting.host_id else members.all()
+    return list(targets.order_by("username"))
+
+
+def _acked_by_user(meeting):
+    """{user_id: 확인한 공개 항목 수} — 이 회의 한 건."""
+    return {
         row["user_id"]: row["n"]
         for row in (
             DecisionAgreement.objects
@@ -124,11 +131,59 @@ def pending_participants(meeting):
             .annotate(n=Count("id"))
         )
     }
-    members = meeting.team.members
-    targets = members.exclude(pk=meeting.host_id) if meeting.host_id else members.all()
+
+
+def _responded_by_decision(meeting, target_ids):
+    """{decision_id: 응답 대상 중 응답한 수} — 공개 항목만, 대상 밖(진행자 등)은 세지 않는다."""
+    if not target_ids:
+        return {}
+    rows = (
+        DecisionAgreement.objects
+        .filter(
+            decision__meeting=meeting,
+            decision__status=Decision.STATUS_PUBLISHED,
+            user_id__in=target_ids,
+        )
+        .values("decision_id")
+        .annotate(n=Count("id"))
+    )
+    return {row["decision_id"]: row["n"] for row in rows}
+
+
+def review_summary(meeting):
+    """진행자 화면용 집계 한 묶음. 멤버 집합을 한 번만 읽는다.
+
+    pending은 [(user, 확인한 항목 수, 전체 공개 항목 수), ...]로 아직 다 확인하지 않은
+    사람만 이름순으로 담는다 — 이름이 들어 있으므로 호출한 쪽이 진행자 본인인지 확인해야 한다.
+    """
+    targets = _target_members(meeting)
+    total = meeting.decisions.filter(status=Decision.STATUS_PUBLISHED).count()
     pending = []
-    for user in targets.order_by("username"):
-        done = acked.get(user.id, 0)
-        if done < total:
-            pending.append((user, done, total))
-    return pending
+    if total:
+        acked = _acked_by_user(meeting)
+        pending = [
+            (user, acked.get(user.id, 0), total)
+            for user in targets
+            if acked.get(user.id, 0) < total
+        ]
+    responded = _responded_by_decision(meeting, [user.id for user in targets]) if total else {}
+    return ReviewSummary(targets=targets, published_total=total, pending=pending, responded=responded)
+
+
+def counts_revealed(summary, decision_id):
+    """그 항목의 집계를 보여줘도 되는가 — 응답 대상 전원이 응답했을 때만 True.
+
+    응답자가 한 명뿐인 동안에는 미확인 명단에서 빠진 사람이 곧 그 응답자이므로, 항목별
+    '달랐어요 M명'만으로도 누가 골랐는지 특정된다. 그래서 전원이 응답할 때까지 숫자를
+    내보내지 않는다. revise로 확인 기록이 지워진 항목은 응답 수가 0으로 돌아가 다시 가려진다.
+    """
+    return summary.responded.get(decision_id, 0) >= len(summary.targets)
+
+
+def pending_participants(meeting):
+    """[(user, 확인한 항목 수, 전체 공개 항목 수), ...] — 아직 다 확인하지 않은 사람만, 이름순.
+
+    ※ 진행자 화면 전용. 이름이 들어 있으므로 호출 전에 반드시 진행자 권한을 확인해야 한다.
+    공개된 항목이 없으면 빈 목록을 돌려준다.
+    """
+    return review_summary(meeting).pending
