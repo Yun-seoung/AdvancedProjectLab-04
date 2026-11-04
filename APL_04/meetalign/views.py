@@ -2,7 +2,6 @@ import os
 
 from django.contrib.auth import login, logout
 from django.core.exceptions import PermissionDenied
-from django.db import IntegrityError, transaction
 from django.http import FileResponse, Http404, HttpResponse
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import AuthenticationForm, UserCreationForm

@@ -620,8 +620,9 @@ PR #37(진행자 확정 모드 Phase A·B)에 이어, 진행자가 공개한 확
   테스트로 고정했다.
 - base.html의 .pending-badge / .pending-clear / .item-actions CSS — 결정 확인 배지가
   지금 쓰고 있다. 주석의 "확인 퀴즈"만 "결정 확인"으로 바꿨고 선언은 손대지 않았다.
-- services._generate_clean, _normalize_for_match, _enabled, _is_korean_or_english —
-  decision_compiler.py가 직접 호출한다. decision_compiler 상단 의존 메모에 "퀴즈 삭제
+- services._generate_clean, _normalize_for_match, _enabled 세 개는 decision_compiler.py가
+  직접 호출하고, _is_korean_or_english 는 _generate_clean 내부에서 쓰여 함께 남겼다.
+  decision_compiler 상단 의존 메모에 "퀴즈 삭제
   때도 이 셋은 그래서 남겼다"를 적어 뒀다.
 
 테스트: 372개 → 325개.
