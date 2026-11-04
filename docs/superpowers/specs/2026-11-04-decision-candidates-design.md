@@ -87,7 +87,34 @@ AI가 모호한 결정을 찾아 **그대로 공개될 확정 문장 후보 2~3�
   이 둘로 처리할 수 있다.
 
 **B. "그대로 공개될 결정 M개"** — `warnings`와 `divergence_reason`이 모두 빈 항목. AI가 쓴
-`final_text` 문장만 읽기 전용으로 보여주고 고를 것이 없다. 두 묶음 모두 펼친 상태로 둔다.
+`final_text` 문장을 보여주고, 그 아래 **접힌 '고치기'**를 둔다. 두 묶음 자체는 모두 펼친 상태다.
+
+```
+② 배포 스크립트 정리
+  민수가 금요일 18시까지 배포 스크립트를 정리하고,
+  스테이징에서 한 번 돌려 성공하는 것을 확인한다
+  ▸ 고치기                                    ← 접혀 있음 (<details>)
+```
+
+펼치면 라디오 세 개가 나온다. 평소에는 접혀 있으므로 **명확한 결정의 탭 0번은 유지된다.**
+
+| 선택지 | 동작 |
+|---|---|
+| 직접 쓰기 | 입력한 문장으로 `final_text`를 교체한다. 기존 `CHOICE_CUSTOM` 경로를 그대로 쓴다 |
+| 다음 회의로 넘김 | `marked_undecided=True` + 미정 문장 자동 생성(§5.4). 기존 `CHOICE_UNDECIDED` 경로 |
+| 이 결정 빼기 | 그 `Decision`을 삭제한다. AI가 회의에 없던 결정을 만들어 낸 경우용 |
+
+'이 결정 빼기'는 새 선택지이므로 `decision_compiler.CHOICE_DROP = "drop"`을 추가하고
+`_apply_host_choice`에서 처리한다. **`status`가 `draft`인 항목에서만** 가능하다 — 공개된 뒤에는
+팀원 확인 기록이 딸려 있으므로 거부하고, 내용을 바꾸려면 기존 '확정 문장 수정'(revise)을 쓴다.
+삭제는 `Interpretation`까지 cascade로 함께 지워진다.
+
+A 묶음에는 '고치기'를 따로 두지 않는다 — 이미 라디오에 '직접 쓰기'와 '다음 회의로 넘김'이
+펼쳐져 있다.
+
+> **열린 항목 (승인 필요)**: '이 결정 빼기'를 A 묶음 라디오에도 넷째 선택지로 붙일지. AI가
+> 회의에 없던 결정을 만들어 내는 일은 모호 판정 항목에서도 일어날 수 있어 대칭이 자연스럽지만,
+> 요청받은 범위는 B 묶음뿐이다. 승인 없이는 B 묶음에만 넣는다.
 
 **제거**: 네 입력 칸, 확정 여부 라디오, 후보 수정 input, '버리기' 체크박스.
 
@@ -153,15 +180,31 @@ AI가 모호한 결정을 찾아 **그대로 공개될 확정 문장 후보 2~3�
 뒤에 서버가 앞 5개만 남기면, 모호하다고 판정된 항목이 진행자 동의 없이 조용히 공개되거나 자동
 이월된다. 상한은 프롬프트로만 유도한다.
 
-**규칙 안전망**은 `ambiguous:false` 항목의 `final` 문장 하나만 스캔한다. 모호 항목은 이미 진행자에게
-묻고 있으므로 중복 검사하지 않는다. 걸리면:
+**규칙 안전망**은 `ambiguous:false` 항목의 **`final` 문장과 `evidence`(원문 근거) 둘 다** 스캔한다.
+모호 항목은 이미 진행자에게 묻고 있으므로 중복 검사하지 않는다.
 
-1. `warnings`에 사유를 넣어 그 항목을 모호로 올린다,
+- `final`에서 걸린 경우 — AI가 쓴 확정 문장 자체에 모호함이 남아 있다.
+  사유 예: `모호어 '나중에'가 들어 있어요`
+- `evidence`에서 걸린 경우 — 원문은 모호한데 AI가 그것을 혼자 해소해 버린 것으로 본다. 그 해소가
+  맞을 수도 있지만, 회의에서 정해지지 않은 것을 AI가 정한 셈이므로 진행자가 확인해야 한다.
+  사유 예: `원문에 '다음 주쯤'이 있어요`
+
+  > 원문 "다음 주쯤 할게요" → AI `final` "다음 주 금요일까지 …", `ambiguous:false`
+  > → 규칙이 `evidence`에서 `쯤`을 잡아 **확인 필요로 승격**한다.
+
+어느 쪽이든 걸리면 처리는 같다:
+
+1. `warnings`에 사유를 넣어 그 항목을 확인 필요로 올린다,
 2. AI가 쓴 `final` 문장을 `Interpretation` 한 개로 저장해 "이 문장 그대로 공개" 후보로 보여준다,
 3. `final_text`는 비워 둔다 → 진행자가 탭해야 공개된다.
 
 살아남는 규칙은 `_ambiguous_warnings`(`AMBIGUOUS_PHRASES`)와 `_conflict_warnings`(같은 문장 안의
-날짜·숫자 충돌)뿐이다.
+날짜·숫자 충돌)뿐이고, 둘을 `final`과 `evidence`에 각각 적용한다. 같은 사유가 양쪽에서 나오면
+기존처럼 한 번만 남긴다.
+
+명확 항목의 `evidence`는 규칙 스캔과 근거 검증에만 쓰고 저장하지 않는다 — 승격된 항목에서만
+`Interpretation.evidence`로 남아 화면에 "근거: …"로 보인다. `Decision`에 근거 칸을 더 만들지 않기
+위한 선택이며, 승격되지 않은 명확 항목은 근거를 보여줄 자리가 화면에 없다.
 
 ### 5.3 모델과 마이그레이션
 
@@ -185,10 +228,11 @@ Interpretation.recommended  = BooleanField(default=False)        # 'AI 추천' �
 | `Decision.spec_line` | 삭제. 마지막 사용처 `meeting_detail.html:39`(이월 목록)를 `final_text`로 교체 |
 | `Decision.is_settled` | `final_text` 또는 `marked_undecided` 또는 `not (warnings or divergence_reason)` |
 | `Decision.has_warning` | `bool(warnings or divergence_reason)` |
-| who·due_text·done_criteria·confirm_state | 필드 유지, 신규 컴파일에서는 비운다(기존 레코드 보존용) |
+| `Decision.what` | 응답의 `topic`(안건 한 줄)을 **계속 여기에 저장한다**. 화면의 카드 제목과 `admin` 목록이 쓴다 |
+| who·due_text·done_criteria·confirm_state | 필드 유지, 신규 컴파일에서는 **이 네 칸만** 비운다(기존 레코드 보존용) |
 | `Interpretation` docstring | "가상 청자의 해석" → "그대로 공개될 확정 문장 후보" |
 | `admin.py` | `list_display`·`search_fields`의 `who` → `final_text` |
-| `decision_compiler` 상수 | `MIN_INTERPRETATIONS`·`MAX_WARNED_DECISIONS` 삭제. `MAX_DECISIONS=12`·`MAX_INTERPRETATIONS=3`·`PARSE_RETRIES=1`·`AMBIGUOUS_PHRASES` 유지 |
+| `decision_compiler` 상수 | `MIN_INTERPRETATIONS`·`MAX_WARNED_DECISIONS` 삭제, `CHOICE_DROP="drop"` 추가. `MAX_DECISIONS=12`·`MAX_INTERPRETATIONS=3`·`PARSE_RETRIES=1`·`AMBIGUOUS_PHRASES`·`CHOICE_CANDIDATE_PREFIX`·`CHOICE_CUSTOM`·`CHOICE_UNDECIDED` 유지 |
 
 **삭제되는 함수**: `_blank_warnings`, `_cross_warnings`, `_interpretation_prompt`,
 `interpretations_for`, `_fake_interpretations`, `views._recompute_warnings`,
@@ -246,7 +290,7 @@ QA 범위)으로 구체적으로 쓴다. `_fake_interpretations`는 삭제한다
 `DecisionUnpublishTests`, `DecisionAckTests`, `DecisionPendingTests`. setUp에서 `Decision`을 직접
 만드는 곳만 `divergence_reason`을 함께 넣는다.
 
-**새 테스트 (15개)**
+**새 테스트 (19개)**
 
 1. LLM 호출이 한 번이다 (`_generate.call_count == 1`)
 2. 명확 항목 — `final_text`가 AI 문장으로 차고, 후보 0개, `is_settled` True
@@ -263,9 +307,16 @@ QA 범위)으로 구체적으로 쓴다. `_fake_interpretations`는 삭제한다
 13. 상한 폐기 — 모호 8개면 8개 모두 확인 대상
 14. FAKE 모드가 새 스키마로 전체 흐름을 돈다 (모호 2 + 명확 1, 추천 배지 각 1개)
 15. `spec_sentence()`가 기존 네 칸으로 명세 한 줄을 만든다 (0022 데이터 보정 로직)
+16. 근거 승격 — 원문 `"다음 주쯤 할게요"` + AI `final` `"다음 주 금요일까지 …"` + `ambiguous:false`
+    → `warnings`에 `원문에 '다음 주쯤'이 있어요`가 붙고 확인 필요로 올라가며, AI 문장이 후보 1개가
+    되고 `final_text`는 빈다
+17. B 묶음 '고치기' — 직접 쓰기로 `final_text`가 교체된다 (경고 없는 항목에도 choice가 적용된다)
+18. B 묶음 '이 결정 빼기' — 그 `Decision`과 `Interpretation`이 삭제되고 공개 대상에서 빠진다
+    (`draft_count`가 줄고 published 목록에 없다)
+19. 공개된 뒤에는 '이 결정 빼기'가 거부된다 — 레코드가 남고 사유가 화면에 보인다
 
-`tests.py`의 테스트는 현재 325개다. 삭제 14 · 신규 15 · 재작성 12(수량 불변)이므로 재설계 후
-326개가 된다.
+`tests.py`의 테스트는 현재 325개다. 삭제 14 · 신규 19 · 재작성 12(수량 불변)이므로 재설계 후
+330개가 된다.
 
 ## 8. 범위에 없는 것
 
