@@ -607,6 +607,7 @@ PR #37(진행자 확정 모드 Phase A·B)에 이어, 진행자가 공개한 확
   보여준다. 위 (B)에서 세운 "이름은 완료 여부에만 연결한다"는 기준과 어긋나므로
   팀에서 따로 정해야 한다(이번 작업에서는 기존 통계 방식을 그대로 두라는 결정에 따라
   건드리지 않았다).
-- 추적되지 않는 APL_04/meetalign/services/ 디렉터리(안에 __pycache__만 있음)와 빈
-  APL_04/static/vendor/가 남아 있다. __init__.py가 없어 지금은 무해하지만, services.py
-  와 이름이 겹쳐 헷갈리기 쉬우므로 지우는 편이 낫다.
+  (해결) 추적되지 않던 APL_04/meetalign/services/ 와 빈 APL_04/static/vendor/ 는 지워졌다.
+  둘 다 git에 추적된 적이 없고(git ls-files에 없음) 지금은 디스크에도 없다. services/ 안의
+  __pycache__는 .gitignore가 이미 덮고 있어 다시 생겨도 커밋되지 않으며, static/ 은 settings의
+  STATIC_URL만 쓰고 STATICFILES_DIRS를 두지 않아 참조하는 곳이 없다.
