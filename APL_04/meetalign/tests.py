@@ -2046,13 +2046,52 @@ class DecisionModelTests(TestCase):
 
     def test_is_settled_requires_a_sentence_or_the_undecided_mark(self):
         decision = self._decision()
-        # 경고가 붙었는데 진행자가 아무것도 고르지 않았으면 공개할 수 없다.
+        # 확인 필요 항목인데 진행자가 아무것도 고르지 않았으면 공개할 수 없다.
         self.assertFalse(decision.is_settled)
         decision.final_text = "금요일까지 스테이징 배포"
         self.assertTrue(decision.is_settled)
         decision.final_text = ""
         decision.marked_undecided = True
         self.assertTrue(decision.is_settled)
+        # AI가 "다르게 이해할 수 있다"고 본 항목은 규칙 사유가 없어도 확인 대상이다.
+        ai_only = self._decision(
+            order=5, warnings=[], divergence_reason="'충분히'가 30일인지 90일인지 갈립니다",
+        )
+        self.assertTrue(ai_only.has_warning)
+        self.assertFalse(ai_only.is_settled)
+        ai_only.final_text = "민수가 12월 5일까지 30일로 바꾼다"
+        self.assertTrue(ai_only.is_settled)
+
+    def _migration(self):
+        from importlib import import_module
+
+        return import_module("meetalign.migrations.0022_decision_candidates")
+
+    def test_0022_builds_a_sentence_from_the_old_fields(self):
+        spec_sentence = self._migration().spec_sentence
+        self.assertEqual(spec_sentence("민수", "배포", "금요일", "확인"), "민수 · 배포 · 금요일 · 확인")
+        self.assertEqual(spec_sentence("", "배포", "", ""), "배포")
+        self.assertEqual(spec_sentence("", "", "", ""), "")
+
+    def test_0022_backfills_only_published_rows_without_a_sentence(self):
+        """폴백을 지우면 문장이 비는 레코드만 채운다 — draft와 이미 쓰인 문장은 건드리지 않는다."""
+        fill = self._migration().fill_missing_final_text
+        draft = self._decision(order=11, who="민수", what="배포", due_text="금요일", done_criteria="확인")
+        empty = self._decision(
+            order=12, who="민수", what="문서", due_text="", done_criteria="",
+            status=Decision.STATUS_PUBLISHED,
+        )
+        kept = self._decision(
+            order=13, who="", what="QA", due_text="", done_criteria="",
+            status=Decision.STATUS_UNDECIDED, final_text="이미 있는 문장",
+        )
+        self.assertEqual(fill(Decision), 1)
+        draft.refresh_from_db()
+        empty.refresh_from_db()
+        kept.refresh_from_db()
+        self.assertEqual(draft.final_text, "")
+        self.assertEqual(empty.final_text, "민수 · 문서")
+        self.assertEqual(kept.final_text, "이미 있는 문장")
 
     def test_items_without_warnings_are_settled_with_nothing_to_choose(self):
         decision = self._decision(warnings=[])

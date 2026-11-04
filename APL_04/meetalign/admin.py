@@ -13,17 +13,17 @@ class InterpretationInline(admin.TabularInline):
 @admin.register(Decision)
 class DecisionAdmin(admin.ModelAdmin):
     list_display = (
-        "id", "meeting", "order", "who", "confirm_state", "status",
+        "id", "meeting", "order", "final_text", "status",
         "marked_undecided", "revised", "carryover_resolved_at",
     )
-    list_filter = ("status", "confirm_state", "marked_undecided", "revised")
-    search_fields = ("who", "what", "final_text")
+    list_filter = ("status", "marked_undecided", "revised")
+    search_fields = ("what", "final_text", "divergence_reason")
     inlines = [InterpretationInline]
 
 
 @admin.register(Interpretation)
 class InterpretationAdmin(admin.ModelAdmin):
-    list_display = ("id", "decision", "order", "text")
+    list_display = ("id", "decision", "order", "recommended", "text")
 
 
 @admin.register(DecisionAgreement)

@@ -168,8 +168,13 @@ class Decision(models.Model):
     due_text = models.CharField(max_length=200, blank=True, default="")
     done_criteria = models.TextField(blank=True, default="")
     confirm_state = models.CharField(max_length=12, choices=CONFIRM_CHOICES, default=CONFIRM_UNSET)
-    # 컴파일 경고 사유 문자열 목록. 예: ["담당자 빈칸", "모호어 '쯤'", "같은 항목에 다른 날짜"].
+    # 규칙 안전망이 붙인 사유 문자열 목록.
+    # 예: ["확정 문장에 모호한 표현이 있어요: '나중에'", "원문에 다른 날짜가 섞여 있어요: 금요일, 월요일"].
     warnings = models.JSONField(default=list, blank=True)
+    # AI가 쓴 "왜 다르게 이해할 수 있나" 한 줄. 비어 있으면 AI가 명확하다고 본 결정이다.
+    # 규칙 사유(warnings)와 나란히 두는 이유: 화면에서 AI 이유를 앞에 굵게, 규칙 사유를
+    # 그 아래 작게 보여주기 때문이다. 둘 중 하나라도 있으면 진행자 확인 대상이다(has_warning).
+    divergence_reason = models.TextField(blank=True, default="")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=STATUS_DRAFT)
     # 진행자가 확정한 한 줄. 해석 후보에서 고른 문장이거나 직접 쓴 문장이다.
     # 경고가 없는 항목은 명세 자체가 확정 내용이라 비어 있을 수 있다.
@@ -193,7 +198,8 @@ class Decision(models.Model):
 
     @property
     def has_warning(self):
-        return bool(self.warnings)
+        """진행자가 확인해야 하는 항목인가 — AI가 갈린다고 봤거나 규칙이 걸렸거나."""
+        return bool(self.warnings or self.divergence_reason)
 
     @property
     def spec_line(self):
@@ -205,12 +211,12 @@ class Decision(models.Model):
 
     @property
     def is_settled(self):
-        """진행자가 이 항목을 처리했는가 — 확정 문장을 썼거나 '아직 미정'으로 넘겼거나.
+        """진행자가 이 항목을 처리했는가 — 확정 문장을 골랐거나 '다음 회의로' 넘겼거나.
 
-        경고가 없는 항목은 고를 것이 없으므로 처리된 것으로 본다. 경고 항목 중 하나라도
-        처리되지 않으면 "확정 명세 공개"를 막는다.
+        확인 필요가 아닌 항목(has_warning이 False)은 고를 것이 없으므로 처리된 것으로 본다.
+        확인 필요 항목 중 하나라도 처리되지 않으면 "확정 명세 공개"를 막는다.
         """
-        return bool(self.final_text) or self.marked_undecided or not self.warnings
+        return bool(self.final_text) or self.marked_undecided or not self.has_warning
 
     @property
     def published_text(self):
@@ -230,6 +236,9 @@ class Interpretation(models.Model):
     order = models.PositiveSmallIntegerField(default=0)
     text = models.TextField()
     evidence = models.TextField(blank=True, default="")
+    # 근거가 가장 강한 후보 하나에만 True. 화면의 'AI 추천' 배지로만 쓰고, 미리 선택해 두지는
+    # 않는다 — 진행자가 읽고 직접 골라야 하기 때문이다.
+    recommended = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["order", "id"]
