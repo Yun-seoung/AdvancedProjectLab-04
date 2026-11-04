@@ -1823,23 +1823,20 @@ class QuizPendingTests(TestCase):
     def _review(self):
         return self.client.get(reverse("question_review", args=[self.meeting.id]))
 
-    def test_unpublished_quiz_shows_no_badge_and_no_host_section(self):
+    def _quiz_pending(self):
+        """팀 홈 배지는 결정 확인 기준으로 바뀌었으므로, 퀴즈 집계는 함수로 직접 본다."""
+        return quiz_status.pending_count_for_meetings([self.meeting])[self.meeting.id]
+
+    def test_unpublished_quiz_shows_no_host_section(self):
         self.meeting.check_questions.update(status=CheckQuestion.STATUS_DRAFT)
-        home = self._home()
-        self.assertIsNone(home.context["rows"][0]["pending"])
-        self.assertNotContains(home, 'class="pending-badge"')
-        self.assertNotContains(home, "모두 완료")
+        self.assertIsNone(self._quiz_pending())
         review = self._review()
         self.assertFalse(review.context["quiz_open"])
         self.assertNotContains(review, "아직 풀지 않은 참가자")
 
-    def test_badge_counts_participants_who_have_not_finished(self):
+    def test_review_lists_participants_who_have_not_finished(self):
         self._solve(self.alpha, [self.q1, self.q2])
-        home = self._home()
-        self.assertEqual(home.context["rows"][0]["pending"], 2)
-        self.assertContains(home, 'class="pending-badge"')
-        self.assertContains(home, ">2</span>")
-        self.assertContains(home, "아직 2명이 확인 퀴즈를 풀지 않았어요")
+        self.assertEqual(self._quiz_pending(), 2)
         review = self._review()
         self.assertContains(review, "3명 중 1명 완료")
         self.assertContains(review, "memb-beta")
@@ -1853,10 +1850,7 @@ class QuizPendingTests(TestCase):
     def test_all_finished_shows_completion_markers(self):
         for member in (self.alpha, self.beta, self.gamma):
             self._solve(member, [self.q1, self.q2])
-        home = self._home()
-        self.assertEqual(home.context["rows"][0]["pending"], 0)
-        self.assertNotContains(home, 'class="pending-badge"')
-        self.assertContains(home, "모두 완료")
+        self.assertEqual(self._quiz_pending(), 0)
         review = self._review()
         self.assertContains(review, "3명 중 3명 완료")
         self.assertContains(review, "모든 참가자가 퀴즈를 마쳤어요")
@@ -1867,18 +1861,18 @@ class QuizPendingTests(TestCase):
         # 진행자는 한 문항도 풀지 않았지만 독려 대상이 아니라서 집계에서 빠진다.
         self.assertFalse(Answer.objects.filter(user=self.host).exists())
         self.assertEqual(quiz_status.participant_count(self.meeting), 3)
-        self.assertEqual(self._home().context["rows"][0]["pending"], 0)
+        self.assertEqual(self._quiz_pending(), 0)
         self.assertEqual(self._review().context["pending_rows"], [])
 
     def test_newly_published_question_makes_finished_participant_pending_again(self):
         for member in (self.alpha, self.beta, self.gamma):
             self._solve(member, [self.q1, self.q2])
-        self.assertEqual(self._home().context["rows"][0]["pending"], 0)
+        self.assertEqual(self._quiz_pending(), 0)
         # 녹음을 추가로 올려 다음 batch 문항이 공개된 상황 (PR #31)
         extra = self._question(order=0, batch=1)
-        self.assertEqual(self._home().context["rows"][0]["pending"], 3)
+        self.assertEqual(self._quiz_pending(), 3)
         self._solve(self.alpha, [extra])
-        self.assertEqual(self._home().context["rows"][0]["pending"], 2)
+        self.assertEqual(self._quiz_pending(), 2)
         review = self._review()
         self.assertContains(review, "2/3문항")
         self.assertNotContains(review, "memb-alpha")
@@ -3558,3 +3552,89 @@ class DecisionPendingTests(TestCase):
         review = self._review()
         self.assertEqual(review.context["participant_pct"], 100)
         self.assertContains(review, "모든 팀원이 결정을 확인했어요")
+
+    def _home(self, user=None):
+        client = self.client
+        if user is not None:
+            client = Client()
+            client.force_login(user)
+        return client.get(reverse("meeting_list", args=[self.team.id]))
+
+    def test_badge_counts_members_who_have_not_confirmed(self):
+        self._ack(self.alpha, [self.d1, self.d2])
+        home = self._home()
+        self.assertEqual(home.context["rows"][0]["pending"], 2)
+        self.assertContains(home, 'class="pending-badge"')
+        self.assertContains(home, ">2</span>")
+        self.assertContains(home, "아직 2명이 결정을 확인하지 않았어요")
+
+    def test_unpublished_meeting_shows_no_badge(self):
+        Decision.objects.filter(meeting=self.meeting).update(status=Decision.STATUS_DRAFT)
+        home = self._home()
+        self.assertIsNone(home.context["rows"][0]["pending"])
+        self.assertNotContains(home, 'class="pending-badge"')
+        self.assertNotContains(home, "모두 확인")
+
+    def test_meeting_with_only_undecided_items_shows_no_badge(self):
+        Decision.objects.filter(meeting=self.meeting).update(status=Decision.STATUS_UNDECIDED)
+        self.assertIsNone(self._home().context["rows"][0]["pending"])
+
+    def test_all_confirmed_shows_clear_marker(self):
+        for member in (self.alpha, self.beta, self.gamma):
+            self._ack(member, [self.d1, self.d2])
+        home = self._home()
+        self.assertEqual(home.context["rows"][0]["pending"], 0)
+        self.assertNotContains(home, 'class="pending-badge"')
+        self.assertContains(home, "✓ 모두 확인")
+
+    def test_badge_shows_99_plus_over_limit(self):
+        self.assertEqual(decision_status.badge_text(99), "99")
+        self.assertEqual(decision_status.badge_text(100), "99+")
+
+    def test_team_with_host_only_shows_clear_marker(self):
+        self.team.members.remove(self.alpha, self.beta, self.gamma)
+        home = self._home()
+        self.assertEqual(home.context["rows"][0]["pending"], 0)
+        self.assertContains(home, "✓ 모두 확인")
+
+    def test_other_meetings_agreements_are_not_mixed_in(self):
+        other = Meeting.objects.create(
+            team=self.team, title="other", host=self.host,
+            processing_status=Meeting.STATUS_DONE, transcript="전사본",
+        )
+        other_decision = self._decision(order=0, status=Decision.STATUS_PUBLISHED, meeting=other)
+        self._ack(self.alpha, [other_decision])
+        counts = decision_status.pending_count_for_meetings([self.meeting, other])
+        self.assertEqual(counts[self.meeting.id], 3)
+        self.assertEqual(counts[other.id], 2)
+
+    def test_member_pages_contain_no_other_member_names(self):
+        self._ack(self.alpha, [self.d1])
+        client = Client()
+        client.force_login(self.alpha)
+        for url in (
+            reverse("meeting_list", args=[self.team.id]),
+            reverse("meeting_detail", args=[self.meeting.id]),
+            reverse("decision_ack", args=[self.meeting.id]),
+        ):
+            response = client.get(url)
+            self.assertEqual(response.status_code, 200)
+            body = response.content.decode()
+            for name in ("dec-beta", "dec-gamma", "dechost"):
+                self.assertNotIn(name, body, "%s 응답에 %s가 노출됨" % (url, name))
+
+    def test_meeting_list_query_count_does_not_grow_with_meetings(self):
+        self._ack(self.alpha, [self.d1])
+        url = reverse("meeting_list", args=[self.team.id])
+        with CaptureQueriesContext(connection) as one_meeting:
+            self.assertEqual(self.client.get(url).status_code, 200)
+        for i in range(4):
+            extra = Meeting.objects.create(
+                team=self.team, title="m%d" % i, host=self.host,
+                processing_status=Meeting.STATUS_DONE, transcript="전사본",
+            )
+            self._decision(order=0, status=Decision.STATUS_PUBLISHED, meeting=extra)
+        with CaptureQueriesContext(connection) as five_meetings:
+            response = self.client.get(url)
+        self.assertEqual(len(response.context["rows"]), 5)
+        self.assertEqual(len(five_meetings.captured_queries), len(one_meeting.captured_queries))

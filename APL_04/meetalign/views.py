@@ -92,22 +92,23 @@ def _meeting(request, meeting_id):
 
 
 def _meeting_rows(meetings):
-    """회의 목록에 뿌릴 (회의 + 확인 퀴즈 미완료 배지) 묶음.
+    """회의 목록에 뿌릴 (회의 + 결정 확인 미완료 배지) 묶음.
 
     팀 홈은 팀원 전원이 보는 화면이라 숫자만 담고 이름은 절대 담지 않는다.
     집계는 회의 개수와 무관한 고정 쿼리 수로 한 번에 처리한다(N+1 금지).
     """
-    pending_counts = quiz_status.pending_count_for_meetings(meetings)
+    pending_counts = decision_status.pending_count_for_meetings(meetings)
     rows = []
     for meeting in meetings:
         pending = pending_counts.get(meeting.id)
         rows.append({
             "meeting": meeting,
-            # 퀴즈가 공개되지 않은 회의(처리 중, 진행자 검토 전)는 배지 자체를 숨긴다.
-            "quiz_open": pending is not None,
+            # 확정 명세가 공개되지 않은 회의(처리 중, 진행자 검토 전, 전부 미결정)는
+            # 배지 자체를 숨긴다.
+            "decision_open": pending is not None,
             "pending": pending,
-            "badge": quiz_status.badge_text(pending) if pending else "",
-            "tooltip": "아직 %d명이 확인 퀴즈를 풀지 않았어요" % pending if pending else "",
+            "badge": decision_status.badge_text(pending) if pending else "",
+            "tooltip": "아직 %d명이 결정을 확인하지 않았어요" % pending if pending else "",
         })
     return rows
 
