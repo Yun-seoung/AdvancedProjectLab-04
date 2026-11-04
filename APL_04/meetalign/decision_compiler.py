@@ -311,6 +311,82 @@ def parse_interpretations(raw, source_text=None):
     return results
 
 
+# 안건 이름이 길면 진행자 화면의 카드 제목이 레이아웃을 깨므로 여기서 자른다.
+MAX_TOPIC_LENGTH = 120
+
+
+def _parse_candidates(raw_candidates, normalized_source):
+    """후보 배열 → [{"text","evidence","recommended"}, ...].
+
+    - 객체가 아닌 항목(문자열만 온 경우)은 조용히 버린다. 한 항목의 형식이 틀렸다고 회의
+      전체를 실패시키지 않는다.
+    - 근거가 원문에 없는 후보는 버린다. evidence가 빈 문자열이면 검증을 건너뛴다
+      (가짜 응답 모드에는 대조할 원문이 없다).
+    - 추천은 처음 하나만 인정한다 — 화면의 'AI 추천' 배지는 하나여야 읽는 순서가 생긴다.
+    """
+    results = []
+    recommended_taken = False
+    for item in raw_candidates if isinstance(raw_candidates, list) else []:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        evidence = str(item.get("evidence", "")).strip()
+        if normalized_source is not None and evidence and services._normalize_for_match(evidence) not in normalized_source:
+            continue
+        if any(text == kept["text"] for kept in results):
+            continue
+        recommended = bool(item.get("recommended")) and not recommended_taken
+        recommended_taken = recommended_taken or recommended
+        results.append({"text": text, "evidence": evidence, "recommended": recommended})
+        if len(results) >= MAX_INTERPRETATIONS:
+            break
+    return results
+
+
+def parse_items(raw, source_text=None):
+    """LLM 응답 → [{"topic","ambiguous","why","final","evidence","candidates"}, ...].
+
+    한 번의 호출로 받은 응답을 전부 여기서 읽는다. 항목 하나의 형식이 틀렸다고 나머지를
+    버리지 않는다 — 읽을 수 없는 조각만 비워서 넘기고, 그 항목은 진행자가 직접 쓰거나 다음
+    회의로 넘기게 된다.
+
+    - topic이 비면 그 항목은 결정이 될 수 없으므로 버린다.
+    - 모호 항목(ambiguous=True)은 candidates만 쓰고 final/evidence를 버린다. 반대로 명확
+      항목은 final/evidence만 쓰고 candidates를 버린다 — 공개 기준이 둘이 되지 않게.
+    - source_text가 주어지면 근거를 원문과 대조한다. 명확 항목의 근거가 원문에 없으면
+      final을 비워 돌려주고(호출자가 '확인 필요'로 올린다), 후보는 그 후보만 버린다.
+    """
+    data = _json_array(raw)
+    if data is None:
+        return []
+    normalized_source = services._normalize_for_match(source_text) if source_text is not None else None
+    items = []
+    for row in data:
+        if not isinstance(row, dict):
+            continue
+        topic = str(row.get("topic", "")).strip()[:MAX_TOPIC_LENGTH]
+        if not topic:
+            continue
+        ambiguous = bool(row.get("ambiguous"))
+        final = "" if ambiguous else str(row.get("final", "")).strip()
+        evidence = "" if ambiguous else str(row.get("evidence", "")).strip()
+        if final and normalized_source is not None and evidence and services._normalize_for_match(evidence) not in normalized_source:
+            final = ""
+        items.append({
+            "topic": topic,
+            "ambiguous": ambiguous,
+            "why": str(row.get("why", "")).strip() if ambiguous else "",
+            "final": final,
+            "evidence": evidence,
+            "candidates": _parse_candidates(row.get("candidates"), normalized_source) if ambiguous else [],
+        })
+        if len(items) >= MAX_DECISIONS:
+            break
+    return items
+
+
 def _interpretation_prompt(spec_line, warnings, source):
     return (
         "너는 이 회의에 참석한 '가상 청자'다. 아래 실행 명세 한 줄은 사람마다 다르게 읽힐 수 "

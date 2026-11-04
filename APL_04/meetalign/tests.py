@@ -1586,6 +1586,105 @@ class DecisionParseTests(TestCase):
         raw = json.dumps([{"text": "해석 %d" % i} for i in range(8)], ensure_ascii=False)
         self.assertEqual(len(decision_compiler.parse_interpretations(raw)), decision_compiler.MAX_INTERPRETATIONS)
 
+    # ---- parse_items: 결정·모호 여부·이유·후보·근거·추천을 한 응답에서 읽는다 ----
+
+    TOPIC = "로그 보관 기간"
+    CANDIDATES = [
+        {"text": "민수가 30일로 바꾼다", "evidence": "", "recommended": True},
+        {"text": "민수가 90일로 바꾼다", "evidence": ""},
+    ]
+
+    def test_parse_items_reads_the_new_schema(self):
+        raw = json.dumps([
+            {"topic": self.TOPIC, "ambiguous": True, "why": "30일인지 90일인지 갈립니다",
+             "final": "무시되어야 한다", "candidates": self.CANDIDATES},
+            {"topic": "후보가 문자열", "ambiguous": True, "why": "x",
+             "candidates": ["문장만 왔다", "이것도"]},
+            {"topic": "배포", "ambiguous": False, "final": "민수가 금요일까지 배포한다",
+             "evidence": "민수가 금요일까지 배포를 맡기로 했습니다."},
+        ], ensure_ascii=False)
+        items = decision_compiler.parse_items(raw)
+        self.assertEqual(items[0]["why"], "30일인지 90일인지 갈립니다")
+        self.assertEqual([c["text"] for c in items[0]["candidates"]],
+                         ["민수가 30일로 바꾼다", "민수가 90일로 바꾼다"])
+        # 모호 항목에 final이 함께 와도 후보만 쓴다 — 기준이 둘이 되지 않게.
+        self.assertEqual(items[0]["final"], "")
+        # 후보가 객체가 아니라 문자열로 오면 조용히 버린다(예외를 올리지 않는다).
+        self.assertEqual(items[1]["candidates"], [])
+        self.assertEqual(items[2]["candidates"], [])
+        self.assertEqual(items[2]["final"], "민수가 금요일까지 배포한다")
+        self.assertEqual(items[2]["why"], "")
+
+    def test_parse_items_keeps_only_one_recommendation(self):
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
+            {"text": "첫째", "recommended": "true"},
+            {"text": "둘째", "recommended": True},
+        ]}], ensure_ascii=False)
+        candidates = decision_compiler.parse_items(raw)[0]["candidates"]
+        # "true"·1 같은 비불리언도 참으로 보고, 추천은 처음 하나만 남긴다.
+        self.assertEqual([c["recommended"] for c in candidates], [True, False])
+
+    def test_parse_items_drops_items_without_a_topic(self):
+        raw = json.dumps([{"topic": "", "ambiguous": False, "final": "문장"},
+                          {"topic": "가" * 300, "ambiguous": False, "final": "문장"}],
+                         ensure_ascii=False)
+        items = decision_compiler.parse_items(raw)
+        self.assertEqual(len(items), 1)
+        # 긴 안건 이름은 카드 제목이 레이아웃을 깨지 않게 잘라 둔다.
+        self.assertEqual(len(items[0]["topic"]), 120)
+
+    def test_parse_items_survives_code_fences_and_prose(self):
+        raw = "네.\n```json\n[{\"topic\": \"배포\", \"ambiguous\": false, \"final\": \"문장\"}]\n```\n이상."
+        self.assertEqual(len(decision_compiler.parse_items(raw)), 1)
+
+    def test_parse_items_returns_empty_on_broken_json(self):
+        for raw in ("JSON 못 만들겠습니다", '[{"topic": "배포",]', '{"topic": "배포"}'):
+            self.assertEqual(decision_compiler.parse_items(raw), [], raw)
+
+    def test_parse_items_caps_the_number_of_items(self):
+        raw = json.dumps([{"topic": "안건 %d" % i, "ambiguous": False, "final": "문장"}
+                          for i in range(30)], ensure_ascii=False)
+        self.assertEqual(len(decision_compiler.parse_items(raw)), decision_compiler.MAX_DECISIONS)
+
+    def test_parse_items_drops_duplicate_candidates(self):
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
+            {"text": ""}, {"text": "같은 후보"}, {"text": "같은 후보"},
+        ]}], ensure_ascii=False)
+        self.assertEqual([c["text"] for c in decision_compiler.parse_items(raw)[0]["candidates"]],
+                         ["같은 후보"])
+
+    def test_parse_items_caps_candidates(self):
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x",
+                           "candidates": [{"text": "후보 %d" % i} for i in range(8)]}],
+                         ensure_ascii=False)
+        self.assertEqual(len(decision_compiler.parse_items(raw)[0]["candidates"]),
+                         decision_compiler.MAX_INTERPRETATIONS)
+
+    def test_parse_items_drops_a_candidate_whose_evidence_is_not_in_the_transcript(self):
+        source = "민수가 금요일까지 배포를 맡기로 했습니다."
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
+            {"text": "남는다", "evidence": "민수가 금요일까지 배포를 맡기로 했습니다."},
+            {"text": "버려진다", "evidence": "회의에 없던 문장입니다."},
+        ]}], ensure_ascii=False)
+        items = decision_compiler.parse_items(raw, source_text=source)
+        self.assertEqual([c["text"] for c in items[0]["candidates"]], ["남는다"])
+
+    def test_parse_items_matches_evidence_loosely_and_skips_blanks(self):
+        source = "민수가 금요일까지 배포를 맡기로 했습니다."
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
+            {"text": "공백 무시", "evidence": "민수가  금요일까지\n배포를 맡기로"},
+            {"text": "근거 없음", "evidence": ""},
+        ]}], ensure_ascii=False)
+        items = decision_compiler.parse_items(raw, source_text=source)
+        self.assertEqual(len(items[0]["candidates"]), 2)
+
+    def test_parse_items_clears_a_final_whose_evidence_is_not_in_the_transcript(self):
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": False,
+                           "final": "민수가 30일로 바꾼다", "evidence": "회의에 없던 문장"}],
+                         ensure_ascii=False)
+        item = decision_compiler.parse_items(raw, source_text="로그 이야기")[0]
+        self.assertEqual(item["final"], "")
+
 
 class DecisionCompileTests(TestCase):
     """①+② 전체. LLM 유무, 파싱 실패 재시도, 가짜 응답 모드를 본다."""
