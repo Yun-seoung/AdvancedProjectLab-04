@@ -14,8 +14,8 @@
    ac6fb89(전원일치/갈림/미결정 판정)에 있다. 아래 ①② 코드는 그때와 같으므로, 집계·판정
    함수와 DecisionVote 모델만 다시 붙이면 된다.
 
-※ services.py의 내부(_로 시작하는) 함수에 의존한다. 이번 실험에서는 services.py를 수정하지
-   않고 그대로 가져다 쓰기로 했으므로, 아래 셋의 이름이나 동작이 바뀌면 이 모듈도 같이 고쳐야 한다.
+※ services.py의 내부(_로 시작하는) 함수에 의존한다. 아래 셋의 이름이나 동작이 바뀌면 이
+   모듈도 같이 고쳐야 한다(퀴즈 삭제 때도 이 셋은 그래서 남겼다).
    - services._enabled()
        Gemini(GEMINI_API_KEY+GEMINI_MODEL) 또는 Ollama(OLLAMA_MODEL)가 설정돼 있는지.
        False면 LLM을 아예 부르지 않고 가짜 응답(FAKE_DECISIONS 등)으로 전체 흐름을 시연한다.
@@ -243,7 +243,6 @@ def _generate_parsed(prompt, parser, what_failed, soft_fail=False):
     """프롬프트를 보내고 파싱까지 성공할 때까지 최대 (1 + PARSE_RETRIES)번 시도한다.
 
     - 연결 실패(OSError)와 응답 언어 오류는 None을 돌려준다 → 호출자가 가짜 응답으로 대체.
-      기존 퀴즈 생성(services.generate_check_questions_from_text)과 같은 처리다.
     - 연결은 됐는데 형식이 재시도 후에도 안 맞으면:
       soft_fail=False(① 컴파일)는 DecisionCompileError를 올린다 — 명세가 없으면 화면에
         보여줄 게 아무것도 없으므로 회의 단위로 실패시키고 진행자에게 사유를 띄운다.
@@ -288,7 +287,7 @@ def parse_interpretations(raw, source_text=None):
 
     source_text가 주어지면 evidence가 그 원문에 실제로 등장하는지 확인하고, 지어낸 근거가
     붙은 해석은 버린다. evidence가 빈 문자열인 해석은 검증을 건너뛴다 — 가짜 응답 모드에서
-    근거 없이 흐름만 시연할 때 쓰는 통로이고, 기존 _parse_mcq_json도 같은 규칙이다.
+    근거 없이 흐름만 시연할 때 쓰는 통로다.
     """
     data = _json_array(raw)
     if data is None:
