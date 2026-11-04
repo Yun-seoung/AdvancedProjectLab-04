@@ -2162,6 +2162,25 @@ class DecisionModelTests(TestCase):
         self.assertEqual(DecisionAgreement.objects.count(), 0)
         self.assertEqual(Checkpoint.objects.count(), 0)
 
+    def test_quiz_models_and_tables_are_gone(self):
+        from django.apps import apps
+        for name in ("CheckQuestion", "Answer"):
+            with self.assertRaises(LookupError, msg=name):
+                apps.get_model("meetalign", name)
+        names = connection.introspection.table_names()
+        self.assertNotIn("meetalign_checkquestion", names)
+        self.assertNotIn("meetalign_answer", names)
+
+    def test_meeting_has_no_quiz_transcript_field_and_still_saves(self):
+        # tasks.refresh_meeting이 쓰는 update_fields 조합이 필드 삭제 후에도 FieldError 없이 돌아야 한다.
+        self.assertNotIn("check_questions_transcript", [f.name for f in Meeting._meta.get_fields()])
+        self.meeting.transcript = "전사"
+        self.meeting.record = "회의록"
+        self.meeting.processing_status = Meeting.STATUS_DONE
+        self.meeting.save(update_fields=["transcript", "record", "processing_status"])
+        self.meeting.refresh_from_db()
+        self.assertEqual(self.meeting.record, "회의록")
+
     def test_the_blind_vote_model_is_gone(self):
         # 투표 모드는 보류했다. 되살릴 때는 새 마이그레이션으로 DecisionVote를 추가한다
         # (models.py 상단 메모 참고). 지금은 모델도 테이블도 없어야 한다.

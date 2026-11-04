@@ -40,9 +40,6 @@ class Meeting(models.Model):
     record = models.TextField(blank=True)
     transcript = models.TextField(blank=True)
     processing_status = models.CharField(max_length=20, blank=True, default="")
-    # 이해도 검증 질문을 마지막으로 생성했을 때의 전사본 스냅샷. 그 뒤로 녹음이
-    # 추가되어 transcript가 길어지면(이 값과 달라지면) "추가 질문 생성"을 제안할 수 있다.
-    check_questions_transcript = models.TextField(blank=True, default="")
 
     def __str__(self):
         return self.title
@@ -118,57 +115,8 @@ class Question(models.Model):
         return self.text[:30]
 
 
-class CheckQuestion(models.Model):
-    """이해도 검증을 위해 (LLM이) 낸 객관식 질문. 회의당 여러 개이며 팀원 전원이 각자 답한다.
-    주최자가 검토/수정 후 공개(published)해야 팀원에게 보인다."""
-    STATUS_DRAFT = "draft"
-    STATUS_PUBLISHED = "published"
-
-    meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE, related_name="check_questions")
-    text = models.TextField()
-    choices = models.JSONField(default=list)
-    correct_choice = models.PositiveSmallIntegerField(default=0)
-    evidence = models.TextField(blank=True, default="")
-    status = models.CharField(max_length=10, choices=[(STATUS_DRAFT, "draft"), (STATUS_PUBLISHED, "published")], default=STATUS_DRAFT)
-    order = models.PositiveSmallIntegerField(default=0)
-    # 몇 번째로 생성된 질문 묶음인지(0 = 최초 생성분, 1 = 녹음 추가 후 첫 추가분, ...).
-    # 팀원 화면에서 묶음별로 나눠서 보여주는 데 쓴다.
-    batch = models.PositiveSmallIntegerField(default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        ordering = ["batch", "order", "id"]
-        constraints = [models.UniqueConstraint(fields=["meeting", "batch", "order"], name="unique_check_question_batch_order")]
-
-    def __str__(self):
-        return self.text[:30]
-
-
-class Answer(models.Model):
-    """CheckQuestion에 대한 팀원별 답변(선택한 보기 번호). 같은 질문이라도 사람마다 따로
-    저장되어야 "누구와 누구가 다르게 이해했는지" 비교가 가능하다."""
-    question = models.ForeignKey(CheckQuestion, on_delete=models.CASCADE, related_name="answers")
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="check_answers")
-    selected_choice = models.PositiveSmallIntegerField()
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        unique_together = ("question", "user")
-
-    @property
-    def is_correct(self):
-        return self.selected_choice == self.question.correct_choice
-
-    def __str__(self):
-        return "%s - %s" % (self.user, self.question_id)
-
-
-
-
 # ---------------------------------------------------------------------------
-# 결정 컴파일러 (실험 기능). 기존 CheckQuestion/Answer 흐름과 완전히 분리된 새 테이블이며,
-# 기존 모델은 건드리지 않는다.
+# 결정 컴파일러.
 #
 # 흐름: 회의 원문에서 '실행 명세'를 뽑고(①), 모호한 항목마다 해석 후보를 만들어(②)
 # 진행자에게만 참고로 보여준다. 진행자가 항목마다 확정하거나 '아직 미정'으로 넘기고(③),
@@ -274,7 +222,7 @@ class Interpretation(models.Model):
     """경고가 붙은 Decision 하나에 대해 AI가 '가상 청자'로서 만든 서로 다른 해석 후보.
 
     evidence는 전사 원문에 그대로 등장하는 문장이어야 하며, 지어낸 근거가 붙은 해석은
-    저장 단계에서 버린다(기존 CheckQuestion.evidence 검증과 같은 방식).
+    저장 단계에서 버린다(공백을 무시한 뒤 원문에 그 문장이 실제로 있는지 비교한다).
     정답은 없다 — 진행자가 참고해서 고르거나 직접 쓰는 데 쓴다. 팀원에게는 보여주지 않는다.
     """
 
@@ -302,7 +250,7 @@ class DecisionAgreement(models.Model):
     kind=ack는 "확인했어요", kind=differ는 "제 이해와 달랐어요"다. comment는 differ에
     덧붙이는 한 줄 의견(선택)이다.
 
-    (항목, 사용자) 쌍으로 유일하고 기존 Answer처럼 수정할 수 있다 — 진행자 집계는 항상
+    (항목, 사용자) 쌍으로 유일하고 나중에 수정할 수 있다 — 진행자 집계는 항상
     현재 선택 기준이다. user를 저장하는 목적은 중복 방지와 본인 화면의 '내 선택' 표시뿐이고,
     누가 differ를 골랐는지는 어떤 화면에도 내보내지 않는다.
     한 줄 의견도 작성자를 비공개로 묶어서 보여준다.
