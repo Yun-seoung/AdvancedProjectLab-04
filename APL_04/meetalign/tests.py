@@ -1519,6 +1519,42 @@ class DecisionWarningTests(TestCase):
         warnings = decision_compiler.warnings_for([_spec(who="각자", what="각자 정리", due="", done="")])[0]
         self.assertEqual(warnings.count("모호어 '각자'"), 1)
 
+    # ---- safety_warnings: AI가 '명확'이라 한 항목만 되짚는 안전망 ----
+
+    def test_safety_catches_an_ambiguous_phrase_in_the_sentence(self):
+        self.assertEqual(
+            decision_compiler.safety_warnings("나중에 로깅 기준을 맞춘다", "로깅은 맞춰야죠"),
+            ["확정 문장에 모호한 표현이 있어요: '나중에'"],
+        )
+
+    def test_safety_catches_an_ambiguous_phrase_only_in_the_transcript(self):
+        """원문은 모호한데 AI가 혼자 해소한 경우 — 회의에서 정해지지 않은 것이므로 묻는다."""
+        self.assertEqual(
+            decision_compiler.safety_warnings("민수가 다음 주 금요일까지 배포한다", "다음 주쯤 할게요"),
+            ["원문에 모호한 표현이 있어요: '쯤'"],
+        )
+
+    def test_safety_lists_the_same_phrase_once(self):
+        self.assertEqual(
+            decision_compiler.safety_warnings("나중에 맞춘다", "나중에 맞추죠"),
+            ["확정 문장에 모호한 표현이 있어요: '나중에'"],
+        )
+
+    def test_safety_catches_conflicting_dates(self):
+        self.assertEqual(
+            decision_compiler.safety_warnings("금요일 아니면 월요일에 배포한다", ""),
+            ["확정 문장에 다른 날짜가 섞여 있어요: 금요일, 월요일"],
+        )
+
+    def test_safety_does_not_split_a_single_date(self):
+        self.assertEqual(decision_compiler.safety_warnings("12월 5일까지 배포한다", ""), [])
+
+    def test_safety_catches_conflicting_quantities(self):
+        self.assertEqual(
+            decision_compiler.safety_warnings("테스트 3개를 쓰고 5개를 통과시킨다", ""),
+            ["확정 문장에 다른 숫자가 섞여 있어요: 3개, 5개"],
+        )
+
 
 class DecisionParseTests(TestCase):
     """LLM 응답의 JSON 스키마 검증과 근거 검증."""

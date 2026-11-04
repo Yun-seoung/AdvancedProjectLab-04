@@ -150,6 +150,46 @@ def _cross_warnings(specs):
     return extra
 
 
+def _text_warnings(text, where):
+    """한 텍스트에서 모호어와 날짜·숫자 충돌을 찾아 사유 문자열로 만든다.
+
+    where는 사유 앞에 붙는 말("확정 문장" 또는 "원문")이다. 조사 변화를 피하려고 표현을
+    문장 끝에 콜론으로 붙인다 — '나중에'·'쯤'처럼 끝 음절이 다른 표현을 같은 틀에 담기 위함.
+    """
+    found = ["%s에 모호한 표현이 있어요: '%s'" % (where, phrase)
+             for phrase in AMBIGUOUS_PHRASES if phrase in text]
+    dates = _date_tokens(text)
+    if len(dates) >= 2:
+        found.append("%s에 다른 날짜가 섞여 있어요: %s" % (where, ", ".join(sorted(dates))))
+    quantities = _quantity_tokens(text)
+    if len(quantities) >= 2:
+        found.append("%s에 다른 숫자가 섞여 있어요: %s" % (where, ", ".join(sorted(quantities))))
+    return found
+
+
+def safety_warnings(final_text, evidence):
+    """AI가 '명확'이라고 한 항목을 되짚는 규칙 안전망. 사유 목록을 돌려준다.
+
+    두 가지를 본다.
+    - 확정 문장: AI가 쓴 문장 자체에 모호함이 남아 있다.
+    - 원문 근거: 원문은 모호한데 AI가 그것을 혼자 해소해 버렸다. 그 해소가 맞을 수도 있지만
+      회의에서 정해지지 않은 것을 AI가 정한 셈이므로 진행자가 확인해야 한다.
+
+    모호 항목은 이미 진행자에게 묻고 있으므로 이 함수를 부르지 않는다. 같은 사유가 양쪽에서
+    나오면 확정 문장 쪽만 남긴다 — 진행자가 고쳐야 할 대상이 그 문장이기 때문이다.
+    """
+    found = _text_warnings(final_text, "확정 문장") + _text_warnings(evidence, "원문")
+    seen = []
+    phrases_taken = set()
+    for warning in found:
+        phrase = warning.rsplit(": ", 1)[-1]
+        if phrase in phrases_taken:
+            continue
+        phrases_taken.add(phrase)
+        seen.append(warning)
+    return seen
+
+
 def warnings_for(specs):
     """[명세, ...] → [경고 목록, ...]. 경고가 붙은 명세는 최대 MAX_WARNED_DECISIONS개까지만 남는다.
 
