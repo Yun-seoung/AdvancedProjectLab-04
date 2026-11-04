@@ -702,3 +702,108 @@ fresh reviewer 1회로 `main...feat/decision-candidates` 전체를 본다.
 원래 계획의 "삭제 14 / 신규 20"은 Task 3·4가 옛 함수를 바로 교체한다는 전제였다. 모든 커밋을 녹색으로 유지하려면 새 테스트를 먼저 더하고 옛 테스트를 Task 5에서 지우므로, 같은 결과(331)에 삭제 30 · 신규 36으로 도달한다.
 
 `fake_mode_runs_the_whole_flow_without_any_llm`은 기존 테스트의 재작성이어서 신규로 세지 않는다(스펙 §7이 신규 20개로 센 것은 이 한 건을 잘못 포함한 결과이고, 그만큼을 Task 1의 0022 보정 테스트가 메운다).
+
+---
+
+## Task 5 리뷰 후 fix pass (승인됨)
+
+Task 5(`89f0697`) 직후 fresh reviewer(opus) 1회. 판정 **REQUEST CHANGES** — Critical 3 · Important 6 · Minor 5.
+아래 1~5번과 M1을 사용자가 승인했다. 나머지 Minor(M2~M5)는 보류하고 기록만 남긴다.
+각 수정은 TDD로 검증한다 — 결함을 재현하는 테스트를 먼저 쓰고 실패를 확인한 뒤 고치고, 끝에 전체 스위트를 돌린다.
+**아직 코드는 수정하지 않았다. 이 섹션은 승인된 작업 목록이다.**
+
+### 리뷰에서 깨끗하다고 확인된 것
+
+- 0022가 draft 레코드를 건드리지 않는다 (`status__in=("published","undecided")` 필터).
+- 0022가 이미 `final_text`가 있는 레코드를 덮지 않는다 (같은 필터의 `final_text=""` 조건).
+- 0022의 `RunPython`이 역방향 안전하고 역사적 모델을 바르게 쓴다 — `apps.get_model`로 받고 상태값을
+  상수 대신 문자열로 적었다. 전방 로직은 멱등이고 `AddField`와 같은 마이그레이션이라 함께 롤백된다.
+- LLM 호출·파싱이 트랜잭션 밖, 저장만 원자적. `Decision.order`·`Interpretation.order` 유일성.
+- 익명성 보장 전부 — `ack_counts`는 `user`를 조회하지 않고, 전원 응답 전에는 숫자를 컨텍스트에 담지 않는다.
+- 플랜 Review Focus 1~4가 코드에서 처리됨(5번은 Task 7).
+
+### 직접 실행으로 재현을 확인한 결함
+
+```
+C1: parse_items([{topic, ambiguous:true, candidates:[2개]}])   # why 누락
+    → why=''  →  _resolve_item → warnings=[] / divergence_reason='' / final_text=''
+    → has_warning False → is_settled True → publish_blockers 통과 (빈 문장으로 공개)
+I1: parse_items([{topic, ambiguous:false, final:'...'}], source_text='전혀 다른 원문')
+    → final 그대로 유지 (evidence가 없으면 근거 검증을 통째로 건너뛴다)
+```
+
+### 수정 1 — `publish_blockers`에 문장 유무 가드 (C1·C2 동시 차단)
+
+- Files: `APL_04/meetalign/decision_compiler.py` (`publish_blockers`)
+- 어떤 경로로 들어온 빈 문장이든 공개를 막는 마지막 그물.
+  `return [d for d in decisions if not d.is_settled or not d.published_text]`
+- C2(0022 이후 공개되는 옛 무경고 draft — 네 칸이 다 찼지만 `final_text`가 빈 레코드)도 이 가드가 덮는다.
+- [ ] RED → GREEN: `test_an_item_without_a_sentence_cannot_be_published`
+  — `warnings=[]`·`divergence_reason=""`·`final_text=""`인 draft를 만들고 `publish_blockers`에 잡히는지,
+    `action=publish`가 거부되는지 본다.
+
+### 수정 2 — 모호 항목의 사유를 비워 두지 않는다 (C1의 뿌리)
+
+- Files: `APL_04/meetalign/decision_compiler.py` (`_resolve_item`)
+- `return [], item["why"] or "AI가 다르게 이해할 수 있다고 봤어요", "", item["candidates"]`
+- [ ] RED → GREEN: `test_an_ambiguous_item_without_a_reason_still_needs_the_host`
+  — `why` 없는 `ambiguous:true` 응답으로 컴파일해 `divergence_reason`이 채워지고
+    `has_warning` True·`is_settled` False가 되는지 본다.
+
+### 수정 3 — 명확 항목은 근거가 없으면 승격한다 (I1)
+
+- Files: `APL_04/meetalign/decision_compiler.py` (`parse_items`)
+- `source_text`가 주어졌을 때는 빈 `evidence`도 검증 실패로 본다:
+  `if final and normalized_source is not None and (not evidence or _normalize_for_match(evidence) not in normalized_source): final = ""`
+- 후보 쪽의 빈 `evidence` 허용은 가짜 모드 통로이므로 그대로 둔다
+  (`test_parse_items_matches_evidence_loosely_and_skips_blanks`가 못 박은 사양).
+- [ ] RED → GREEN: `test_parse_items_requires_evidence_for_a_clear_item`
+  — `evidence` 없는 `ambiguous:false` 항목에 `source_text`를 주면 `final`이 비는지 본다.
+
+### 수정 4 — 진행자 화면이 AI 모호 항목에 선택지를 그린다 (C3)
+
+- Files: `APL_04/meetalign/templates/meetalign/decision_review.html` (`:70`, `:149`, `:154`)
+- AI 모호 항목은 `warnings`가 비고 `divergence_reason`만 차므로, 지금은 `row.blocking`이 True인데
+  라디오가 하나도 렌더되지 않아 공개가 영구 차단된다(FAKE 데모가 공개 직전에 멈춘다).
+  세 곳의 `row.decision.warnings`를 `row.decision.has_warning`으로 바꾸고 사유 목록 위에
+  `divergence_reason`을 한 줄 출력한다. Task 6이 이 템플릿을 전면 교체하지만, 지금 커밋도 동작해야 한다.
+- [ ] RED → GREEN: `test_the_screen_offers_choices_for_an_ai_only_ambiguous_item`
+  — FAKE 모드로 컴파일한 뒤 모호 항목의 `choice_<id>` 라디오와 `divergence_reason` 문구가 HTML에 있는지 본다.
+
+### 수정 5 — 남은 Important 다섯 건
+
+| # | 내용 | Files | 테스트 |
+|---|---|---|---|
+| I3 | `max_warnings` 컨텍스트 키를 지웠는데 문구가 남아 **"회의당 최대 개."**로 렌더된다. `{% block note %}`를 새 규칙 설명으로 교체 | `decision_review.html:3-5`, `:25-26` | [ ] `test_the_note_block_does_not_mention_a_removed_limit` |
+| I4 | 헤더가 `warnings`만 세어 "경고 0개 · 확정 안 한 항목 2개"로 모순되게 보인다 → `has_warning` 기준 | `views.py:544` | [ ] `test_the_header_counts_items_that_need_the_host` (Task 6에서 키가 `ambiguous_count`로 바뀌면 같은 사실을 그 키로 본다) |
+| I5 | `Interpretation` docstring이 "가상 청자의 해석"으로 남았다 → "그대로 공개될 확정 문장 후보"(스펙 §5.3 미이행) | `models.py:224-229` | 테스트 없음(문서) |
+| I6 | 0022 보정이 **undecided** 행에 "다음 회의로" 꼬리말을 붙이지 않아 팀원 화면에서 미결정이 보통 결정처럼 읽힌다 | `migrations/0022_decision_candidates.py` | [ ] `test_0022_marks_backfilled_undecided_rows_as_carried_over` |
+| I2 | 컴파일 버튼을 두 번 누르면 `exists()` 검사가 트랜잭션 밖이라 `IntegrityError` → 500. **이 브랜치가 만든 문제는 아니지만**(원래부터 그랬다) 싸게 막는다 — 쓰기 블록을 `except IntegrityError`로 감싸 `DecisionCompileError`로 바꾼다 | `decision_compiler.py:350-359` | [ ] `test_compiling_twice_at_once_is_refused_not_crashed` |
+
+### 수정 M1 — 옛 전제가 남은 주석·docstring 5곳
+
+사라진 규칙("빈칸 경고", "회의당 최대 5개")을 설명하는 주석이 C1·C2를 정상처럼 보이게 하므로 함께 고친다.
+
+- `models.py:139-140` — "빈칸이나 모호어가 있으면 … (회의당 최대 5개까지만 만든다)"
+- `models.py:179-180` — "경고가 없는 항목은 명세 자체가 확정 내용이라 비어 있을 수 있다" (새 흐름에서 무경고 항목은 `final_text`를 반드시 갖는다)
+- `decision_compiler.py:112-113` — "'경고 최대 5개' 같은 제한도 여기서 지켜야 하기 때문이다"
+- `decision_compiler.py:411-413` — "진행자는 경고가 붙은 항목마다 …" (기준이 `has_warning`으로 바뀌었고 B 묶음도 '고치기'를 받는다)
+- `decision_compiler.py:108` — `DecisionCompileError` "명세/해석으로 못 읽었을 때" (호출이 한 번으로 합쳐졌다)
+
+테스트 없음(문서).
+
+### 보류한 Minor (기록만)
+
+- **M2** 0022에서 네 칸이 전부 빈 공개 레코드는 `continue`로 빠져 빈 문장이 남는다. 플레이스홀더 문구와 `bulk_update` 묶기 제안.
+- **M3** `safety_warnings`의 중복 제거 키가 사유 문자열 포맷(`rsplit(": ")`)에 의존한다. `(종류, 토큰)` 튜플을 키로 쓰는 편이 안전하다.
+- **M4** `_generate_parsed(prompt, parser, what_failed)`의 일반화가 1+N 호출 시절의 잔재다. 호출자가 하나뿐이고 `what_failed`는 항상 `"결정"`.
+- **M5** `decision_review.html:136`의 "근거 없음 (가짜 응답 모드)" 문구가 실제 모드에서도 뜰 수 있다(I1과 같은 뿌리). "근거를 찾지 못했어요"로 중립화 제안.
+
+### fix pass 후 테스트 수
+
+fix pass가 새 테스트 7개를 더한다(I5·M1은 문서라 테스트 없음): **327 → 334**.
+이후 Task 6은 삭제 1 · 신규 3(→ **336**), Task 7은 신규 4(→ **340**)가 된다.
+
+340은 원래 계획의 331과 다르다. 차이는 둘이다.
+(1) Task 5에서 찾은 실제 결함(날짜·시각을 한 묶음으로 세어 "금요일 18시까지"가 충돌로 잡히던 문제)에 테스트 2개,
+(2) 이 fix pass에 테스트 7개. 둘 다 계획을 쓸 때 몰랐던 결함을 막는 테스트이므로, 숫자를 맞추려고 접지 않고 늘렸다.
