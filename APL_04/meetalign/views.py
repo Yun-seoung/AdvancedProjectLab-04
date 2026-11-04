@@ -12,7 +12,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.http import url_has_allowed_host_and_scheme
 
-from . import decision_compiler, quiz_status, services, tasks
+from . import decision_compiler, decision_status, quiz_status, services, tasks
 from .models import (
     Answer, ChatMessage, CheckQuestion, Decision, DecisionAgreement, Interpretation, Meeting,
     Question, Recording, Team,
@@ -92,22 +92,23 @@ def _meeting(request, meeting_id):
 
 
 def _meeting_rows(meetings):
-    """회의 목록에 뿌릴 (회의 + 확인 퀴즈 미완료 배지) 묶음.
+    """회의 목록에 뿌릴 (회의 + 결정 확인 미완료 배지) 묶음.
 
     팀 홈은 팀원 전원이 보는 화면이라 숫자만 담고 이름은 절대 담지 않는다.
     집계는 회의 개수와 무관한 고정 쿼리 수로 한 번에 처리한다(N+1 금지).
     """
-    pending_counts = quiz_status.pending_count_for_meetings(meetings)
+    pending_counts = decision_status.pending_count_for_meetings(meetings)
     rows = []
     for meeting in meetings:
         pending = pending_counts.get(meeting.id)
         rows.append({
             "meeting": meeting,
-            # 퀴즈가 공개되지 않은 회의(처리 중, 진행자 검토 전)는 배지 자체를 숨긴다.
-            "quiz_open": pending is not None,
+            # 확정 명세가 공개되지 않은 회의(처리 중, 진행자 검토 전, 전부 미결정)는
+            # 배지 자체를 숨긴다.
+            "decision_open": pending is not None,
             "pending": pending,
-            "badge": quiz_status.badge_text(pending) if pending else "",
-            "tooltip": "아직 %d명이 확인 퀴즈를 풀지 않았어요" % pending if pending else "",
+            "badge": decision_status.badge_text(pending) if pending else "",
+            "tooltip": "아직 %d명이 결정을 확인하지 않았어요" % pending if pending else "",
         })
     return rows
 
@@ -665,6 +666,9 @@ def decision_review(request, meeting_id):
 
     decisions = list(meeting.decisions.prefetch_related("interpretations"))
     ack_counts = decision_compiler.ack_counts(decisions)
+    # 항목별 집계는 '응답 대상 전원이 응답한 뒤'에만 컨텍스트에 담는다. 템플릿에서 가리는
+    # 것이 아니라 아예 넣지 않는다 — 응답 HTML에 숫자가 없어야 한다.
+    summary = decision_status.review_summary(meeting)
     rows = []
     for decision in decisions:
         interpretations = list(decision.interpretations.all())
@@ -683,13 +687,30 @@ def decision_review(request, meeting_id):
             "custom_text": custom_text,
             # 경고가 붙었는데 아직 고르지 않은 항목 — 공개를 막는다.
             "blocking": not decision.is_settled,
-            # 공개 항목의 "확인 N명 / 달랐어요 M명". 작성자 없는 숫자와 의견 문자열만 담는다.
-            "ack": ack_counts.get(decision.id),
-            "comments": ack_counts.get(decision.id, {}).get("comments", []),
+            # 공개 항목의 "확인 N명 / 달랐어요 M명". 작성자 없는 숫자와 의견 문자열만 담고,
+            # 전원이 응답하기 전에는 둘 다 담지 않는다(None / 빈 목록).
+            "ack": ack_counts.get(decision.id) if decision_status.counts_revealed(summary, decision.id) else None,
+            "comments": (
+                ack_counts.get(decision.id, {}).get("comments", [])
+                if decision_status.counts_revealed(summary, decision.id) else []
+            ),
+            # 숫자를 아직 못 보여주는 동안 대신 쓰는 응답 진행 상황.
+            "responded": summary.responded.get(decision.id, 0),
+            "target_count": len(summary.targets),
         })
     warned = [row for row in rows if row["decision"].warnings]
     drafts = [row for row in rows if row["decision"].status == Decision.STATUS_DRAFT]
     blockers = [row for row in drafts if row["blocking"]]
+    # 미확인 팀원 이름은 진행자 본인에게만 모은다. _require_host는 host가 비어 있는 회의를
+    # 팀원 누구에게나 열어 주므로(도입 전 회의, 그리고 진행자 계정이 삭제되면 SET_NULL로
+    # host가 비는 회의) 그 통로로 이름이 새지 않도록 여기서는 실제 진행자인지를 따로 본다.
+    is_host = meeting.host_id == request.user.id
+    decision_open = is_host and bool(summary.published_total)
+    # 대상 인원과 미확인 명단을 같은 summary에서 꺼낸다 — 따로 세면 그 사이에 멤버가 가입했을 때
+    # participant_done이 음수가 되어 진행바 너비가 깨진다.
+    pending = summary.pending if decision_open else []
+    participant_total = len(summary.targets) if decision_open else 0
+    participant_done = participant_total - len(pending)
     return render(request, "meetalign/decision_review.html", {
         "meeting": meeting,
         "rows": rows,
@@ -698,6 +719,12 @@ def decision_review(request, meeting_id):
         "warned_count": len(warned),
         "draft_count": len(drafts),
         "blocker_count": len(blockers),
+        "decision_open": decision_open,
+        # 이름은 '확인 여부'에만 연결한다 — 누가 '제 이해와 달랐어요'를 골랐는지는 담지 않는다.
+        "pending_rows": [{"name": user.username, "acked": acked, "total": total} for user, acked, total in pending],
+        "participant_total": participant_total,
+        "participant_done": participant_done,
+        "participant_pct": round(participant_done * 100 / participant_total) if participant_total else 0,
         # 확정하지 않은 경고 항목이 하나도 없어야 공개할 수 있다(서버도 같은 조건으로 거부).
         "can_publish": bool(drafts) and not blockers,
         "published_count": sum(1 for row in rows if row["decision"].status == Decision.STATUS_PUBLISHED),

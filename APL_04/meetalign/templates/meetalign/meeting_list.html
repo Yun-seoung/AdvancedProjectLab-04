@@ -30,11 +30,11 @@
       </div>
     </div>
     <div class="item-actions">
-      {% if row.quiz_open %}
+      {% if row.decision_open %}
         {% if row.pending %}
         <span class="pending-badge" title="{{ row.tooltip }}" aria-label="{{ row.tooltip }}">{{ row.badge }}</span>
         {% else %}
-        <span class="pending-clear" title="모두 확인 퀴즈를 마쳤어요">✓ 모두 완료</span>
+        <span class="pending-clear" title="모두 결정을 확인했어요">✓ 모두 확인</span>
         {% endif %}
       {% endif %}
       <a class="btn sm secondary" href="{% url 'meeting_detail' m.id %}">입장</a>

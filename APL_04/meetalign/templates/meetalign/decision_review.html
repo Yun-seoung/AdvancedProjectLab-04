@@ -188,8 +188,16 @@
       {# 공개된 뒤: 확정 내용과 수정 폼. 수정하면 그 항목의 팀원 확인 기록이 전부 지워진다. #}
       {% if row.decision.status == status_published %}
       <div class="success" style="margin:0">확정: {{ row.decision.published_text }}</div>
-      {# 작성자 없는 숫자와 의견 문장만 받는다 — 누가 '달랐어요'를 골랐는지는 뷰에서부터 담지 않는다. #}
+      {% comment %}
+        작성자 없는 숫자와 의견 문장만 받는다 — 누가 '달랐어요'를 골랐는지는 뷰에서부터 담지 않는다.
+        응답 대상 전원이 응답하기 전에는 row.ack 자체가 없다(응답자가 적을 때 숫자만으로
+        누가 골랐는지 특정되는 것을 막는다).
+      {% endcomment %}
+      {% if row.ack %}
       <div class="meta">확인 {{ row.ack.ack }}명 / 달랐어요 {{ row.ack.differ }}명</div>
+      {% else %}
+      <div class="meta">{{ row.target_count }}명 중 {{ row.responded }}명 응답 · 결과는 모두 응답하면 보여요</div>
+      {% endif %}
       {% if row.comments %}
       <ul class="plain" style="margin:0">
         {% for comment in row.comments %}<li class="meta">· "{{ comment }}"</li>{% endfor %}
@@ -233,5 +241,40 @@
   </form>
   {% endif %}
 </div>
+
+{% if decision_open %}
+<div class="card elevated">
+  <h2 class="section-title">아직 확인하지 않은 팀원</h2>
+  {% if not participant_total %}
+  <p class="muted" style="margin:0">확인할 팀원이 없어요</p>
+  {% else %}
+  <div class="progress-row">
+    <span>{{ participant_total }}명 중 {{ participant_done }}명 확인</span>
+    <span>{{ participant_pct }}%</span>
+  </div>
+  <div class="progress-track"><div class="progress-fill" style="width:{{ participant_pct }}%"></div></div>
+  {% if pending_rows %}
+  <ul class="plain" style="margin-top:16px">
+    {% for row in pending_rows %}
+    <li class="item">
+      <div class="item-main">
+        <span class="item-icon">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="8" r="3.6"/><path d="M5 20c0-3.3 3.1-5.4 7-5.4s7 2.1 7 5.4"/></svg>
+        </span>
+        <div class="item-text">
+          <div class="title">{{ row.name }}</div>
+          <div class="meta">{{ row.acked }}/{{ row.total }}개 확인</div>
+        </div>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  <p class="muted" style="margin:12px 0 0">독려용 명단입니다. 항목별 결과는 대상 팀원이 모두 응답한 뒤에만 공개되므로, 누가 '제 이해와 달랐어요'를 골랐는지는 이 화면에서도 드러나지 않습니다.</p>
+  {% else %}
+  <div class="success" style="margin-top:16px">모든 팀원이 결정을 확인했어요</div>
+  {% endif %}
+  {% endif %}
+</div>
+{% endif %}
 {% endif %}
 {% endblock %}
