@@ -427,6 +427,16 @@ CHOICE_CUSTOM = "custom"
 CHOICE_UNDECIDED = "undecided"
 
 
+def undecided_sentence(topic):
+    """'다음 회의로 넘김'을 고른 항목의 확정 문장.
+
+    미결정 항목도 문장을 가져야 한다 — 공개되는 것은 어떤 상태에서나 final_text 하나이고,
+    팀원 화면과 다음 회의의 이월 목록이 이 문장을 그대로 쓴다. 진행자는 탭 한 번만 하고
+    문장은 서버가 만든다.
+    """
+    return "%s — 이번 회의에서 결론이 나지 않았음 (다음 회의로)" % topic
+
+
 def publish_blockers(decisions):
     """공개를 막는 항목 — 경고가 붙었는데 진행자가 아직 아무것도 고르지 않은 것.
 

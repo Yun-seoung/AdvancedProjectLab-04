@@ -364,7 +364,8 @@ def _apply_host_choice(request, decision):
         return None
 
     if raw == decision_compiler.CHOICE_UNDECIDED:
-        decision.final_text = ""
+        # 미정 항목도 문장을 갖는다 — 팀원 화면과 이월 목록이 final_text 하나만 보기 때문이다.
+        decision.final_text = decision_compiler.undecided_sentence(decision.what)
         decision.marked_undecided = True
     elif raw == decision_compiler.CHOICE_CUSTOM:
         text = request.POST.get("custom_text_%d" % decision.id, "").strip()

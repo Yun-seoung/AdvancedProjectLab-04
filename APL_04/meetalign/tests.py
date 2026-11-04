@@ -2349,9 +2349,17 @@ class DecisionConfirmTests(TestCase):
         self.assertEqual(row["choice"], decision_compiler.CHOICE_CUSTOM)
         self.assertEqual(row["custom_text"], "내가 쓴 확정 문장")
 
-    # ---- 아직 미정 ----
+    # ---- 다음 회의로 넘김 ----
 
-    def test_marking_undecided_sets_the_flag_and_clears_the_sentence(self):
+    def test_undecided_sentence_names_the_topic(self):
+        """문구는 한 곳에서만 만든다 — 진행자 화면·팀원 화면·이월 목록이 같은 문장을 쓴다."""
+        self.assertEqual(
+            decision_compiler.undecided_sentence("로그 보관 기간"),
+            "로그 보관 기간 — 이번 회의에서 결론이 나지 않았음 (다음 회의로)",
+        )
+
+    def test_marking_undecided_sets_the_flag_and_writes_a_sentence(self):
+        """'다음 회의로 넘김'도 자기 문장을 갖는다 — 공개되는 것은 언제나 final_text 하나다."""
         decision = self.warned[0]
         self.client.post(self.url, {
             "action": "save",
@@ -2363,7 +2371,11 @@ class DecisionConfirmTests(TestCase):
         })
         decision.refresh_from_db()
         self.assertTrue(decision.marked_undecided)
-        self.assertEqual(decision.final_text, "")
+        self.assertEqual(
+            decision.final_text,
+            "%s — 이번 회의에서 결론이 나지 않았음 (다음 회의로)" % decision.what,
+        )
+        self.assertEqual(decision.published_text, decision.final_text)
         self.assertTrue(decision.is_settled)
 
     def test_switching_from_undecided_back_to_a_candidate_clears_the_flag(self):
