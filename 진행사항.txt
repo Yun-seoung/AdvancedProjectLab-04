@@ -1,4 +1,4 @@
-진행사항.txt (2026-10-23 기준, PR #25~#31 + 확인 퀴즈 미완료 인원 표시 반영)
+진행사항.txt (2026-11-04 기준, PR #25~#40 + 퀴즈 기능 완전 삭제 반영)
 
 지금까지 목업 프로토타입 위에서 실제로 구현된 부분을 파일별로 정리한다.
 
@@ -591,22 +591,89 @@ PR #37(진행자 확정 모드 Phase A·B)에 이어, 진행자가 공개한 확
 - 테스트 372개 전부 통과 (기존 344개 + 신규 28개).
 
 
+퀴즈 기능 완전 삭제 (브랜치 chore/remove-quiz)
+----------------------
+이해도 확인 퀴즈를 모델까지 전부 지웠다. 결정 컴파일러(PR #37~#40)가 같은 목적 — "같은
+회의를 서로 다르게 이해한 지점 찾기" — 을 더 직접적으로 다루게 되어 두 흐름을 나란히 둘
+이유가 없어졌다. 진입점은 PR #40에서 이미 모든 템플릿에서 빠져 URL만 고아로 남아 있었다.
+데이터는 각자 로컬 시연용이라 삭제해도 된다는 결정에 따랐다.
+
+삭제한 것:
+- 모델 2개(CheckQuestion, Answer)와 Meeting.check_questions_transcript 필드.
+  마이그레이션 0021 하나로 끝냈다(makemigrations 생성). sqlmigrate 확인 결과 변경되는
+  테이블은 meetalign_answer / meetalign_checkquestion / meetalign_meeting 셋뿐이고,
+  auth_user 는 임시 테이블의 REFERENCES 대상으로만 등장한다(변경 아님).
+  0020 역방향 → 재정방향 왕복도 통과했다. 되살릴 일이 생기면 모델 정의는 커밋 71093ca
+  이전에 남아 있다(데이터는 복구되지 않는다).
+- 뷰 5개: question_review, understanding, verification, _find_discrepancies,
+  _create_check_questions (137줄).
+- URL 3개(understanding, question_review, verification). urls.py의 name 22개 → 19개.
+- 템플릿 3개: understanding.html, question_review.html, verification.html.
+- quiz_status.py 전체(130줄). 팀 홈 배지가 PR #40에서 decision_status로 넘어가면서
+  question_review 하나만 쓰고 있었다.
+- services.py의 퀴즈 전용 4개: FAKE_CHECK_QUESTIONS, _parse_mcq_json,
+  generate_check_questions, generate_check_questions_from_text.
+
+남긴 것과 이유 (이름이 비슷해 같이 지워지기 쉬운 것들):
+- answers 뷰·URL·answers.html, inbox — 퀴즈가 아니라 익명 질문함(Question.answer)의
+  주최자 답변 화면이다. chat anon → answers → inbox 흐름이 그대로 동작하는지 회귀
+  테스트로 고정했다.
+- base.html의 .pending-badge / .pending-clear / .item-actions CSS — 결정 확인 배지가
+  지금 쓰고 있다. 주석의 "확인 퀴즈"만 "결정 확인"으로 바꿨고 선언은 손대지 않았다.
+- services._generate_clean, _normalize_for_match, _enabled 세 개는 decision_compiler.py가
+  직접 호출하고, _is_korean_or_english 는 _generate_clean 내부에서 쓰여 함께 남겼다.
+  decision_compiler 상단 의존 메모에 "퀴즈 삭제
+  때도 이 셋은 그래서 남겼다"를 적어 뒀다.
+
+테스트: 372개 → 325개.
+- 삭제된 퀴즈 테스트 52개 / 남은 테스트 320개 / 추가한 회귀 5개 = 325개.
+- 클래스 통째로 삭제 26개: DiscrepancyTests 5, QuestionTimingTests 7,
+  QuizPendingTests 10, PartialAnswerNoticeTests 4.
+- 메서드 단위 삭제 26개: PrototypeFlowTests 11, LocalLLMTests 9,
+  LanguageFilterTests 1, DesignAlignmentTests 1, FollowupTests 3, DecisionModelTests 1.
+- 퀴즈와 무관한 테스트는 하나도 줄지 않았다. 퀴즈 생성 함수를 '도구'로만 쓰던 테스트
+  7개는 삭제하지 않고 떼어냈다. 특히 _generate_clean 의 재시도 1회/포기 경로를 고정하던
+  LanguageFilterTests 2개는 generate_check_questions 대신 summarize 경유로 옮겼다 —
+  결정 컴파일러가 쓰는 공용 경로라 커버리지가 조용히 사라지면 안 된다.
+- 추가한 회귀 5개: 옛 퀴즈 경로가 404인지, 퀴즈 URL name이 더는 resolve되지 않는지,
+  익명 질문함이 그대로 동작하는지, 퀴즈 모델·테이블이 없는지, Meeting에서 필드가 빠진
+  뒤에도 tasks.refresh_meeting 이 쓰는 update_fields 조합이 FieldError 없이 저장되는지.
+- 옛 퀴즈 경로 테스트는 처음에 "/meetings/<id>/understanding/"을 하드코딩했다가 퀴즈가
+  살아 있는 상태에서도 404가 나와 엉뚱한 이유로 통과했다. 앱 URL이 setting/urls.py에서
+  meetalign/ 아래 마운트되기 때문이다. reverse("meeting_detail")에서 접두사를 파생시키도록
+  고쳐 "200 != 404"로 제대로 실패하는 것을 확인한 뒤 삭제를 진행했다.
+
+문서: README 3곳, 사양서 간략판 12곳, 상세판 21곳, signup.html 1곳에서 퀴즈 서술을
+결정 명세·결정 확인 기준으로 바꿨다("이해도 확인 문제/퀴즈" → "결정 명세",
+"불일치 탐지/검증 결과" → "결정 확인", 결정 컴파일러 문맥의 "주최자" → "진행자").
+상세판 URL 표는 퀴즈 3행을 빼고 결정 컴파일러 3행을 넣어 "URL 19개" 문구를 실제와 맞췄고,
+테스트 수와 클래스별 표는 실측 325개 기준으로 갱신했다.
+엇갈린 답변(verification)은 결정 확인의 '제 이해와 달랐어요' 익명 집계로 대체됨 (PR #38, #40).
+
+
 알려진 이슈
 ----------------------
+- 사양서 상세판 5장 모델 표는 공통 모델 6개만 상세히 적고, 결정 컴파일러 모델 4개
+  (Decision, Interpretation, DecisionAgreement, Checkpoint)는 1장 용어와 4장 F7~F10으로
+  미룬다. 퀴즈 2행을 빼면서 "모델 10개"와 마이그레이션 범위(0001~0021)는 실제와 맞췄지만,
+  4개를 표에 상세히 추가하는 것은 퀴즈 삭제 범위를 넘어서므로 향후 과제로 남겼다.
 - 팀 홈 배지는 숫자만 담지만, 팀원이 3명(진행자 + 2명)인 회의에서는 내가 확인을 마친 뒤
   배지에 1이 남으면 나머지 한 명이 아직 안 했다는 뜻이 된다. 퀴즈 배지도 같은 성질이었고
   "숫자만, 이름 없음" 기준은 지키고 있어 그대로 뒀다. 어떤 선택을 했는지는 새지 않는다.
 - 응답 대상 팀원이 1명뿐인 회의에서는 항목별 집계의 익명성이 성립하지 않는다. '전원 응답'이
   곧 그 한 명의 응답이라, 숫자가 공개되는 순간 그 사람의 선택이 그대로 드러난다. 전원 응답
   게이트는 응답자가 여럿일 때를 지키는 장치이고, 1인 팀은 구조적으로 가릴 수 없다.
-- question_review(퀴즈)의 미완료 참가자 명단도 host가 비어 있으면 팀원 누구에게나 보인다
-  — 결정 확인 쪽은 이번에 막았지만 퀴즈 쪽은 범위 밖이라 손대지 않았다. 퀴즈를 정리할 때
-  함께 처리한다.
-- 이해도 검증 결과 화면(verification, 3.6)은 진행자 전용이 아니라 팀원 누구나 볼 수
-  있고, 지금도 다른 팀원의 이름 + 그 사람이 고른 보기 + 정답/오답 배지를 그대로
-  보여준다. 위 (B)에서 세운 "이름은 완료 여부에만 연결한다"는 기준과 어긋나므로
-  팀에서 따로 정해야 한다(이번 작업에서는 기존 통계 방식을 그대로 두라는 결정에 따라
-  건드리지 않았다).
+- (해결 — 퀴즈 삭제로 해결) question_review(퀴즈)의 미완료 참가자 명단도 host가 비어
+  있으면 팀원 누구에게나 보인다 — 결정 확인 쪽은 PR #40에서 막았지만 퀴즈 쪽은 범위
+  밖이라 손대지 않았던 건이다. 화면과 집계 모듈(quiz_status.py)이 함께 사라져 노출
+  경로 자체가 없어졌다. 단, host가 빈 옛 회의에서 팀원 누구나 진행자 기능을 쓸 수
+  있다는 성질은 결정 확인 쪽에 그대로 남아 있다(사양서 상세판 12장 참고).
+- (해결 — 퀴즈 삭제로 해결) 이해도 검증 결과 화면(verification, 3.6)은 진행자 전용이
+  아니라 팀원 누구나 볼 수 있고, 다른 팀원의 이름 + 그 사람이 고른 보기 + 정답/오답
+  배지를 그대로 보여줬다. (B)에서 세운 "이름은 완료 여부에만 연결한다" 기준과 어긋나
+  팀 결정을 기다리던 건인데, 화면이 삭제되어 해소됐다. 같은 목적은 결정 확인의
+  '제 이해와 달랐어요' 익명 집계가 대신하며, 그쪽은 누가 골랐는지를 어느 화면에도
+  내보내지 않고 대상자 전원이 응답한 뒤에만 항목별 수를 공개한다.
   (해결) 추적되지 않던 APL_04/meetalign/services/ 와 빈 APL_04/static/vendor/ 는 지워졌다.
   둘 다 git에 추적된 적이 없고(git ls-files에 없음) 지금은 디스크에도 없다. services/ 안의
   __pycache__는 .gitignore가 이미 덮고 있어 다시 생겨도 커밋되지 않으며, static/ 은 settings의

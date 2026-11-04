@@ -12,12 +12,12 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, connection, transaction
 from django.test import Client, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
-from django.urls import reverse
+from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 
-from . import decision_compiler, decision_status, quiz_status, services, tasks, views, whisper_worker
+from . import decision_compiler, decision_status, services, tasks, views, whisper_worker
 from .models import (
-    Answer, ChatMessage, CheckQuestion, Checkpoint, Decision, DecisionAgreement,
+    ChatMessage, Checkpoint, Decision, DecisionAgreement,
     Interpretation, Meeting, Question, Recording, SttUsage, Team,
 )
 
@@ -122,7 +122,7 @@ class PrototypeFlowTests(TestCase):
         for name in ["meeting_list", "meeting_create"]:
             self.assertEqual(self.client.get(reverse(name, args=[self.team.id])).status_code, 200)
         for name in ["meeting_detail", "meeting_result", "chat", "inbox",
-                     "summary", "answers", "understanding"]:
+                     "summary", "answers"]:
             self.assertEqual(self.client.get(reverse(name, args=[self.meeting.id])).status_code, 200, name)
 
     def test_submit_and_end(self):
@@ -133,6 +133,27 @@ class PrototypeFlowTests(TestCase):
         self.meeting.refresh_from_db()
         self.assertTrue(self.meeting.ended)
 
+    def test_old_quiz_urls_are_gone(self):
+        # 앱 URL은 setting/urls.py에서 meetalign/ 아래 마운트된다. 접두사를 하드코딩하면
+        # 경로가 틀려도 404가 나와 테스트가 엉뚱한 이유로 통과하므로 reverse에서 파생시킨다.
+        base = reverse("meeting_detail", args=[self.meeting.id])
+        for suffix in ("understanding/", "questions/review/", "verification/"):
+            r = self.client.get(base + suffix)
+            self.assertEqual(r.status_code, 404, suffix)
+
+    def test_quiz_url_names_no_longer_resolve(self):
+        for name in ("understanding", "question_review", "verification"):
+            with self.assertRaises(NoReverseMatch, msg=name):
+                reverse(name, args=[self.meeting.id])
+
+    def test_anonymous_question_flow_survives_quiz_removal(self):
+        self.client.post(reverse("chat", args=[self.meeting.id]), {"mode": "anon", "text": "질문입니다"})
+        q = Question.objects.get(meeting=self.meeting)
+        self.client.post(reverse("answers", args=[self.meeting.id]), {"question_id": q.id, "answer": "답변입니다"})
+        q.refresh_from_db()
+        self.assertEqual(q.answer, "답변입니다")
+        self.assertContains(self.client.get(reverse("inbox", args=[self.meeting.id])), "답변입니다")
+
     def test_non_host_stays_on_the_meeting_after_end(self):
         other = User.objects.create_user("b", password="pw12345!")
         self.team.members.add(other)
@@ -140,13 +161,6 @@ class PrototypeFlowTests(TestCase):
         member.force_login(other)
         url = reverse("meeting_detail", args=[self.meeting.id])
         self.assertRedirects(member.post(url, {"action": "end"}), url)
-
-    def test_meeting_screen_has_no_quiz_entry(self):
-        Meeting.objects.filter(pk=self.meeting.pk).update(ended=True)
-        r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
-        for name in ("question_review", "understanding"):
-            self.assertNotContains(r, reverse(name, args=[self.meeting.id]), msg_prefix=name)
-        self.assertNotContains(r, "이해도 검증")
 
     @override_settings(MEDIA_ROOT=tempfile.mkdtemp())
     def test_recording_upload_is_saved(self):
@@ -214,106 +228,9 @@ class PrototypeFlowTests(TestCase):
 
     def test_sub_screens_have_back_to_meeting_link(self):
         back = 'href="%s"' % reverse("meeting_detail", args=[self.meeting.id])
-        for name in ["meeting_result", "chat", "inbox", "summary", "answers", "understanding"]:
+        for name in ["meeting_result", "chat", "inbox", "summary", "answers"]:
             r = self.client.get(reverse(name, args=[self.meeting.id]))
             self.assertContains(r, back, msg_prefix=name)
-
-    def test_question_review_creates_draft_questions_once(self):
-        self.client.get(reverse("question_review", args=[self.meeting.id]))
-        self.client.get(reverse("question_review", args=[self.meeting.id]))
-        self.assertEqual(CheckQuestion.objects.filter(meeting=self.meeting).count(), 2)
-        self.assertTrue(all(q.status == CheckQuestion.STATUS_DRAFT for q in CheckQuestion.objects.filter(meeting=self.meeting)))
-
-    def test_questions_hidden_from_participants_until_published(self):
-        self.client.get(reverse("question_review", args=[self.meeting.id]))
-        r = self.client.get(reverse("understanding", args=[self.meeting.id]))
-        self.assertContains(r, "아직 질문이 공개되지 않았습니다")
-
-    def test_publish_makes_questions_visible_to_participants(self):
-        self.client.get(reverse("question_review", args=[self.meeting.id]))
-        self.client.post(reverse("question_review", args=[self.meeting.id]), {"action": "publish"})
-        q = CheckQuestion.objects.filter(meeting=self.meeting).first()
-        self.assertEqual(q.status, CheckQuestion.STATUS_PUBLISHED)
-        r = self.client.get(reverse("understanding", args=[self.meeting.id]))
-        self.assertContains(r, q.text)
-
-    def test_host_can_edit_question_before_publishing(self):
-        self.client.get(reverse("question_review", args=[self.meeting.id]))
-        q = CheckQuestion.objects.filter(meeting=self.meeting).first()
-        self.client.post(reverse("question_review", args=[self.meeting.id]), {
-            "text_%d" % q.id: "수정된 문항", "evidence_%d" % q.id: "근거",
-            "choice_%d_0" % q.id: "보기1", "choice_%d_1" % q.id: "보기2",
-            "choice_%d_2" % q.id: "보기3", "choice_%d_3" % q.id: "보기4",
-            "correct_choice_%d" % q.id: "2",
-        })
-        q.refresh_from_db()
-        self.assertEqual(q.text, "수정된 문항")
-        self.assertEqual(q.choices, ["보기1", "보기2", "보기3", "보기4"])
-        self.assertEqual(q.correct_choice, 2)
-        self.assertEqual(q.status, CheckQuestion.STATUS_DRAFT)
-
-    def test_host_can_edit_all_questions_in_one_submit(self):
-        self.client.get(reverse("question_review", args=[self.meeting.id]))
-        questions = list(CheckQuestion.objects.filter(meeting=self.meeting))
-        self.assertGreaterEqual(len(questions), 2)
-        data = {}
-        for i, q in enumerate(questions):
-            data["text_%d" % q.id] = "수정된 문항%d" % i
-            data["evidence_%d" % q.id] = ""
-            for j in range(4):
-                data["choice_%d_%d" % (q.id, j)] = "보기%d" % j
-            data["correct_choice_%d" % q.id] = "1"
-        self.client.post(reverse("question_review", args=[self.meeting.id]), data)
-        for i, q in enumerate(questions):
-            q.refresh_from_db()
-            self.assertEqual(q.text, "수정된 문항%d" % i)
-            self.assertEqual(q.correct_choice, 1)
-
-    def _published_question(self, choices=None, correct_choice=0):
-        return CheckQuestion.objects.create(
-            meeting=self.meeting, text="Q", choices=choices or ["맞음", "틀림1", "틀림2", "틀림3"],
-            correct_choice=correct_choice, status=CheckQuestion.STATUS_PUBLISHED,
-        )
-
-    def test_understanding_saves_and_prefills_answer(self):
-        q = self._published_question()
-        self.client.post(reverse("understanding", args=[self.meeting.id]), {"q%d" % q.id: "0"})
-        self.assertEqual(Answer.objects.get(question=q, user=self.user).selected_choice, 0)
-        r = self.client.get(reverse("understanding", args=[self.meeting.id]))
-        self.assertContains(r, "checked")
-
-    def test_understanding_resubmit_updates_not_duplicates(self):
-        q = self._published_question()
-        self.client.post(reverse("understanding", args=[self.meeting.id]), {"q%d" % q.id: "0"})
-        self.client.post(reverse("understanding", args=[self.meeting.id]), {"q%d" % q.id: "1"})
-        self.assertEqual(Answer.objects.filter(question=q, user=self.user).count(), 1)
-        self.assertEqual(Answer.objects.get(question=q, user=self.user).selected_choice, 1)
-
-    def test_same_question_can_hold_different_users_answers(self):
-        # 핵심 검증: 같은 질문에 팀원마다 답이 따로 저장돼야 이해도 비교가 가능하다.
-        other = User.objects.create_user("b")
-        question = self._published_question()
-        Answer.objects.create(question=question, user=self.user, selected_choice=0)
-        Answer.objects.create(question=question, user=other, selected_choice=1)
-        self.assertEqual(question.answers.count(), 2)
-
-    def test_discrepancy_flagged_when_someone_picks_wrong_answer(self):
-        other = User.objects.create_user("b")
-        question = self._published_question()
-        Answer.objects.create(question=question, user=self.user, selected_choice=0)
-        Answer.objects.create(question=question, user=other, selected_choice=1)
-        r = self.client.get(reverse("verification", args=[self.meeting.id]))
-        self.assertContains(r, "a: 맞음")
-        self.assertContains(r, "b: 틀림1")
-        self.assertNotContains(r, "엇갈린 답변이 없습니다.")
-
-    def test_no_discrepancy_when_everyone_picks_correct_answer(self):
-        other = User.objects.create_user("b")
-        question = self._published_question()
-        Answer.objects.create(question=question, user=self.user, selected_choice=0)
-        Answer.objects.create(question=question, user=other, selected_choice=0)
-        r = self.client.get(reverse("verification", args=[self.meeting.id]))
-        self.assertContains(r, "엇갈린 답변이 없습니다.")
 
     def test_d1_banner_shown_when_deadline_is_tomorrow(self):
         self.meeting.deadline = timezone.localdate() + timedelta(days=1)
@@ -436,7 +353,6 @@ class LocalLLMTests(TestCase):
     def test_disabled_without_model_env_keeps_fake_behavior(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertIn("(가짜 LLM 응답)", services.chat_reply(self.meeting, "q"))
-            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
 
     def test_chat_reply_sends_record_as_context(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="A안입니다") as gen:
@@ -458,81 +374,9 @@ class LocalLLMTests(TestCase):
             services.chat_reply(self.meeting, "q")
         self.assertNotIn("이전 대화", gen.call_args[0][0])
 
-    def _mcq_json(self, n=2):
-        items = [
-            {"question": "질문%d" % i, "choices": ["a", "b", "c", "d"], "answer_index": i % 4, "evidence": ""}
-            for i in range(n)
-        ]
-        return json.dumps(items, ensure_ascii=False)
-
-    def test_generate_check_questions_parses_llm_json(self):
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=self._mcq_json(2)):
-            result = services.generate_check_questions(self.meeting)
-        self.assertEqual(len(result), 2)
-        self.assertEqual(result[0]["text"], "질문0")
-        self.assertEqual(result[0]["choices"], ["a", "b", "c", "d"])
-        self.assertEqual(result[0]["correct_choice"], 0)
-        self.assertEqual(result[0]["evidence"], "")
-
-    def test_generate_check_questions_caps_at_five(self):
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=self._mcq_json(8)):
-            result = services.generate_check_questions(self.meeting)
-        self.assertEqual(len(result), 5)
-
     def test_llm_failure_falls_back(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", side_effect=OSError("down")):
             self.assertIn("LLM 연결 실패", services.chat_reply(self.meeting, "q"))
-            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
-
-    def test_no_transcript_uses_fake_even_when_enabled(self):
-        self.meeting.transcript = ""
-        self.meeting.save()
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate") as gen:
-            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
-        gen.assert_not_called()
-
-    def test_malformed_json_falls_back_to_fake(self):
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="이건 JSON이 아닙니다"):
-            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
-
-    def test_parse_mcq_json_drops_malformed_items_but_keeps_valid_ones(self):
-        raw = json.dumps([
-            {"question": "좋은 질문", "choices": ["a", "b", "c", "d"], "answer_index": 1, "evidence": "e"},
-            {"question": "보기 3개뿐", "choices": ["a", "b", "c"], "answer_index": 0},
-            {"question": "범위 밖 정답", "choices": ["a", "b", "c", "d"], "answer_index": 9},
-            {"question": "", "choices": ["a", "b", "c", "d"], "answer_index": 0},
-        ], ensure_ascii=False)
-        result = services._parse_mcq_json(raw)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["text"], "좋은 질문")
-
-    def test_parse_mcq_json_drops_items_with_duplicate_choices(self):
-        raw = json.dumps([
-            {"question": "보기 중복", "choices": ["같은 문장입니다.", "같은 문장입니다.", "다른 보기", "같은 문장입니다."], "answer_index": 0, "evidence": ""},
-            {"question": "보기 전부 다름", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""},
-        ], ensure_ascii=False)
-        result = services._parse_mcq_json(raw)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["text"], "보기 전부 다름")
-
-    def test_parse_mcq_json_extracts_array_even_with_surrounding_prose(self):
-        raw = "물론입니다! 요청하신 문제는 다음과 같습니다:\n```json\n%s\n```\n참고하세요." % self._mcq_json(1)
-        result = services._parse_mcq_json(raw)
-        self.assertEqual(len(result), 1)
-
-    def test_parse_mcq_json_drops_items_with_hallucinated_evidence(self):
-        raw = json.dumps([
-            {"question": "진짜 근거", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": "A안으로 진행하기로"},
-            {"question": "지어낸 근거", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": "전사본에 없는 문장"},
-        ], ensure_ascii=False)
-        result = services._parse_mcq_json(raw, source_text="오늘 회의에서 A안으로 진행하기로 결정했습니다.")
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["text"], "진짜 근거")
-
-    def test_generate_check_questions_uses_transcript_not_record_as_source(self):
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=self._mcq_json(1)) as gen:
-            services.generate_check_questions(self.meeting)
-        self.assertIn(self.meeting.transcript, gen.call_args[0][0])
 
 
 class LanguageFilterTests(TestCase):
@@ -552,11 +396,6 @@ class LanguageFilterTests(TestCase):
         self.assertFalse(services._is_korean_or_english("这是中文"))
         self.assertFalse(services._is_korean_or_english("これは日本語です"))
 
-    def test_check_questions_rejects_mixed_language_output(self):
-        garbled = "IPv6的地址空间更大吗？这是一个问题です"
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=garbled):
-            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
-
     def test_summarize_rejects_mixed_language_output(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="这是总结"):
             self.assertEqual(services.summarize("원문"), "원문")
@@ -566,20 +405,18 @@ class LanguageFilterTests(TestCase):
             self.assertIn("언어 오류", services.chat_reply(self.meeting, "q"))
 
     def test_retries_once_then_succeeds_on_clean_output(self):
-        clean = json.dumps([{"question": "질문1", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""}], ensure_ascii=False)
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(
-            services, "_generate", side_effect=["这是中文", clean]
+            services, "_generate", side_effect=["这是中文", "정상 요약문"]
         ) as gen:
-            result = services.generate_check_questions(self.meeting)
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["text"], "질문1")
+            result = services.summarize("원문")
+        self.assertEqual(result, "정상 요약문")
         self.assertEqual(gen.call_count, 2)
 
     def test_gives_up_after_one_retry_still_garbled(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(
             services, "_generate", return_value="这是中文"
         ) as gen:
-            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
+            self.assertEqual(services.summarize("원문"), "원문")
         self.assertEqual(gen.call_count, 2)
 
 
@@ -1170,150 +1007,6 @@ class MeetingSummaryTests(TestCase):
         self.assertContains(r, "전사 원문 내용")
 
 
-class DiscrepancyTests(TestCase):
-    def setUp(self):
-        self.user = User.objects.create_user("a", password="pw12345!")
-        self.other = User.objects.create_user("b", password="pw12345!")
-        self.client.force_login(self.user)
-        self.team = Team.objects.create(name="t")
-        self.team.members.add(self.user, self.other)
-        self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.user, record="결정: 로그인은 이메일만")
-        self.question = CheckQuestion.objects.create(
-            meeting=self.meeting, text="로그인 범위는?",
-            choices=["이메일만", "이메일+소셜", "소셜만", "모름"], correct_choice=0,
-            evidence="로그인은 이메일만 지원한다", status=CheckQuestion.STATUS_PUBLISHED,
-        )
-
-    def _answer(self, a, b):
-        Answer.objects.create(question=self.question, user=self.user, selected_choice=a)
-        Answer.objects.create(question=self.question, user=self.other, selected_choice=b)
-
-    def test_identical_correct_answers_show_no_discrepancy(self):
-        self._answer(0, 0)
-        r = self.client.get(reverse("verification", args=[self.meeting.id]))
-        self.assertContains(r, "엇갈린 답변이 없습니다.")
-
-    def test_wrong_answer_flagged_as_discrepancy(self):
-        self._answer(0, 1)
-        r = self.client.get(reverse("verification", args=[self.meeting.id]))
-        self.assertNotContains(r, "엇갈린 답변이 없습니다.")
-        self.assertContains(r, "a: 이메일만")
-        self.assertContains(r, "b: 이메일+소셜")
-
-    def test_progress_bar_shows_answer_completion(self):
-        Answer.objects.create(question=self.question, user=self.user, selected_choice=0)
-        r = self.client.get(reverse("verification", args=[self.meeting.id]))
-        self.assertEqual(r.context["answered_slots"], 1)
-        self.assertEqual(r.context["total_slots"], 2)
-        self.assertEqual(r.context["progress_pct"], 50)
-        self.assertContains(r, "1 / 2")
-
-    def test_view_shows_evidence_for_discrepancy(self):
-        self._answer(0, 1)
-        r = self.client.get(reverse("verification", args=[self.meeting.id]))
-        self.assertContains(r, "로그인은 이메일만 지원한다")
-
-    def test_draft_questions_are_not_counted_in_verification(self):
-        self.question.status = CheckQuestion.STATUS_DRAFT
-        self.question.save()
-        r = self.client.get(reverse("verification", args=[self.meeting.id]))
-        self.assertEqual(r.context["total_slots"], 0)
-
-
-class QuestionTimingTests(TestCase):
-    def setUp(self):
-        self.user = User.objects.create_user("a", password="pw12345!")
-        self.client.force_login(self.user)
-        self.team = Team.objects.create(name="t")
-        self.team.members.add(self.user)
-        self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.user)
-
-    def test_no_questions_are_created_before_transcript_exists(self):
-        r = self.client.get(reverse("question_review", args=[self.meeting.id]))
-        self.assertEqual(CheckQuestion.objects.filter(meeting=self.meeting).count(), 0)
-        self.assertContains(r, "아직 문제가 없습니다")
-
-    def test_questions_are_created_once_transcript_exists(self):
-        self.meeting.transcript = "오늘 회의에서 A안으로 진행하기로 결정했습니다."
-        self.meeting.save()
-        raw = json.dumps([
-            {"question": "질문1", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""},
-            {"question": "질문2", "choices": ["a", "b", "c", "d"], "answer_index": 1, "evidence": ""},
-        ], ensure_ascii=False)
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=raw):
-            self.client.get(reverse("question_review", args=[self.meeting.id]))
-            self.client.get(reverse("question_review", args=[self.meeting.id]))
-        self.assertEqual(list(CheckQuestion.objects.filter(meeting=self.meeting).values_list("text", flat=True)), ["질문1", "질문2"])
-
-    def test_no_new_transcript_banner_right_after_initial_generation(self):
-        self.meeting.transcript = "오늘 회의에서 A안으로 진행하기로 결정했습니다."
-        self.meeting.save()
-        raw = json.dumps([{"question": "질문1", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""}], ensure_ascii=False)
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=raw):
-            self.client.get(reverse("question_review", args=[self.meeting.id]))
-        r = self.client.get(reverse("question_review", args=[self.meeting.id]))
-        self.assertNotContains(r, "추가 질문 생성")
-
-    def test_new_transcript_after_additional_recording_shows_banner(self):
-        self.meeting.transcript = "오늘 회의에서 A안으로 진행하기로 결정했습니다."
-        self.meeting.save()
-        raw = json.dumps([{"question": "질문1", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""}], ensure_ascii=False)
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=raw):
-            self.client.get(reverse("question_review", args=[self.meeting.id]))
-        self.meeting.refresh_from_db()
-        self.meeting.transcript += " 추가로 녹음된 내용입니다."
-        self.meeting.save()
-        r = self.client.get(reverse("question_review", args=[self.meeting.id]))
-        self.assertContains(r, "추가 질문 생성")
-
-    def test_generate_more_only_passes_new_transcript_portion(self):
-        self.meeting.transcript = "원본 내용입니다."
-        self.meeting.check_questions_transcript = "원본 내용입니다."
-        self.meeting.save()
-        CheckQuestion.objects.create(
-            meeting=self.meeting, text="기존질문", choices=["a", "b", "c", "d"], correct_choice=0, batch=0, order=0,
-        )
-        self.meeting.transcript = "원본 내용입니다. 추가된 내용입니다."
-        self.meeting.save()
-        with patch.object(services, "generate_check_questions_from_text", return_value=[]) as gen:
-            self.client.post(reverse("question_review", args=[self.meeting.id]), {"action": "generate_more"})
-        gen.assert_called_once_with("추가된 내용입니다.")
-
-    def test_generate_more_creates_new_batch_without_touching_existing(self):
-        self.meeting.transcript = "원본 내용입니다."
-        self.meeting.save()
-        raw1 = json.dumps([{"question": "질문1", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""}], ensure_ascii=False)
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=raw1):
-            self.client.get(reverse("question_review", args=[self.meeting.id]))
-
-        self.meeting.refresh_from_db()
-        self.meeting.transcript += " 추가 녹음 내용입니다."
-        self.meeting.save()
-
-        raw2 = json.dumps([{"question": "질문2", "choices": ["a", "b", "c", "d"], "answer_index": 1, "evidence": ""}], ensure_ascii=False)
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=raw2):
-            self.client.post(reverse("question_review", args=[self.meeting.id]), {"action": "generate_more"})
-
-        q1 = CheckQuestion.objects.get(text="질문1")
-        q2 = CheckQuestion.objects.get(text="질문2")
-        self.assertEqual(q1.batch, 0)
-        self.assertEqual(q2.batch, 1)
-
-    def test_understanding_page_groups_questions_by_batch(self):
-        self.meeting.transcript = "원본 내용입니다."
-        self.meeting.save()
-        CheckQuestion.objects.create(
-            meeting=self.meeting, text="최초질문", choices=["a", "b", "c", "d"], correct_choice=0,
-            batch=0, order=0, status=CheckQuestion.STATUS_PUBLISHED,
-        )
-        CheckQuestion.objects.create(
-            meeting=self.meeting, text="추가질문", choices=["a", "b", "c", "d"], correct_choice=0,
-            batch=1, order=0, status=CheckQuestion.STATUS_PUBLISHED,
-        )
-        r = self.client.get(reverse("understanding", args=[self.meeting.id]))
-        self.assertContains(r, "추가 질문 1차")
-
-
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(), BACKGROUND_RECORDING=False)
 class BackgroundProcessingTests(TestCase):
     def setUp(self):
@@ -1445,7 +1138,6 @@ class BackgroundProcessingTests(TestCase):
         with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
                 patch("urllib.request.urlopen", side_effect=error), patch.object(services.time, "sleep"):
             self.assertIn("LLM 연결 실패", services.chat_reply(self.meeting, "q"))
-            self.assertEqual(services.generate_check_questions(self.meeting), services.FAKE_CHECK_QUESTIONS)
 
     def test_gemini_retries_transient_error_then_succeeds(self):
         import urllib.error
@@ -1608,12 +1300,6 @@ class DesignAlignmentTests(TestCase):
         self.team.members.add(self.user)
         self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.user, record="결정: A안")
 
-    def test_verification_page_is_separate_from_answer_page(self):
-        r = self.client.get(reverse("understanding", args=[self.meeting.id]))
-        self.assertNotContains(r, "엇갈린 답변이 없습니다.")
-        self.assertContains(r, reverse("verification", args=[self.meeting.id]))
-        self.assertEqual(self.client.get(reverse("verification", args=[self.meeting.id])).status_code, 200)
-
     def test_record_download_returns_text_for_members(self):
         r = self.client.get(reverse("record_file", args=[self.meeting.id]))
         self.assertEqual(r.status_code, 200)
@@ -1660,37 +1346,13 @@ class FollowupTests(TestCase):
         self.team.members.add(self.user, self.other)
         self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.user, record="결정: A안")
 
-    def test_duplicate_check_question_order_is_rejected_by_db(self):
-        CheckQuestion.objects.create(meeting=self.meeting, text="q1", order=0)
-        with self.assertRaises(IntegrityError), transaction.atomic():
-            CheckQuestion.objects.create(meeting=self.meeting, text="q2", order=0)
-
-    def test_question_review_does_not_duplicate_existing_questions(self):
-        CheckQuestion.objects.create(meeting=self.meeting, text="기존", order=0)
-        raw = json.dumps([{"question": "새1", "choices": ["a", "b", "c", "d"], "answer_index": 0, "evidence": ""}], ensure_ascii=False)
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=raw):
-            self.client.get(reverse("question_review", args=[self.meeting.id]))
-        self.assertEqual(CheckQuestion.objects.filter(meeting=self.meeting, order=0).count(), 1)
-
-    def _published_question(self, text="Q", order=0):
-        return CheckQuestion.objects.create(
-            meeting=self.meeting, text=text, order=order,
-            choices=["a", "b", "c", "d"], correct_choice=0, status=CheckQuestion.STATUS_PUBLISHED,
-        )
-
-    def test_verification_lists_members_who_have_not_answered(self):
-        question = self._published_question()
-        Answer.objects.create(question=question, user=self.user, selected_choice=0)
-        r = self.client.get(reverse("verification", args=[self.meeting.id]))
-        self.assertContains(r, "아직 답하지 않은 팀원")
-        self.assertContains(r, "b")
-
     def test_second_upload_keeps_the_first_recording(self):
         self.client.post(reverse("meeting_detail", args=[self.meeting.id]), {"action": "submit", "recording": SimpleUploadedFile("a.wav", b"RIFF1")})
         self.client.post(reverse("meeting_detail", args=[self.meeting.id]), {"action": "submit", "recording": SimpleUploadedFile("b.wav", b"RIFF2")})
         recs = list(Recording.objects.filter(meeting=self.meeting))
         self.assertEqual(len(recs), 2)
         self.assertTrue(all(os.path.exists(r.file.path) for r in recs))
+
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(), BACKGROUND_RECORDING=False)
 class MultipleRecordingsTests(TestCase):
@@ -1783,201 +1445,6 @@ class DeleteTests(TestCase):
         client.force_login(self.other)
         r = client.get(reverse("meeting_detail", args=[self.meeting.id]))
         self.assertNotContains(r, "회의 삭제")
-
-
-class QuizPendingTests(TestCase):
-    """확인 퀴즈 미완료 인원 배지(팀 홈, 숫자만)와 미완료 참가자 명단(진행자 전용)."""
-
-    def setUp(self):
-        self.host = User.objects.create_user("quizhost", password="pw12345!")
-        self.alpha = User.objects.create_user("memb-alpha", password="pw12345!")
-        self.beta = User.objects.create_user("memb-beta", password="pw12345!")
-        self.gamma = User.objects.create_user("memb-gamma", password="pw12345!")
-        self.team = Team.objects.create(name="t", created_by=self.host)
-        self.team.members.add(self.host, self.alpha, self.beta, self.gamma)
-        self.meeting = Meeting.objects.create(
-            team=self.team, title="m", host=self.host, record="회의록", transcript="전사본",
-        )
-        self.q1 = self._question(order=0)
-        self.q2 = self._question(order=1)
-        self.client.force_login(self.host)
-
-    def _question(self, order, batch=0, status=CheckQuestion.STATUS_PUBLISHED):
-        return CheckQuestion.objects.create(
-            meeting=self.meeting, text="문항 %d-%d" % (batch, order),
-            choices=["보기1", "보기2", "보기3", "보기4"], correct_choice=0,
-            evidence="근거", status=status, order=order, batch=batch,
-        )
-
-    def _solve(self, user, questions, selected=0):
-        for question in questions:
-            Answer.objects.update_or_create(question=question, user=user, defaults={"selected_choice": selected})
-
-    def _home(self, user=None):
-        client = self.client
-        if user is not None:
-            client = Client()
-            client.force_login(user)
-        return client.get(reverse("meeting_list", args=[self.team.id]))
-
-    def _review(self):
-        return self.client.get(reverse("question_review", args=[self.meeting.id]))
-
-    def _quiz_pending(self):
-        """팀 홈 배지는 결정 확인 기준으로 바뀌었으므로, 퀴즈 집계는 함수로 직접 본다."""
-        return quiz_status.pending_count_for_meetings([self.meeting])[self.meeting.id]
-
-    def test_unpublished_quiz_shows_no_host_section(self):
-        self.meeting.check_questions.update(status=CheckQuestion.STATUS_DRAFT)
-        self.assertIsNone(self._quiz_pending())
-        review = self._review()
-        self.assertFalse(review.context["quiz_open"])
-        self.assertNotContains(review, "아직 풀지 않은 참가자")
-
-    def test_review_lists_participants_who_have_not_finished(self):
-        self._solve(self.alpha, [self.q1, self.q2])
-        self.assertEqual(self._quiz_pending(), 2)
-        review = self._review()
-        self.assertContains(review, "3명 중 1명 완료")
-        self.assertContains(review, "memb-beta")
-        self.assertContains(review, "memb-gamma")
-        self.assertNotContains(review, "memb-alpha")
-
-    def test_badge_shows_99_plus_over_limit(self):
-        self.assertEqual(quiz_status.badge_text(99), "99")
-        self.assertEqual(quiz_status.badge_text(100), "99+")
-
-    def test_all_finished_shows_completion_markers(self):
-        for member in (self.alpha, self.beta, self.gamma):
-            self._solve(member, [self.q1, self.q2])
-        self.assertEqual(self._quiz_pending(), 0)
-        review = self._review()
-        self.assertContains(review, "3명 중 3명 완료")
-        self.assertContains(review, "모든 참가자가 퀴즈를 마쳤어요")
-
-    def test_host_is_excluded_from_the_count(self):
-        for member in (self.alpha, self.beta, self.gamma):
-            self._solve(member, [self.q1, self.q2])
-        # 진행자는 한 문항도 풀지 않았지만 독려 대상이 아니라서 집계에서 빠진다.
-        self.assertFalse(Answer.objects.filter(user=self.host).exists())
-        self.assertEqual(quiz_status.participant_count(self.meeting), 3)
-        self.assertEqual(self._quiz_pending(), 0)
-        self.assertEqual(self._review().context["pending_rows"], [])
-
-    def test_newly_published_question_makes_finished_participant_pending_again(self):
-        for member in (self.alpha, self.beta, self.gamma):
-            self._solve(member, [self.q1, self.q2])
-        self.assertEqual(self._quiz_pending(), 0)
-        # 녹음을 추가로 올려 다음 batch 문항이 공개된 상황 (PR #31)
-        extra = self._question(order=0, batch=1)
-        self.assertEqual(self._quiz_pending(), 3)
-        self._solve(self.alpha, [extra])
-        self.assertEqual(self._quiz_pending(), 2)
-        review = self._review()
-        self.assertContains(review, "2/3문항")
-        self.assertNotContains(review, "memb-alpha")
-
-    def test_participant_pages_contain_no_other_participant_names(self):
-        self._solve(self.alpha, [self.q1])
-        client = Client()
-        client.force_login(self.alpha)
-        for url in (
-            reverse("meeting_list", args=[self.team.id]),
-            reverse("meeting_detail", args=[self.meeting.id]),
-            reverse("understanding", args=[self.meeting.id]),
-        ):
-            response = client.get(url)
-            self.assertEqual(response.status_code, 200)
-            body = response.content.decode()
-            for name in ("memb-beta", "memb-gamma", "quizhost"):
-                self.assertNotIn(name, body, "%s 응답에 %s가 노출됨" % (url, name))
-
-    def test_participant_gets_403_on_host_screen(self):
-        client = Client()
-        client.force_login(self.alpha)
-        self.assertEqual(client.get(reverse("question_review", args=[self.meeting.id])).status_code, 403)
-
-    def test_host_screen_does_not_reveal_who_chose_what(self):
-        # 전부 오답으로 풀었어도 '완료'라서 명단에 안 나온다 — 이름은 완료 여부에만 연결된다.
-        self._solve(self.alpha, [self.q1, self.q2], selected=1)
-        review = self._review()
-        self.assertNotContains(review, "memb-alpha")
-        self.assertNotContains(review, "오답")
-        self.assertContains(review, "memb-beta")
-
-    def test_meeting_list_query_count_does_not_grow_with_meetings(self):
-        self._solve(self.alpha, [self.q1])
-        url = reverse("meeting_list", args=[self.team.id])
-        with CaptureQueriesContext(connection) as one_meeting:
-            self.assertEqual(self.client.get(url).status_code, 200)
-        for i in range(4):
-            extra = Meeting.objects.create(team=self.team, title="m%d" % i, host=self.host, transcript="전사본")
-            CheckQuestion.objects.create(
-                meeting=extra, text="q", choices=["1", "2", "3", "4"],
-                correct_choice=0, status=CheckQuestion.STATUS_PUBLISHED,
-            )
-        with CaptureQueriesContext(connection) as five_meetings:
-            response = self.client.get(url)
-        self.assertEqual(len(response.context["rows"]), 5)
-        self.assertEqual(len(five_meetings.captured_queries), len(one_meeting.captured_queries))
-
-
-class PartialAnswerNoticeTests(TestCase):
-    """부분 응답은 막지 않되, 몇 문항이 남았는지 당사자 화면에 알려준다."""
-
-    def setUp(self):
-        self.host = User.objects.create_user("quizhost", password="pw12345!")
-        self.member = User.objects.create_user("memb-alpha", password="pw12345!")
-        self.team = Team.objects.create(name="t", created_by=self.host)
-        self.team.members.add(self.host, self.member)
-        self.meeting = Meeting.objects.create(team=self.team, title="m", host=self.host, transcript="전사본")
-        self.questions = [
-            CheckQuestion.objects.create(
-                meeting=self.meeting, text="문항 %d" % order,
-                choices=["보기1", "보기2", "보기3", "보기4"], correct_choice=0,
-                status=CheckQuestion.STATUS_PUBLISHED, order=order,
-            )
-            for order in range(3)
-        ]
-        self.client.force_login(self.member)
-        self.url = reverse("understanding", args=[self.meeting.id])
-
-    def test_first_visit_shows_progress_but_no_unanswered_badges(self):
-        r = self.client.get(self.url)
-        self.assertContains(r, "3문항 중 0문항 답함")
-        # 아직 한 번도 답하지 않았으면 문항마다 '미응답'을 달지 않는다(시끄럽기만 함).
-        self.assertNotContains(r, "미응답")
-        self.assertNotContains(r, "남았습니다")
-
-    def test_partial_submit_warns_how_many_are_left(self):
-        # 3문항 중 1문항만 고르고 저장 — 뷰가 빈 문항을 건너뛰므로 그대로 저장된다.
-        self.client.post(self.url, {"q%d" % self.questions[0].id: "0"})
-        r = self.client.get(self.url)
-        self.assertContains(r, "3문항 중 1문항 답함")
-        self.assertContains(r, "아직 2문항이 남았습니다")
-        self.assertContains(r, "미응답")
-        self.assertEqual(r.context["remaining_count"], 2)
-        self.assertEqual(r.context["progress_pct"], 33)
-
-    def test_all_answered_shows_completion_line(self):
-        self.client.post(self.url, {"q%d" % q.id: "0" for q in self.questions})
-        r = self.client.get(self.url)
-        self.assertContains(r, "3문항 모두 답했습니다")
-        self.assertNotContains(r, "남았습니다")
-        self.assertNotContains(r, "미응답")
-        self.assertEqual(r.context["progress_pct"], 100)
-
-    def test_newly_published_batch_reopens_the_notice(self):
-        self.client.post(self.url, {"q%d" % q.id: "0" for q in self.questions})
-        self.assertContains(self.client.get(self.url), "3문항 모두 답했습니다")
-        # 녹음을 추가해 batch 1 문항이 공개되면, 잘못한 것 없이도 다시 미완료가 된다.
-        CheckQuestion.objects.create(
-            meeting=self.meeting, text="추가 문항", choices=["1", "2", "3", "4"],
-            correct_choice=0, status=CheckQuestion.STATUS_PUBLISHED, order=0, batch=1,
-        )
-        r = self.client.get(self.url)
-        self.assertContains(r, "4문항 중 3문항 답함")
-        self.assertContains(r, "아직 1문항이 남았습니다")
 
 
 def _spec(who="민수", what="배포 준비", due="금요일", done="스테이징 확인", state=Decision.CONFIRM_CONFIRMED):
@@ -2522,10 +1989,10 @@ class DecisionCarryoverTests(TestCase):
 
 
 class DecisionModelTests(TestCase):
-    """결정 컴파일러(실험 기능) 모델 테스트.
+    """결정 컴파일러 모델 테스트.
 
-    기존 CheckQuestion/Answer 테이블과 완전히 분리된 새 테이블이라는 것, 확인 기록이
-    (항목, 사용자)로 유일하면서 기존 Answer처럼 수정 가능하다는 것을 고정한다.
+    확인 기록이 (항목, 사용자)로 유일하면서 나중에 수정 가능하다는 것, 회의를 지우면
+    결정 트리 전체가 함께 사라진다는 것을 고정한다.
     """
 
     def setUp(self):
@@ -2650,7 +2117,7 @@ class DecisionModelTests(TestCase):
                 decision=decision, user=self.member, kind=DecisionAgreement.KIND_DIFFER,
             )
 
-    def test_an_agreement_can_be_changed_like_an_existing_quiz_answer(self):
+    def test_an_agreement_can_be_changed_after_it_is_saved(self):
         # 블라인드가 없어졌으므로 선택과 의견을 모두 바꿀 수 있다 — 집계는 항상 현재 선택 기준이다.
         decision = self._decision(status=Decision.STATUS_PUBLISHED, final_text="금요일까지")
         DecisionAgreement.objects.update_or_create(
@@ -2695,17 +2162,24 @@ class DecisionModelTests(TestCase):
         self.assertEqual(DecisionAgreement.objects.count(), 0)
         self.assertEqual(Checkpoint.objects.count(), 0)
 
-    def test_existing_quiz_tables_are_untouched_by_the_new_feature(self):
-        # 새 기능은 기존 퀴즈 흐름 옆에 추가만 한다 — 같은 회의에 둘이 공존해야 한다.
-        question = CheckQuestion.objects.create(
-            meeting=self.meeting, text="q", choices=["1", "2", "3", "4"],
-            correct_choice=0, status=CheckQuestion.STATUS_PUBLISHED, order=0,
-        )
-        Answer.objects.create(question=question, user=self.member, selected_choice=0)
-        self._decision()
-        self.assertEqual(self.meeting.check_questions.count(), 1)
-        self.assertEqual(self.meeting.decisions.count(), 1)
-        self.assertEqual(Answer.objects.filter(question=question).count(), 1)
+    def test_quiz_models_and_tables_are_gone(self):
+        from django.apps import apps
+        for name in ("CheckQuestion", "Answer"):
+            with self.assertRaises(LookupError, msg=name):
+                apps.get_model("meetalign", name)
+        names = connection.introspection.table_names()
+        self.assertNotIn("meetalign_checkquestion", names)
+        self.assertNotIn("meetalign_answer", names)
+
+    def test_meeting_has_no_quiz_transcript_field_and_still_saves(self):
+        # tasks.refresh_meeting이 쓰는 update_fields 조합이 필드 삭제 후에도 FieldError 없이 돌아야 한다.
+        self.assertNotIn("check_questions_transcript", [f.name for f in Meeting._meta.get_fields()])
+        self.meeting.transcript = "전사"
+        self.meeting.record = "회의록"
+        self.meeting.processing_status = Meeting.STATUS_DONE
+        self.meeting.save(update_fields=["transcript", "record", "processing_status"])
+        self.meeting.refresh_from_db()
+        self.assertEqual(self.meeting.record, "회의록")
 
     def test_the_blind_vote_model_is_gone(self):
         # 투표 모드는 보류했다. 되살릴 때는 새 마이그레이션으로 DecisionVote를 추가한다
