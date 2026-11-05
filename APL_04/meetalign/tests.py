@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -1863,6 +1864,15 @@ class DecisionCompileTests(TestCase):
         self.assertEqual(
             Interpretation.objects.filter(decision__meeting=self.meeting, recommended=True).count(), 2)
 
+    def test_fake_mode_candidates_carry_evidence(self):
+        """가짜 모드도 '근거: …'가 보이도록 원문 인용을 담는다 — 시연에서 가장 중요한 칸이다."""
+        with patch.dict(os.environ, {}, clear=True):
+            decision_compiler.compile_meeting(self.meeting)
+        candidates = Interpretation.objects.filter(decision__meeting=self.meeting)
+        self.assertEqual(candidates.count(), 4)
+        for candidate in candidates:
+            self.assertTrue(candidate.evidence, candidate.text)
+
     def test_fake_mode_leaves_the_clear_item_ready_to_publish(self):
         with patch.dict(os.environ, {}, clear=True):
             decision_compiler.compile_meeting(self.meeting)
@@ -2031,7 +2041,89 @@ class DecisionReviewTests(TestCase):
         for row in r.context["ambiguous_rows"]:
             for interpretation in row["interpretations"]:
                 self.assertFalse(interpretation.chosen)
-        self.assertNotIn("checked", r.content.decode())
+        # checked 속성이 붙은 input이 하나도 없어야 한다(스크립트의 :checked 선택자와 구별한다).
+        self.assertEqual(re.findall(r"<input[^>]*\bchecked\b", r.content.decode()), [])
+
+    def test_publishing_saves_the_choices_on_the_screen_first(self):
+        """'확정 문장 공개'가 화면의 선택을 함께 저장한 뒤 공개한다 — 저장을 따로 누르지 않아도.
+
+        저장과 공개가 두 단계로 나뉘어 있어서, 라디오를 다 고르고 공개를 누르면 "처리하지 않은
+        항목이 있습니다"가 나오는 것이 진행자가 가장 자주 걸리던 지점이었다.
+        """
+        self._compile()
+        fields = {"action": "publish"}
+        for decision in self.meeting.decisions.all():
+            if decision.has_warning:
+                fields["choice_%d" % decision.id] = "%s%d" % (
+                    decision_compiler.CHOICE_CANDIDATE_PREFIX,
+                    decision.interpretations.first().id,
+                )
+        self.client.post(self.url, fields)
+        for decision in self.meeting.decisions.all():
+            self.assertEqual(decision.status, Decision.STATUS_PUBLISHED, decision.what)
+            self.assertTrue(decision.final_text, decision.what)
+
+    def test_publishing_with_a_bad_choice_keeps_what_was_saved(self):
+        """선택이 부족하면 저장된 만큼은 남기고 사유를 보여준다."""
+        self._compile()
+        ambiguous = [d for d in self.meeting.decisions.all() if d.has_warning]
+        first, second = ambiguous[0], ambiguous[1]
+        r = self.client.post(self.url, {
+            "action": "publish",
+            "choice_%d" % first.id: "%s%d" % (
+                decision_compiler.CHOICE_CANDIDATE_PREFIX, first.interpretations.first().id),
+            "choice_%d" % second.id: decision_compiler.CHOICE_CUSTOM,
+            "custom_text_%d" % second.id: "   ",
+        })
+        self.assertContains(r, "한 줄 적어 주세요")
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertTrue(first.final_text)                      # 저장된 만큼은 남는다
+        self.assertEqual(second.final_text, "")
+        self.assertEqual(first.status, Decision.STATUS_DRAFT)  # 공개는 안 됐다
+
+    def test_each_item_that_needs_a_choice_is_marked_for_the_button_script(self):
+        """공개 버튼을 저장 전에도 갱신할 수 있도록, 선택이 필요한 묶음에 표시를 남긴다."""
+        self._compile()
+        html = self.client.get(self.url).content.decode()
+        for decision in self.meeting.decisions.all():
+            marker = 'data-choice-name="choice_%d"' % decision.id
+            if decision.has_warning:
+                self.assertIn(marker, html, decision.what)
+            else:
+                self.assertNotIn(marker, html, decision.what)
+        self.assertIn("disabled", html)
+
+    def test_numbering_runs_across_both_groups(self):
+        self._compile()
+        html = self.client.get(self.url).content.decode()
+        # 확인 필요 2건 + 그대로 공개 1건이므로 번호는 1, 2, 3으로 이어진다.
+        for number in ("1", "2", "3"):
+            self.assertIn('<span class="item-icon">%s</span>' % number, html)
+
+    def test_the_intro_line_describes_the_new_flow(self):
+        self.assertContains(
+            self.client.get(self.url),
+            "회의에서 다르게 이해할 수 있는 결정을 AI가 찾아 문장 후보를 보여줍니다.",
+        )
+
+    def test_an_old_draft_without_a_sentence_is_shown_as_needing_the_host(self):
+        """0022 이전에 만들어진 무경고 draft(문장 없음)는 공개를 막고 '확인 필요'로 보인다.
+
+        화면의 판정과 서버의 거부가 어긋나면, 진행자는 "처리 안 한 항목 0개"를 보면서 공개가
+        막히는 이유를 찾을 수 없다.
+        """
+        self._compile()
+        old = Decision.objects.create(
+            meeting=self.meeting, order=80, what="이전 흐름에서 만든 항목",
+            warnings=[], divergence_reason="", final_text="",
+        )
+        r = self.client.get(self.url)
+        self.assertIn(old.id, [row["decision"].id for row in r.context["ambiguous_rows"]])
+        self.assertTrue(next(row for row in r.context["rows"]
+                             if row["decision"].id == old.id)["blocking"])
+        self.assertGreaterEqual(r.context["blocker_count"], 1)
+        self.assertFalse(r.context["can_publish"])
 
     def test_the_server_ignores_posted_spec_edits(self):
         """화면에서 칸을 없앴으니 서버도 그 값을 받지 않는다."""

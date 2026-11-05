@@ -216,6 +216,21 @@ class Decision(models.Model):
         return bool(self.final_text) or self.marked_undecided or not self.has_warning
 
     @property
+    def needs_host(self):
+        """진행자가 손대야 하는 항목 — 확인이 필요하거나, 공개할 문장이 아직 없거나.
+
+        화면의 묶음 분리와 배지가 이 판정을 쓴다. 문장 유무를 함께 보는 이유: 이번 재설계
+        전에 만들어진 무경고 draft는 final_text가 비어 있어, '그대로 공개'로 분류하면 번호만
+        있는 빈 줄이 공개된다.
+        """
+        return self.has_warning or not self.published_text
+
+    @property
+    def blocks_publish(self):
+        """이 항목 때문에 공개를 막아야 하는가. 화면의 비활성 판정과 서버의 거부가 같이 쓴다."""
+        return not self.is_settled or not self.published_text
+
+    @property
     def published_text(self):
         """팀원에게 보여줄 확정 내용. 어떤 상태에서나 이 문장 하나다 — 폴백은 없다.
 

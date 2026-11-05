@@ -70,8 +70,8 @@ _TIME_EXPR = re.compile(r"\d{1,2}\s*시(?:\s*\d{1,2}\s*분)?")
 _QUANTITY_EXPR = re.compile(r"\d+\s*(?:개|명|건|차|퍼센트|%)")
 
 # LLM 키가 없을 때 쓰는 고정 응답. 새 스키마 그대로여서 가짜 모드에서도 진행자 화면이
-# 실제와 같은 모습으로 돈다(모호 2건 + 명확 1건). evidence는 비워 둔다 — 대조할 전사 원문이
-# 없는 시연 상황이므로 근거 검증을 건너뛰는 통로를 쓴다.
+# 실제와 같은 모습으로 돈다(모호 2건 + 명확 1건). 근거 문장도 담아 화면에 "근거: …"가
+# 보이게 한다 — 가짜 모드는 전사 원문 없이 파싱하므로(compile_specs) 근거 검증은 건너뛴다.
 FAKE_DECISIONS = [
     {
         "topic": "로그 보관 기간",
@@ -79,9 +79,9 @@ FAKE_DECISIONS = [
         "why": "\"한 달 정도면 충분\"이 30일인지 90일인지 갈립니다",
         "candidates": [
             {"text": "민수가 12월 5일까지 로그 보관 기간을 30일로 바꾸고, 스테이징 로그가 30일 뒤 지워지는 것을 확인한다",
-             "evidence": "", "recommended": True},
+             "evidence": "로그는 일단 한 달 정도면 충분할 것 같은데요", "recommended": True},
             {"text": "민수가 12월 5일까지 로그 보관 기간을 90일로 바꾸고, 감사 로그 3개월 요건을 문서에 남긴다",
-             "evidence": ""},
+             "evidence": "감사 때문에 분기 단위로 봐야 한다고 들었어요"},
         ],
     },
     {
@@ -90,16 +90,17 @@ FAKE_DECISIONS = [
         "why": "\"담당 화면\"이 각자 만든 화면인지 배포에 포함된 화면 전체인지 갈립니다",
         "candidates": [
             {"text": "각 담당자가 12월 8일까지 본인이 만든 화면만 QA하고, 결과를 팀 채널에 한 줄로 남긴다",
-             "evidence": "", "recommended": True},
+             "evidence": "담당 화면은 각자 보는 게 빠를 것 같아요", "recommended": True},
             {"text": "영희가 12월 8일까지 이번 배포에 포함된 화면 전체를 QA하고, 발견한 문제를 이슈로 등록한다",
-             "evidence": ""},
+             "evidence": "이번 배포는 화면이 엮여 있어서 전체를 한 번 봐야 해요"},
         ],
     },
     {
         "topic": "배포 스크립트 정리",
         "ambiguous": False,
         "final": "민수가 금요일 18시까지 배포 스크립트를 정리하고, 스테이징에서 한 번 돌려 성공하는 것을 확인한다",
-        "evidence": "",
+        # 명확 항목의 근거는 규칙 안전망이 스캔한다 — 모호어도, 서로 다른 날짜도 없어야 한다.
+        "evidence": "배포 스크립트는 제가 금요일까지 정리하겠습니다",
     },
 ]
 
@@ -463,10 +464,7 @@ def publish_blockers(decisions):
     있는 빈 줄이 공개된다. AI가 모호 판정을 하면서 이유를 비워 보내거나, 이번 재설계 전에
     만들어진 무경고 draft가 그대로 넘어오는 경로가 있어 마지막 그물을 여기 둔다.
     """
-    return [
-        decision for decision in decisions
-        if not decision.is_settled or not decision.published_text
-    ]
+    return [decision for decision in decisions if decision.blocks_publish]
 
 
 def publish_decisions(meeting):

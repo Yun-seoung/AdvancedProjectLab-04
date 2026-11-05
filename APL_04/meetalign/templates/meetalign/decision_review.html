@@ -9,7 +9,7 @@
 <div class="page-head">
   <div>
     <h1><a href="{% url 'meeting_detail' meeting.id %}" class="crumb-link">{{ meeting.title }}</a> <span class="crumb-sep">/</span> 결정 확인</h1>
-    <div class="sub">회의에서 나온 결정을 실행 명세로 옮기고, 모호한 항목을 진행자가 한 줄로 확정해 팀원에게 공개합니다.</div>
+    <div class="sub">회의에서 다르게 이해할 수 있는 결정을 AI가 찾아 문장 후보를 보여줍니다. 하나씩 고르고 팀원에게 공개하세요.</div>
   </div>
 </div>
 
@@ -55,7 +55,7 @@
     {% endif %}
   </div>
 
-  {% if editable %}<form method="post">{% csrf_token %}{% endif %}
+  {% if editable %}<form method="post" id="decision-form">{% csrf_token %}{% endif %}
 
   {# ① 확인이 필요한 결정 — AI가 갈린다고 봤거나 규칙 안전망이 걸린 항목. 진행자가 탭해야 공개된다. #}
   {% if ambiguous_rows %}
@@ -72,11 +72,7 @@
           </div>
         </div>
         <div class="row" style="gap:6px">
-          {% if row.decision.has_warning %}
-            <span class="badge due">확인 필요</span>
-          {% else %}
-            <span class="badge done">그대로 공개</span>
-          {% endif %}
+          <span class="badge due">확인 필요</span>
           {% if row.decision.status != status_draft %}<span class="badge processing">{{ row.decision.get_status_display }}</span>{% endif %}
         </div>
       </div>
@@ -94,14 +90,13 @@
       <div style="border-top:1px solid var(--line);padding-top:12px">
         <span class="label" style="font-size:.86rem;font-weight:700;color:var(--ink-soft)">어느 문장으로 공개할까요?</span>
         {% if row.blocking %}<span class="badge failed" style="margin-left:6px">미확정</span>{% endif %}
-        <div style="margin-top:8px">
+        <div style="margin-top:8px"{% if row.blocking %} data-choice-name="choice_{{ row.decision.id }}"{% endif %}>
           {% for interpretation in row.interpretations %}
           <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
             <input type="radio" name="choice_{{ row.decision.id }}" value="{{ interpretation.choice_value }}" style="width:auto;margin-top:3px"
               {% if interpretation.chosen %}checked{% endif %}>
             <span>
-              {{ interpretation.text }}
-              {% if interpretation.recommended %}<span class="badge processing" style="margin-left:6px">AI 추천</span>{% endif %}
+              <span>{{ interpretation.text }}</span>{% if interpretation.recommended %}<span class="badge processing" style="margin-left:6px;vertical-align:1px;white-space:nowrap">AI 추천</span>{% endif %}
               {% if interpretation.evidence %}<div class="meta" style="margin-top:4px">근거: "{{ interpretation.evidence }}"</div>{% endif %}
             </span>
           </label>
@@ -194,18 +189,16 @@
     <li class="item" style="flex-direction:column;align-items:stretch;gap:12px">
       <div class="row" style="justify-content:space-between">
         <div class="item-main">
-          <span class="item-icon">{{ forloop.counter }}</span>
+          <span class="item-icon">{{ ambiguous_rows|length|add:forloop.counter }}</span>
           <div class="item-text">
             <span class="title">{{ row.decision.what|default:"(안건 이름 없음)" }}</span>
-            {% if row.decision.final_text %}<div class="meta">{{ row.decision.final_text }}</div>{% endif %}
+            {% if row.decision.final_text %}
+            <div style="margin-top:4px">{{ row.decision.final_text }}</div>
+            {% endif %}
           </div>
         </div>
         <div class="row" style="gap:6px">
-          {% if row.decision.has_warning %}
-            <span class="badge due">확인 필요</span>
-          {% else %}
-            <span class="badge done">그대로 공개</span>
-          {% endif %}
+          <span class="badge done">그대로 공개</span>
           {% if row.decision.status != status_draft %}<span class="badge processing">{{ row.decision.get_status_display }}</span>{% endif %}
         </div>
       </div>
@@ -214,14 +207,13 @@
       <details>
         <summary class="meta" style="cursor:pointer">고치기</summary>
         <div style="border-top:1px solid var(--line);padding-top:12px;margin-top:8px">
-        <div style="margin-top:8px">
+        <div style="margin-top:8px"{% if row.blocking %} data-choice-name="choice_{{ row.decision.id }}"{% endif %}>
           {% for interpretation in row.interpretations %}
           <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
             <input type="radio" name="choice_{{ row.decision.id }}" value="{{ interpretation.choice_value }}" style="width:auto;margin-top:3px"
               {% if interpretation.chosen %}checked{% endif %}>
             <span>
-              {{ interpretation.text }}
-              {% if interpretation.recommended %}<span class="badge processing" style="margin-left:6px">AI 추천</span>{% endif %}
+              <span>{{ interpretation.text }}</span>{% if interpretation.recommended %}<span class="badge processing" style="margin-left:6px;vertical-align:1px;white-space:nowrap">AI 추천</span>{% endif %}
               {% if interpretation.evidence %}<div class="meta" style="margin-top:4px">근거: "{{ interpretation.evidence }}"</div>{% endif %}
             </span>
           </label>
@@ -296,15 +288,36 @@
   {% if editable %}
   <div class="row" style="margin-top:18px">
     <button name="action" value="save" class="secondary">저장</button>
-    <button name="action" value="publish"{% if not can_publish %} disabled title="처리하지 않은 항목이 있습니다"{% endif %}
+    <button name="action" value="publish" id="publish-btn"{% if not can_publish %} disabled title="처리하지 않은 항목이 있습니다"{% endif %}
       onclick="return confirm('{{ draft_count }}개 항목을 팀원에게 공개할까요? 공개 후에는 선택을 되돌릴 수 없습니다.');">
       확정 문장 공개 ({{ draft_count }}개)
     </button>
   </div>
   {% if blocker_count %}
-    <p class="muted" style="margin:10px 0 0">처리하지 않은 항목 {{ blocker_count }}개를 처리하면 공개할 수 있습니다. 저장을 먼저 눌러 주세요.</p>
+    <p class="muted" style="margin:10px 0 0">처리하지 않은 항목 {{ blocker_count }}개를 고르면 공개할 수 있습니다. 공개 버튼이 선택까지 함께 저장합니다.</p>
   {% endif %}
   </form>
+  <script>
+  // 공개 버튼은 선택이 모두 끝났을 때만 눌릴 수 있다. 서버도 같은 조건으로 거부하지만,
+  // 저장하기 전에도 화면에서 바로 알 수 있어야 해서 라디오 변화에 맞춰 갱신한다.
+  (function () {
+    var form = document.getElementById("decision-form");
+    var button = document.getElementById("publish-btn");
+    if (!form || !button) return;
+    var groups = form.querySelectorAll("[data-choice-name]");
+    function refresh() {
+      var ready = true;
+      groups.forEach(function (group) {
+        var name = group.getAttribute("data-choice-name");
+        if (!form.querySelector('input[name="' + name + '"]:checked')) ready = false;
+      });
+      button.disabled = !ready;
+      button.title = ready ? "" : "처리하지 않은 항목이 있습니다";
+    }
+    form.addEventListener("change", refresh);
+    refresh();
+  })();
+  </script>
   {% endif %}
 </div>
 

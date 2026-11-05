@@ -492,7 +492,11 @@ def decision_review(request, meeting_id):
         elif action == "save":
             error = _save_decision_edits(request, meeting)
         elif action == "publish":
-            error = _publish_decisions(meeting)
+            # 공개 버튼이 화면의 선택을 함께 저장한 뒤 공개한다. 저장과 공개가 나뉘어 있어서
+            # 라디오를 다 고르고 공개를 눌렀는데 "처리하지 않은 항목이 있습니다"가 나오는 것이
+            # 진행자가 가장 자주 걸리던 지점이었다. 저장이 실패하면 저장된 만큼은 남기고
+            # 사유를 보여준다('저장' 버튼은 중간 저장용으로 그대로 둔다).
+            error = _save_decision_edits(request, meeting) or _publish_decisions(meeting)
         elif action == "unpublish":
             error = _unpublish_decisions(meeting)
         elif action == "revise":
@@ -522,7 +526,7 @@ def decision_review(request, meeting_id):
             "choice": choice,
             "custom_text": custom_text,
             # 경고가 붙었는데 아직 고르지 않은 항목 — 공개를 막는다.
-            "blocking": not decision.is_settled,
+            "blocking": decision.blocks_publish,
             # 공개 항목의 "확인 N명 / 달랐어요 M명". 작성자 없는 숫자와 의견 문자열만 담고,
             # 전원이 응답하기 전에는 둘 다 담지 않는다(None / 빈 목록).
             "ack": ack_counts.get(decision.id) if decision_status.counts_revealed(summary, decision.id) else None,
@@ -538,8 +542,8 @@ def decision_review(request, meeting_id):
     # has_warning으로 세야 화면의 숫자와 공개 차단 판정이 어긋나지 않는다.
     # 확인이 필요한 항목과 그대로 공개될 항목을 따로 묶는다. AI 모호 판정은 warnings가 아니라
     # divergence_reason에 담기므로 기준은 has_warning이다.
-    ambiguous_rows = [row for row in rows if row["decision"].has_warning]
-    clear_rows = [row for row in rows if not row["decision"].has_warning]
+    ambiguous_rows = [row for row in rows if row["decision"].needs_host]
+    clear_rows = [row for row in rows if not row["decision"].needs_host]
     drafts = [row for row in rows if row["decision"].status == Decision.STATUS_DRAFT]
     blockers = [row for row in drafts if row["blocking"]]
     # 미확인 팀원 이름은 진행자 본인에게만 모은다. _require_host는 host가 비어 있는 회의를
