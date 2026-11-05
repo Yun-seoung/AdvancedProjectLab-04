@@ -372,37 +372,16 @@ def _apply_host_choice(request, decision):
 
 
 def _save_decision_edits(request, meeting):
-    """진행자가 실행 명세·해석 후보·확정 선택을 고친 것을 저장한다. draft 항목만 대상이다.
+    """진행자의 확정 선택을 저장한다. draft 항목만 대상이다.
 
-    실패 사유 문자열 또는 None을 돌려준다. 명세 수정은 항목별로 독립이라 한 항목이 비어
-    있어도 건너뛰고 계속하지만, 확정 선택이 잘못된 경우는 진행자가 알아야 하므로 사유를 올린다.
+    고를 수 있는 것은 [후보 | 직접 쓰기 | 다음 회의로 넘김]뿐이다 — 누가·무엇을·언제까지·
+    완료 기준을 직접 입력하는 칸은 없앴고(기준이 둘이 되지 않게), 후보 문장도 읽기 전용이다.
+    실패 사유 문자열 또는 None을 돌려준다.
     """
-    decisions = list(meeting.decisions.prefetch_related("interpretations"))
-    valid_states = {choice for choice, _ in Decision.CONFIRM_CHOICES}
     error = None
-    for decision in decisions:
+    for decision in meeting.decisions.all():
         if decision.status != Decision.STATUS_DRAFT:
             continue
-        what = request.POST.get("what_%d" % decision.id, "").strip()
-        if what:
-            state = request.POST.get("confirm_state_%d" % decision.id, decision.confirm_state)
-            decision.who = request.POST.get("who_%d" % decision.id, "").strip()
-            decision.what = what
-            decision.due_text = request.POST.get("due_%d" % decision.id, "").strip()
-            decision.done_criteria = request.POST.get("done_%d" % decision.id, "").strip()
-            decision.confirm_state = state if state in valid_states else decision.confirm_state
-            decision.save(update_fields=["who", "what", "due_text", "done_criteria", "confirm_state"])
-        # '무엇을'이 비어 있으면 실행 명세가 아니다 — 그 항목의 명세만 건너뛰고 확정 선택은 그대로 받는다.
-
-        for interpretation in decision.interpretations.all():
-            if request.POST.get("drop_interpretation_%d" % interpretation.id):
-                interpretation.delete()
-                continue
-            text = request.POST.get("interpretation_%d" % interpretation.id, "").strip()
-            if text and text != interpretation.text:
-                interpretation.text = text
-                interpretation.save(update_fields=["text"])
-
         failed = _apply_host_choice(request, decision)
         if failed and error is None:
             error = failed
@@ -473,6 +452,10 @@ def _current_choice(decision, interpretations):
     """
     if decision.marked_undecided:
         return decision_compiler.CHOICE_UNDECIDED, ""
+    if not decision.has_warning:
+        # 확인이 필요 없는 항목은 아무것도 선택돼 있지 않아야 한다('고치기'는 접혀 있다).
+        # '직접 쓰기' 칸에는 AI가 쓴 문장을 미리 넣어 고치기 쉽게 한다.
+        return "", decision.final_text
     if not decision.final_text:
         return "", ""
     for interpretation in interpretations:
@@ -543,7 +526,10 @@ def decision_review(request, meeting_id):
         })
     # 확인이 필요한 항목 수. AI 모호 판정은 warnings가 아니라 divergence_reason에 담기므로
     # has_warning으로 세야 화면의 숫자와 공개 차단 판정이 어긋나지 않는다.
-    warned = [row for row in rows if row["decision"].has_warning]
+    # 확인이 필요한 항목과 그대로 공개될 항목을 따로 묶는다. AI 모호 판정은 warnings가 아니라
+    # divergence_reason에 담기므로 기준은 has_warning이다.
+    ambiguous_rows = [row for row in rows if row["decision"].has_warning]
+    clear_rows = [row for row in rows if not row["decision"].has_warning]
     drafts = [row for row in rows if row["decision"].status == Decision.STATUS_DRAFT]
     blockers = [row for row in drafts if row["blocking"]]
     # 미확인 팀원 이름은 진행자 본인에게만 모은다. _require_host는 host가 비어 있는 회의를
@@ -561,7 +547,9 @@ def decision_review(request, meeting_id):
         "rows": rows,
         "error": error,
         "compiled": bool(decisions),
-        "warned_count": len(warned),
+        "ambiguous_rows": ambiguous_rows,
+        "clear_rows": clear_rows,
+        "ambiguous_count": len(ambiguous_rows),
         "draft_count": len(drafts),
         "blocker_count": len(blockers),
         "decision_open": decision_open,
@@ -583,7 +571,6 @@ def decision_review(request, meeting_id):
         "choice_custom": decision_compiler.CHOICE_CUSTOM,
         "choice_undecided": decision_compiler.CHOICE_UNDECIDED,
         "editable": all(row["decision"].status == Decision.STATUS_DRAFT for row in rows),
-        "confirm_choices": Decision.CONFIRM_CHOICES,
         "status_draft": Decision.STATUS_DRAFT,
         "status_published": Decision.STATUS_PUBLISHED,
         "status_undecided": Decision.STATUS_UNDECIDED,

@@ -1939,14 +1939,6 @@ class DecisionReviewTests(TestCase):
         self.assertContains(r, "읽지 못했습니다")
         self.assertEqual(self.meeting.decisions.count(), 0)
 
-    def test_saving_a_blank_what_leaves_the_item_untouched(self):
-        self._compile()
-        decision = self.meeting.decisions.first()
-        before = decision.what
-        self.client.post(self.url, {"action": "save", "what_%d" % decision.id: "   "})
-        decision.refresh_from_db()
-        self.assertEqual(decision.what, before)
-
     def test_specs_cannot_be_edited_once_published(self):
         self._compile()
         decision = self.meeting.decisions.first()
@@ -2005,7 +1997,57 @@ class DecisionReviewTests(TestCase):
         self._compile()
         r = self.client.get(self.url)
         # 가짜 응답 3건 중 2건이 확인 필요다. warnings만 세면 0개로 나와 공개 차단과 모순된다.
-        self.assertEqual(r.context["warned_count"], 2)
+        self.assertEqual(r.context["ambiguous_count"], 2)
+
+    def test_the_screen_splits_items_into_two_groups(self):
+        """확인이 필요한 결정과 그대로 공개될 결정을 따로 묶어 보여준다."""
+        self._compile()
+        r = self.client.get(self.url)
+        self.assertEqual(len(r.context["ambiguous_rows"]), 2)
+        self.assertEqual(len(r.context["clear_rows"]), 1)
+        for row in r.context["ambiguous_rows"]:
+            self.assertTrue(row["decision"].has_warning)
+        for row in r.context["clear_rows"]:
+            self.assertFalse(row["decision"].has_warning)
+            # 그대로 공개될 항목은 AI가 쓴 문장을 이미 갖고 있다.
+            self.assertTrue(row["decision"].final_text)
+        self.assertContains(r, "확인이 필요한 결정")
+        self.assertContains(r, "그대로 공개될 결정")
+
+    def test_the_screen_has_no_spec_input_fields_left(self):
+        """누가·무엇을·언제까지·완료기준 입력 칸과 후보 편집 UI가 화면에서 사라졌다."""
+        self._compile()
+        html = self.client.get(self.url).content.decode()
+        decision = self.meeting.decisions.first()
+        for name in ("who_", "what_", "due_", "done_", "confirm_state_", "drop_interpretation_"):
+            self.assertNotIn("%s%d" % (name, decision.id), html)
+        self.assertNotIn('name="interpretation_', html)
+
+    def test_the_recommended_candidate_is_not_preselected(self):
+        """'AI 추천'은 배지일 뿐이다 — 진행자가 읽고 직접 탭해야 한다."""
+        self._compile()
+        r = self.client.get(self.url)
+        self.assertContains(r, "AI 추천")
+        for row in r.context["ambiguous_rows"]:
+            for interpretation in row["interpretations"]:
+                self.assertFalse(interpretation.chosen)
+        self.assertNotIn("checked", r.content.decode())
+
+    def test_the_server_ignores_posted_spec_edits(self):
+        """화면에서 칸을 없앴으니 서버도 그 값을 받지 않는다."""
+        self._compile()
+        decision = self.meeting.decisions.first()
+        before = decision.what
+        self.client.post(self.url, {
+            "action": "save",
+            "who_%d" % decision.id: "바뀐 담당자",
+            "what_%d" % decision.id: "바뀐 안건",
+            "due_%d" % decision.id: "바뀐 기한",
+        })
+        decision.refresh_from_db()
+        self.assertEqual(decision.who, "")
+        self.assertEqual(decision.what, before)
+        self.assertEqual(decision.due_text, "")
 
 
 class DecisionEntryLinkTests(TestCase):
@@ -2463,20 +2505,18 @@ class DecisionConfirmTests(TestCase):
         self.assertTrue(decision.is_settled)
 
     def test_the_chosen_text_is_a_snapshot_not_a_live_link(self):
-        # 확정한 뒤 후보 문장을 고쳐도 확정 내용은 따라 바뀌지 않아야 한다.
+        """고른 시점의 문장을 복사해 둔다 — 후보가 나중에 바뀌어도 확정 내용은 그대로다."""
         decision = self.warned[0]
         candidate = decision.interpretations.first()
         self.client.post(self.url, {
             "action": "save", "choice_%d" % decision.id: self._candidate_value(candidate),
         })
-        self.client.post(self.url, {
-            "action": "save",
-            "interpretation_%d" % candidate.id: "완전히 다른 후보 문장",
-        })
+        chosen_text = candidate.text
+        Interpretation.objects.filter(pk=candidate.pk).update(text="완전히 다른 후보 문장")
         decision.refresh_from_db()
         candidate.refresh_from_db()
         self.assertEqual(candidate.text, "완전히 다른 후보 문장")
-        self.assertNotEqual(decision.final_text, candidate.text)
+        self.assertEqual(decision.final_text, chosen_text)
 
     def test_the_review_screen_shows_which_option_is_chosen(self):
         decision = self.warned[0]
@@ -2597,23 +2637,6 @@ class DecisionConfirmTests(TestCase):
         self.assertContains(r, "하나 골라 주세요")
         decision.refresh_from_db()
         self.assertEqual(decision.final_text, "")
-
-    def test_spec_edits_and_the_choice_are_saved_in_one_submit(self):
-        decision = self.warned[0]
-        self.client.post(self.url, {
-            "action": "save",
-            "who_%d" % decision.id: "민수",
-            "what_%d" % decision.id: decision.what,
-            "due_%d" % decision.id: "금요일",
-            "done_%d" % decision.id: "스테이징 확인",
-            "confirm_state_%d" % decision.id: Decision.CONFIRM_CONFIRMED,
-            "choice_%d" % decision.id: decision_compiler.CHOICE_CUSTOM,
-            "custom_text_%d" % decision.id: "금요일 18시까지",
-        })
-        decision.refresh_from_db()
-        self.assertEqual(decision.who, "민수")
-        self.assertEqual(decision.warnings, [])
-        self.assertEqual(decision.final_text, "금요일 18시까지")
 
     def test_items_without_warnings_are_settled_with_no_choice(self):
         plain = self.plain[0]
@@ -2975,11 +2998,12 @@ class DecisionUnpublishTests(TestCase):
         self.assertEqual(self.decision.final_text, "금요일 18시까지")
         self.assertTrue(self.client.get(self.url).context["editable"])
 
-    def test_the_spec_edit_section_comes_back_after_unpublishing(self):
-        # 이게 공개 취소를 넣은 이유다 — 공개 뒤에는 명세 수정 영역이 사라진다.
-        self.assertNotContains(self.client.get(self.url), "무엇을")
+    def test_the_choice_section_comes_back_after_unpublishing(self):
+        # 이게 공개 취소를 넣은 이유다 — 공개 뒤에는 확정 선택 UI가 사라진다.
+        radio = 'name="choice_%d"' % self.decision.id
+        self.assertNotIn(radio, self.client.get(self.url).content.decode())
         self.client.post(self.url, {"action": "unpublish"})
-        self.assertContains(self.client.get(self.url), "무엇을")
+        self.assertIn(radio, self.client.get(self.url).content.decode())
 
     def test_undecided_items_are_restored_too(self):
         Decision.objects.filter(pk=self.decision.pk).update(

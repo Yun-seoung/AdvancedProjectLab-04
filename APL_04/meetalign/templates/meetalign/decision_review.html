@@ -37,15 +37,15 @@
 <div class="card elevated">
   <div class="row" style="justify-content:space-between;align-items:flex-start">
     <div>
-      <h2 class="section-title" style="margin-top:0">실행 명세 {{ rows|length }}개</h2>
+      <h2 class="section-title" style="margin-top:0">결정 {{ rows|length }}개</h2>
       <p class="muted" style="margin:-4px 0 0">
-        확인 필요 {{ warned_count }}개{% if blocker_count %} · 확정 안 한 항목 {{ blocker_count }}개{% endif %}{% if published_count %} · 공개 {{ published_count }}개{% endif %}{% if undecided_count %} · 미결정 {{ undecided_count }}개{% endif %}
+        확인 필요 {{ ambiguous_count }}개{% if blocker_count %} · 처리 안 한 항목 {{ blocker_count }}개{% endif %}{% if published_count %} · 공개 {{ published_count }}개{% endif %}{% if undecided_count %} · 미결정 {{ undecided_count }}개{% endif %}
       </p>
     </div>
     {% if editable %}
     <form method="post">{% csrf_token %}
       <button name="action" value="reset" class="btn sm ghost" style="color:var(--danger)"
-        onclick="return confirm('컴파일 결과를 모두 지우고 처음부터 다시 할까요?');">명세 지우고 다시 컴파일</button>
+        onclick="return confirm('컴파일 결과를 모두 지우고 처음부터 다시 할까요?');">결정 지우고 다시 컴파일</button>
     </form>
     {% elif can_unpublish %}
     <form method="post">{% csrf_token %}
@@ -56,14 +56,19 @@
   </div>
 
   {% if editable %}<form method="post">{% csrf_token %}{% endif %}
+
+  {# ① 확인이 필요한 결정 — AI가 갈린다고 봤거나 규칙 안전망이 걸린 항목. 진행자가 탭해야 공개된다. #}
+  {% if ambiguous_rows %}
+  <h3 class="section-title" style="font-size:1rem">확인이 필요한 결정 {{ ambiguous_rows|length }}개</h3>
   <ul class="plain">
-    {% for row in rows %}
+    {% for row in ambiguous_rows %}
     <li class="item" style="flex-direction:column;align-items:stretch;gap:12px">
       <div class="row" style="justify-content:space-between">
         <div class="item-main">
           <span class="item-icon">{{ forloop.counter }}</span>
           <div class="item-text">
-            <span class="title">{{ row.decision.what|default:"(무엇을 — 빈칸)" }}</span>
+            <span class="title">{{ row.decision.what|default:"(안건 이름 없음)" }}</span>
+            {% if row.decision.final_text %}<div class="meta">{{ row.decision.final_text }}</div>{% endif %}
           </div>
         </div>
         <div class="row" style="gap:6px">
@@ -79,7 +84,6 @@
       {% if row.decision.divergence_reason %}
       <div style="font-weight:600;font-size:.9rem">{{ row.decision.divergence_reason }}</div>
       {% endif %}
-
       {% if row.decision.warnings %}
       <div class="record" style="font-size:.88rem">
         {% for warning in row.decision.warnings %}<div>· {{ warning }}</div>{% endfor %}
@@ -87,104 +91,52 @@
       {% endif %}
 
       {% if editable %}
-      <div class="row" style="gap:10px;align-items:flex-start">
-        <div class="field" style="flex:1 1 140px;margin:0">
-          <label for="who_{{ row.decision.id }}">누가</label>
-          <input type="text" id="who_{{ row.decision.id }}" name="who_{{ row.decision.id }}" value="{{ row.decision.who }}" placeholder="담당자">
-        </div>
-        <div class="field" style="flex:2 1 220px;margin:0">
-          <label for="what_{{ row.decision.id }}">무엇을</label>
-          <input type="text" id="what_{{ row.decision.id }}" name="what_{{ row.decision.id }}" value="{{ row.decision.what }}">
-        </div>
-        <div class="field" style="flex:1 1 140px;margin:0">
-          <label for="due_{{ row.decision.id }}">언제까지</label>
-          <input type="text" id="due_{{ row.decision.id }}" name="due_{{ row.decision.id }}" value="{{ row.decision.due_text }}" placeholder="기한">
-        </div>
-      </div>
-      <div class="row" style="gap:10px;align-items:flex-start">
-        <div class="field" style="flex:2 1 220px;margin:0">
-          <label for="done_{{ row.decision.id }}">완료 기준</label>
-          <input type="text" id="done_{{ row.decision.id }}" name="done_{{ row.decision.id }}" value="{{ row.decision.done_criteria }}" placeholder="무엇을 보면 끝났다고 할 수 있는지">
-        </div>
-        <div class="field" style="flex:1 1 140px;margin:0">
-          <span class="label">확정 여부</span>
-          <div class="row" style="gap:12px">
-            {% for value, label in confirm_choices %}
-            <label style="font-weight:600;font-size:.86rem;display:inline-flex;gap:5px;align-items:center">
-              <input type="radio" name="confirm_state_{{ row.decision.id }}" value="{{ value }}" style="width:auto"
-                {% if row.decision.confirm_state == value %}checked{% endif %}>{{ label }}
-            </label>
-            {% endfor %}
-          </div>
-        </div>
-      </div>
-      {% endif %}
-
-      {% if row.interpretations %}
-      <div>
-        <span class="label" style="font-size:.86rem;font-weight:700;color:var(--ink-soft)">해석 후보 (진행자 참고용)</span>
-        <ul class="plain" style="margin-top:8px">
-          {% for interpretation in row.interpretations %}
-          <li style="padding:10px 0;border-top:1px solid var(--line)">
-            <div class="row" style="gap:8px;align-items:flex-start">
-              <span class="badge processing" style="flex:0 0 auto">후보 {{ interpretation.label }}</span>
-              <div style="flex:1 1 240px">
-                {% if editable %}
-                  <input type="text" name="interpretation_{{ interpretation.id }}" value="{{ interpretation.text }}">
-                {% else %}
-                  <div>{{ interpretation.text }}</div>
-                {% endif %}
-                {% if interpretation.evidence %}
-                  <div class="meta" style="margin-top:4px">근거: {{ interpretation.evidence }}</div>
-                {% else %}
-                  <div class="meta" style="margin-top:4px">근거 없음 (가짜 응답 모드)</div>
-                {% endif %}
-              </div>
-              {% if editable %}
-              <label class="meta" style="flex:0 0 auto;display:inline-flex;gap:5px;align-items:center;cursor:pointer">
-                <input type="checkbox" name="drop_interpretation_{{ interpretation.id }}" style="width:auto">버리기
-              </label>
-              {% endif %}
-            </div>
-          </li>
-          {% endfor %}
-        </ul>
-      </div>
-      {% elif row.decision.has_warning %}
-        <div class="meta">확정 문장 후보가 없습니다 — 근거 검증을 통과한 후보가 하나도 없었습니다. 직접 작성이나 '아직 미정'으로만 처리할 수 있습니다.</div>
-      {% endif %}
-
-      {# ③ 진행자 확정. 확인이 필요한 항목만 고를 것이 있다. #}
-      {% if editable and row.decision.has_warning %}
       <div style="border-top:1px solid var(--line);padding-top:12px">
-        <span class="label" style="font-size:.86rem;font-weight:700;color:var(--ink-soft)">이 항목을 어떻게 확정할까요?</span>
+        <span class="label" style="font-size:.86rem;font-weight:700;color:var(--ink-soft)">어느 문장으로 공개할까요?</span>
         {% if row.blocking %}<span class="badge failed" style="margin-left:6px">미확정</span>{% endif %}
         <div style="margin-top:8px">
           {% for interpretation in row.interpretations %}
           <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
             <input type="radio" name="choice_{{ row.decision.id }}" value="{{ interpretation.choice_value }}" style="width:auto;margin-top:3px"
               {% if interpretation.chosen %}checked{% endif %}>
-            <span><b>후보 {{ interpretation.label }}</b> — {{ interpretation.text }}</span>
+            <span>
+              {{ interpretation.text }}
+              {% if interpretation.recommended %}<span class="badge processing" style="margin-left:6px">AI 추천</span>{% endif %}
+              {% if interpretation.evidence %}<div class="meta" style="margin-top:4px">근거: "{{ interpretation.evidence }}"</div>{% endif %}
+            </span>
           </label>
           {% endfor %}
           <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
             <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_custom }}" style="width:auto;margin-top:3px"
               {% if row.choice == choice_custom %}checked{% endif %}>
             <span style="flex:1 1 auto">
-              <b>직접 작성</b>
+              <b>직접 쓰기</b>
               <input type="text" name="custom_text_{{ row.decision.id }}" value="{{ row.custom_text }}"
-                placeholder="예: 금요일 18시까지 스테이징 배포까지 끝낸다" style="margin-top:6px">
+                placeholder="예: 민수가 금요일 18시까지 배포 스크립트를 정리하고 스테이징에서 한 번 돌려 본다" style="margin-top:6px">
             </span>
           </label>
           <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
             <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_undecided }}" style="width:auto;margin-top:3px"
               {% if row.choice == choice_undecided %}checked{% endif %}>
-            <span><b>아직 미정</b> — 이 회의에서 결론이 나지 않았다. 다음 회의로 넘긴다</span>
+            <span><b>다음 회의로 넘김</b> — 이 회의에서 결론이 나지 않았다</span>
           </label>
         </div>
       </div>
-      {% elif editable %}
-        <div class="meta">다르게 이해될 여지가 없어 위 문장이 그대로 공개됩니다. 따로 고를 것이 없습니다.</div>
+      {% elif row.interpretations %}
+      <div>
+        <span class="label" style="font-size:.86rem;font-weight:700;color:var(--ink-soft)">확정 문장 후보 (진행자 참고용)</span>
+        <ul class="plain" style="margin-top:8px">
+          {% for interpretation in row.interpretations %}
+          <li style="padding:10px 0;border-top:1px solid var(--line)">
+            <div>{{ interpretation.text }}{% if interpretation.recommended %}<span class="badge processing" style="margin-left:6px">AI 추천</span>{% endif %}</div>
+            {% if interpretation.evidence %}<div class="meta" style="margin-top:4px">근거: "{{ interpretation.evidence }}"</div>{% endif %}
+          </li>
+          {% endfor %}
+        </ul>
+      </div>
+      {% endif %}
+      {% if editable and not row.interpretations %}
+      <div class="meta">확정 문장 후보가 없습니다 — 근거 검증을 통과한 후보가 하나도 없었습니다. 직접 쓰거나 다음 회의로 넘길 수 있습니다.</div>
       {% endif %}
 
       {# 공개된 뒤: 확정 내용과 수정 폼. 수정하면 그 항목의 팀원 확인 기록이 전부 지워진다. #}
@@ -228,13 +180,117 @@
     </li>
     {% endfor %}
   </ul>
+  {% endif %}
+
+  {# ② 그대로 공개될 결정 — AI가 쓴 문장이 곧 확정 내용이다. '고치기'는 접혀 있어 탭 0번. #}
+  {% if clear_rows %}
+  <h3 class="section-title" style="font-size:1rem">그대로 공개될 결정 {{ clear_rows|length }}개</h3>
+  <ul class="plain">
+    {% for row in clear_rows %}
+    <li class="item" style="flex-direction:column;align-items:stretch;gap:12px">
+      <div class="row" style="justify-content:space-between">
+        <div class="item-main">
+          <span class="item-icon">{{ forloop.counter }}</span>
+          <div class="item-text">
+            <span class="title">{{ row.decision.what|default:"(안건 이름 없음)" }}</span>
+            {% if row.decision.final_text %}<div class="meta">{{ row.decision.final_text }}</div>{% endif %}
+          </div>
+        </div>
+        <div class="row" style="gap:6px">
+          {% if row.decision.has_warning %}
+            <span class="badge due">확인 필요</span>
+          {% else %}
+            <span class="badge done">그대로 공개</span>
+          {% endif %}
+          {% if row.decision.status != status_draft %}<span class="badge processing">{{ row.decision.get_status_display }}</span>{% endif %}
+        </div>
+      </div>
+
+      {% if editable %}
+      <details>
+        <summary class="meta" style="cursor:pointer">고치기</summary>
+        <div style="border-top:1px solid var(--line);padding-top:12px;margin-top:8px">
+        <div style="margin-top:8px">
+          {% for interpretation in row.interpretations %}
+          <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
+            <input type="radio" name="choice_{{ row.decision.id }}" value="{{ interpretation.choice_value }}" style="width:auto;margin-top:3px"
+              {% if interpretation.chosen %}checked{% endif %}>
+            <span>
+              {{ interpretation.text }}
+              {% if interpretation.recommended %}<span class="badge processing" style="margin-left:6px">AI 추천</span>{% endif %}
+              {% if interpretation.evidence %}<div class="meta" style="margin-top:4px">근거: "{{ interpretation.evidence }}"</div>{% endif %}
+            </span>
+          </label>
+          {% endfor %}
+          <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
+            <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_custom }}" style="width:auto;margin-top:3px"
+              {% if row.choice == choice_custom %}checked{% endif %}>
+            <span style="flex:1 1 auto">
+              <b>직접 쓰기</b>
+              <input type="text" name="custom_text_{{ row.decision.id }}" value="{{ row.custom_text }}"
+                placeholder="예: 민수가 금요일 18시까지 배포 스크립트를 정리하고 스테이징에서 한 번 돌려 본다" style="margin-top:6px">
+            </span>
+          </label>
+          <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
+            <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_undecided }}" style="width:auto;margin-top:3px"
+              {% if row.choice == choice_undecided %}checked{% endif %}>
+            <span><b>다음 회의로 넘김</b> — 이 회의에서 결론이 나지 않았다</span>
+          </label>
+        </div>
+        </div>
+      </details>
+      <div class="meta">다르게 이해될 여지가 없어 위 문장이 그대로 공개됩니다. 따로 고를 것이 없습니다.</div>
+      {% endif %}
+
+      {# 공개된 뒤: 확정 내용과 수정 폼. 수정하면 그 항목의 팀원 확인 기록이 전부 지워진다. #}
+      {% if row.decision.status == status_published %}
+      <div class="success" style="margin:0">확정: {{ row.decision.published_text }}</div>
+      {% comment %}
+        작성자 없는 숫자와 의견 문장만 받는다 — 누가 '달랐어요'를 골랐는지는 뷰에서부터 담지 않는다.
+        응답 대상 전원이 응답하기 전에는 row.ack 자체가 없다(응답자가 적을 때 숫자만으로
+        누가 골랐는지 특정되는 것을 막는다).
+      {% endcomment %}
+      {% if row.ack %}
+      <div class="meta">확인 {{ row.ack.ack }}명 / 달랐어요 {{ row.ack.differ }}명</div>
+      {% else %}
+      <div class="meta">{{ row.target_count }}명 중 {{ row.responded }}명 응답 · 결과는 모두 응답하면 보여요</div>
+      {% endif %}
+      {% if row.comments %}
+      <ul class="plain" style="margin:0">
+        {% for comment in row.comments %}<li class="meta">· "{{ comment }}"</li>{% endfor %}
+      </ul>
+      {% endif %}
+      {% if row.decision.final_text %}
+      <form method="post" style="margin:0">{% csrf_token %}
+        <input type="hidden" name="decision_id" value="{{ row.decision.id }}">
+        <div class="field" style="margin:0">
+          <label for="final_text_{{ row.decision.id }}">확정 문장 수정</label>
+          <input type="text" id="final_text_{{ row.decision.id }}" name="final_text" value="{{ row.decision.final_text }}">
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button name="action" value="revise" class="btn sm secondary"
+            onclick="return confirm('문장을 고치면 이 항목의 팀원 확인 기록이 모두 지워지고 다시 받습니다. 계속할까요?');">확정 문장 수정</button>
+          {% if row.decision.revised %}<span class="muted">수정됨 — 팀원에게 다시 확인 요청 중</span>{% endif %}
+        </div>
+      </form>
+      {% endif %}
+      {% elif row.decision.status == status_undecided %}
+      <div class="notice" style="margin:0">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;margin-top:1px"><path d="M12 9v4M12 17h.01M10.3 3.86 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.86a2 2 0 0 0-3.4 0Z"/></svg>
+        <span><b>미결정</b> — 다음 회의 화면에 "지난 회의 미결정 안건"으로 계속 보입니다.</span>
+      </div>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
 
   {% if editable %}
   <div class="row" style="margin-top:18px">
     <button name="action" value="save" class="secondary">저장</button>
     <button name="action" value="publish"{% if not can_publish %} disabled title="처리하지 않은 항목이 있습니다"{% endif %}
-      onclick="return confirm('{{ draft_count }}개 항목을 팀원에게 공개할까요? 공개 후에는 명세를 수정할 수 없습니다.');">
-      확정 명세 공개 ({{ draft_count }}개)
+      onclick="return confirm('{{ draft_count }}개 항목을 팀원에게 공개할까요? 공개 후에는 선택을 되돌릴 수 없습니다.');">
+      확정 문장 공개 ({{ draft_count }}개)
     </button>
   </div>
   {% if blocker_count %}
