@@ -134,10 +134,11 @@ class Question(models.Model):
 
 
 class Decision(models.Model):
-    """회의 원문에서 추출한 결정 하나를 실행 명세로 옮긴 것.
+    """회의 원문에서 뽑은 결정 하나와, 그대로 공개될 확정 문장.
 
-    [누가 · 무엇을 · 언제까지 · 완료 기준 · 확정 여부]가 한 줄의 명세가 되고, 빈칸이나
-    모호어가 있으면 warnings에 경고 사유가 쌓인다(회의당 최대 5개까지만 만든다).
+    what은 안건 한 줄, final_text는 팀원에게 그대로 공개되는 문장이다. who·due_text·
+    done_criteria·confirm_state는 이번 재설계 전 레코드를 보존하려고 남겨 둔 칸이고 신규
+    컴파일에서는 채우지 않는다 — 공개 기준이 둘이 되지 않게 하려는 것이다.
 
     AI가 다르게 이해될 수 있다고 본 항목은 divergence_reason이 차고, 규칙 안전망이 걸린
     항목은 warnings가 찬다. 둘 중 하나라도 있으면(has_warning) 진행자가 확인해야 공개된다.
@@ -207,15 +208,6 @@ class Decision(models.Model):
         return bool(self.warnings or self.divergence_reason)
 
     @property
-    def is_settled(self):
-        """진행자가 이 항목을 처리했는가 — 확정 문장을 골랐거나 '다음 회의로' 넘겼거나.
-
-        확인 필요가 아닌 항목(has_warning이 False)은 고를 것이 없으므로 처리된 것으로 본다.
-        확인 필요 항목 중 하나라도 처리되지 않으면 "확정 명세 공개"를 막는다.
-        """
-        return bool(self.final_text) or self.marked_undecided or not self.has_warning
-
-    @property
     def needs_host(self):
         """진행자가 손대야 하는 항목 — 확인이 필요하거나, 공개할 문장이 아직 없거나.
 
@@ -227,8 +219,13 @@ class Decision(models.Model):
 
     @property
     def blocks_publish(self):
-        """이 항목 때문에 공개를 막아야 하는가. 화면의 비활성 판정과 서버의 거부가 같이 쓴다."""
-        return not self.is_settled or not self.published_text
+        """이 항목 때문에 공개를 막아야 하는가 — 공개할 문장이 없으면 막는다.
+
+        조건은 이 하나다. '다음 회의로 넘김'을 고른 항목도 문장을 받으므로
+        (decision_compiler.undecided_sentence) 여기서 갈라지지 않는다. 화면의 버튼 비활성
+        판정과 서버의 거부가 이 프로퍼티 하나를 같이 쓴다.
+        """
+        return not self.published_text
 
     @property
     def published_text(self):
