@@ -20,8 +20,18 @@ def spec_sentence(who, what, due, done):
     return " · ".join(part for part in (who, what, due, done) if part)
 
 
+# 미결정 항목의 꼬리말. decision_compiler.undecided_sentence()와 같은 문구이며 쌍으로 고쳐야
+# 한다 — 마이그레이션은 앱 코드를 import하면 안 되므로(나중에 그 함수가 바뀌어도 과거
+# 마이그레이션의 결과는 그대로여야 한다) 문구를 여기 복사해 둔다.
+CARRIED_OVER_SUFFIX = " — 이번 회의에서 결론이 나지 않았음 (다음 회의로)"
+
+
 def fill_missing_final_text(Decision):
-    """공개(published/undecided)됐는데 확정 문장이 빈 레코드만 채우고, 채운 수를 돌려준다."""
+    """공개(published/undecided)됐는데 확정 문장이 빈 레코드만 채우고, 채운 수를 돌려준다.
+
+    미결정 행에는 꼬리말을 붙인다. 팀원 화면이 상태 분기 없이 final_text만 보여주므로,
+    꼬리말이 없으면 다음 회의로 넘어간 안건이 보통 확정 결정과 똑같이 읽힌다.
+    """
     filled = 0
     rows = Decision.objects.filter(status__in=("published", "undecided"), final_text="")
     for decision in rows:
@@ -30,6 +40,8 @@ def fill_missing_final_text(Decision):
         ) or decision.what
         if not sentence:
             continue
+        if decision.status == "undecided":
+            sentence += CARRIED_OVER_SUFFIX
         Decision.objects.filter(pk=decision.pk).update(final_text=sentence)
         filled += 1
     return filled

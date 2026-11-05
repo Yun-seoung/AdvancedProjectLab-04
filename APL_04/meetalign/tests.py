@@ -1613,6 +1613,18 @@ class DecisionParseTests(TestCase):
         items = decision_compiler.parse_items(raw, source_text=source)
         self.assertEqual(len(items[0]["candidates"]), 2)
 
+    def test_parse_items_requires_evidence_for_a_clear_item(self):
+        """근거가 아예 없는 확정 문장은 검증을 건너뛰지 않고 비운다.
+
+        후보 쪽의 빈 근거는 가짜 응답 모드 통로로 남기지만(바로 아래 테스트), 전사 원문을
+        들고 검증하는 중이라면 근거 없는 문장은 "원문에 있다"고 볼 수 없다.
+        """
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": False,
+                           "final": "민수가 30일로 바꾼다"}], ensure_ascii=False)
+        self.assertEqual(decision_compiler.parse_items(raw, source_text="로그 이야기")[0]["final"], "")
+        # 원문을 들고 있지 않을 때(가짜 응답 모드)는 그대로 둔다.
+        self.assertEqual(decision_compiler.parse_items(raw)[0]["final"], "민수가 30일로 바꾼다")
+
     def test_parse_items_clears_a_final_whose_evidence_is_not_in_the_transcript(self):
         raw = json.dumps([{"topic": self.TOPIC, "ambiguous": False,
                            "final": "민수가 30일로 바꾼다", "evidence": "회의에 없던 문장"}],
@@ -1723,6 +1735,39 @@ class DecisionCompileTests(TestCase):
         self.assertEqual(decision.warnings, ["원문에 모호한 표현이 있어요: '쯤'"])
         self.assertEqual(decision.interpretations.count(), 1)
         self.assertFalse(decision.is_settled)
+
+    def test_an_ambiguous_item_without_a_reason_still_needs_the_host(self):
+        """AI가 모호하다고 하면서 이유를 비워 보내도 확인 대상으로 남아야 한다.
+
+        이유와 규칙 사유가 모두 비면 has_warning이 False가 되어, AI가 갈린다고 본 항목이
+        진행자 확인 없이 '그대로 공개될 결정'으로 분류된다.
+        """
+        item = {"topic": "로그 보관 기간", "ambiguous": True,
+                "candidates": self.AMBIGUOUS["candidates"]}
+        _, by_topic, _ = self._compiled(item)
+        decision = by_topic["로그 보관 기간"]
+        self.assertTrue(decision.divergence_reason)
+        self.assertTrue(decision.has_warning)
+        self.assertFalse(decision.is_settled)
+        self.assertEqual(decision.interpretations.count(), 2)
+
+    def test_compiling_twice_at_once_is_refused_not_crashed(self):
+        """두 요청이 동시에 컴파일하면 사유를 보여준다 — 500이 아니라.
+
+        이미 컴파일됐는지 보는 검사가 LLM 호출 앞에 있으므로, 버튼을 두 번 누르면 두 요청이
+        모두 빈 상태를 보고 통과해 같은 order를 쓰려 한다.
+        """
+        def create_then_answer(*args, **kwargs):
+            # 먼저 들어온 요청이 저장을 끝낸 상황을 흉내 낸다.
+            Decision.objects.create(meeting=self.meeting, order=0, what="먼저 저장된 결정")
+            return json.dumps([self.CLEAR], ensure_ascii=False)
+
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), \
+             patch.object(services, "_generate", side_effect=create_then_answer):
+            with self.assertRaises(decision_compiler.DecisionCompileError):
+                decision_compiler.compile_meeting(self.meeting)
+        # 먼저 저장된 결정만 남고 반쯤 저장된 항목이 섞이지 않는다.
+        self.assertEqual([d.what for d in self.meeting.decisions.all()], ["먼저 저장된 결정"])
 
     def test_the_rules_do_not_scan_candidates_of_an_ambiguous_item(self):
         item = dict(self.AMBIGUOUS, candidates=[
@@ -1934,6 +1979,33 @@ class DecisionReviewTests(TestCase):
         r = self.client.get(self.url)
         for name in ("member", "outsider"):
             self.assertNotContains(r, name)
+
+    def test_the_screen_offers_choices_for_an_ai_only_ambiguous_item(self):
+        """AI가 모호하다고 본 항목(규칙 사유는 없음)에도 선택지를 그려야 한다.
+
+        그리지 않으면 진행자는 "확정하지 않은 항목이 있습니다"를 보면서 처리할 UI를 찾을 수
+        없고 공개가 영구 차단된다.
+        """
+        self._compile()
+        decision = next(d for d in self.meeting.decisions.all() if d.has_warning)
+        self.assertEqual(decision.warnings, [])          # AI 판정만 있는 항목
+        html = self.client.get(self.url).content.decode()
+        self.assertIn('name="choice_%d"' % decision.id, html)
+        # 사유에 따옴표가 들어 있어 템플릿이 이스케이프한다.
+        from django.utils.html import escape
+
+        self.assertIn(escape(decision.divergence_reason), html)
+
+    def test_the_note_block_does_not_mention_a_removed_limit(self):
+        html = self.client.get(self.url).content.decode()
+        self.assertNotIn("회의당 최대 개", html)
+        self.assertNotIn("빈칸", html)
+
+    def test_the_header_counts_items_that_need_the_host(self):
+        self._compile()
+        r = self.client.get(self.url)
+        # 가짜 응답 3건 중 2건이 확인 필요다. warnings만 세면 0개로 나와 공개 차단과 모순된다.
+        self.assertEqual(r.context["warned_count"], 2)
 
 
 class DecisionEntryLinkTests(TestCase):
@@ -2191,6 +2263,24 @@ class DecisionModelTests(TestCase):
         self.assertEqual(draft.final_text, "")
         self.assertEqual(empty.final_text, "민수 · 문서")
         self.assertEqual(kept.final_text, "이미 있는 문장")
+
+    def test_0022_marks_backfilled_undecided_rows_as_carried_over(self):
+        """보정된 미결정 행은 다음 회의로 넘어간 안건임이 문장에 드러나야 한다.
+
+        팀원 화면이 상태 분기를 없애고 final_text만 보여주므로, 꼬리말이 없으면 미결정이
+        보통 확정 결정과 똑같이 읽힌다.
+        """
+        fill = self._migration().fill_missing_final_text
+        carried = self._decision(
+            order=14, who="민수", what="배포 범위 정하기", due_text="", done_criteria="",
+            status=Decision.STATUS_UNDECIDED,
+        )
+        self.assertEqual(fill(Decision), 1)
+        carried.refresh_from_db()
+        self.assertEqual(
+            carried.final_text,
+            "민수 · 배포 범위 정하기 — 이번 회의에서 결론이 나지 않았음 (다음 회의로)",
+        )
 
     def test_items_without_warnings_are_settled_with_nothing_to_choose(self):
         decision = self._decision(warnings=[])
@@ -2530,7 +2620,7 @@ class DecisionConfirmTests(TestCase):
         self.assertTrue(plain.is_settled)
         row = next(r for r in self.client.get(self.url).context["rows"] if r["decision"].id == plain.id)
         self.assertFalse(row["blocking"])
-        self.assertContains(self.client.get(self.url), "따로 확정할 것이 없습니다")
+        self.assertContains(self.client.get(self.url), "따로 고를 것이 없습니다")
 
     def test_non_host_cannot_confirm(self):
         client = Client()
@@ -2608,6 +2698,25 @@ class DecisionPublishTests(TestCase):
         self.client.post(self.url, {"action": "publish"})
         r = self.client.post(self.url, {"action": "publish"})
         self.assertContains(r, "공개할 항목이 없습니다")
+
+    def test_an_item_without_a_sentence_cannot_be_published(self):
+        """문장이 빈 항목은 어떤 경로로 들어왔든 공개를 막는다.
+
+        팀원 화면은 final_text 하나만 보여주므로, 문장이 없으면 번호만 있는 빈 줄이 공개된다.
+        AI가 모호 판정을 하면서 이유를 비워 보내거나, 이번 재설계 전에 만들어진 무경고
+        draft가 그대로 공개로 넘어가면 그 상태가 된다.
+        """
+        self._confirm_all()
+        blank = Decision.objects.create(
+            meeting=self.meeting, order=90, what="문장이 비어 있는 항목",
+            warnings=[], divergence_reason="", final_text="",
+        )
+        self.assertIn(blank, decision_compiler.publish_blockers(
+            list(self.meeting.decisions.filter(status=Decision.STATUS_DRAFT))))
+        r = self.client.post(self.url, {"action": "publish"})
+        self.assertContains(r, "아직 확정하지 않은 항목")
+        blank.refresh_from_db()
+        self.assertEqual(blank.status, Decision.STATUS_DRAFT)
 
     # ---- 공개 ----
 

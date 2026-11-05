@@ -36,7 +36,7 @@ AI를 한 번 부른다. 전사 원문을 보내고 결정마다
 import json
 import re
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 
 from . import services
 from .models import Decision, DecisionAgreement, Interpretation
@@ -105,12 +105,13 @@ FAKE_DECISIONS = [
 
 
 class DecisionCompileError(Exception):
-    """LLM 응답을 재시도까지 하고도 명세/해석으로 못 읽었을 때. 진행자 화면에 사유를 그대로 띄운다."""
+    """LLM 응답을 재시도까지 하고도 결정으로 못 읽었을 때, 또는 저장 중에 같은 회의를 두 번
+    컴파일한 것이 드러났을 때. 진행자 화면에 사유를 그대로 띄운다."""
 
 
 # ---------------------------------------------------------------------------
-# 경고 판정 — LLM이 아니라 이쪽에서 규칙으로 센다. 같은 전사본이면 항상 같은 경고가 나와야
-# 하고(재현성), "경고 최대 5개" 같은 제한도 여기서 지켜야 하기 때문이다.
+# 규칙 안전망 — AI가 '명확'이라고 한 항목만 되짚는다. 같은 입력이면 항상 같은 사유가 나와야
+# 하므로(재현성) LLM이 아니라 이쪽에서 규칙으로 센다.
 # ---------------------------------------------------------------------------
 
 
@@ -315,7 +316,11 @@ def parse_items(raw, source_text=None):
         ambiguous = bool(row.get("ambiguous"))
         final = "" if ambiguous else str(row.get("final", "")).strip()
         evidence = "" if ambiguous else str(row.get("evidence", "")).strip()
-        if final and normalized_source is not None and evidence and services._normalize_for_match(evidence) not in normalized_source:
+        # 원문을 들고 검증하는 중이라면, 근거가 없는 확정 문장은 "원문에 있다"고 볼 수 없다.
+        # (후보 쪽의 빈 근거는 가짜 응답 모드 통로로 남긴다 — _parse_candidates 참고.)
+        if final and normalized_source is not None and (
+            not evidence or services._normalize_for_match(evidence) not in normalized_source
+        ):
             final = ""
         items.append({
             "topic": topic,
@@ -356,6 +361,24 @@ def compile_meeting(meeting):
 
     ambiguous_count = 0
     few_candidates = 0
+    try:
+        ambiguous_count, few_candidates = _save_items(meeting, items)
+    except IntegrityError:
+        # 진행자가 컴파일 버튼을 두 번 눌렀을 때. 위의 exists() 검사는 LLM 호출(수 초) 앞에
+        # 있으므로 두 요청이 모두 빈 상태를 보고 통과해 같은 order를 쓰려 한다. 먼저 저장한
+        # 쪽의 결과를 그대로 두고, 늦게 온 쪽에는 사유를 보여준다(500 대신).
+        raise DecisionCompileError("이미 컴파일된 회의입니다. 화면을 새로 고쳐 주세요.")
+    return {
+        "decisions": len(items),
+        "ambiguous": ambiguous_count,
+        "few_candidates": few_candidates,
+    }
+
+
+def _save_items(meeting, items):
+    """응답 항목들을 Decision/Interpretation으로 저장하고 (확인 필요 수, 후보 없는 수)를 돌려준다."""
+    ambiguous_count = 0
+    few_candidates = 0
     with transaction.atomic():
         for order, item in enumerate(items):
             warnings, divergence_reason, final_text, candidates = _resolve_item(item)
@@ -373,11 +396,7 @@ def compile_meeting(meeting):
                 ambiguous_count += 1
                 if not candidates:
                     few_candidates += 1
-    return {
-        "decisions": len(items),
-        "ambiguous": ambiguous_count,
-        "few_candidates": few_candidates,
-    }
+    return ambiguous_count, few_candidates
 
 
 def _resolve_item(item):
@@ -393,7 +412,9 @@ def _resolve_item(item):
        문장이 곧 확정 내용이고 진행자는 탭하지 않는다.
     """
     if item["ambiguous"]:
-        return [], item["why"], "", item["candidates"]
+        # AI가 이유를 비워 보낼 수 있다. 사유가 비면 has_warning이 False가 되어 모호한 결정이
+        # 확인 없이 공개되므로, 기본 문구로라도 채워 확인 대상으로 남긴다.
+        return [], item["why"] or "AI가 다르게 이해할 수 있다고 봤어요", "", item["candidates"]
     if not item["final"]:
         return [], "근거를 원문에서 확인하지 못했어요", "", []
     warnings = safety_warnings(item["final"], item["evidence"])
@@ -406,11 +427,11 @@ def _resolve_item(item):
 
 
 # ---------------------------------------------------------------------------
-# ③ 진행자 확정 + ④ 확정 명세 공개
+# ③ 진행자 확정 + ④ 확정 문장 공개
 #
-# 진행자는 경고가 붙은 항목마다 [후보 선택 | 직접 작성 | 아직 미정] 중 하나를 고른다.
-# 경고가 없는 항목은 명세 자체가 확정 내용이라 고를 것이 없고(Decision.is_settled), 공개
-# 대상에는 똑같이 포함된다 — 팀원은 그 항목도 확인한다.
+# 진행자는 확인이 필요한 항목마다(Decision.has_warning) [후보 선택 | 직접 쓰기 | 다음 회의로
+# 넘김] 중 하나를 고른다. 확인이 필요 없는 항목은 AI가 쓴 문장이 곧 확정 내용이라 고를 것이
+# 없고(Decision.is_settled), 공개 대상에는 똑같이 포함된다 — 팀원은 그 항목도 확인한다.
 # ---------------------------------------------------------------------------
 
 # 진행자 확정 라디오 버튼 value. "candidate:12" 형태.
@@ -430,12 +451,19 @@ def undecided_sentence(topic):
 
 
 def publish_blockers(decisions):
-    """공개를 막는 항목 — 경고가 붙었는데 진행자가 아직 아무것도 고르지 않은 것.
+    """공개를 막는 항목 — 확인이 필요한데 진행자가 아직 고르지 않은 것, 그리고 문장이 빈 것.
 
     이 목록이 비어 있어야 "확정 명세 공개"를 누를 수 있다. 화면의 버튼 비활성화와 서버의
     거부가 같은 판정을 쓰도록 여기 한 곳에서만 센다.
+
+    문장 유무를 함께 보는 이유: 팀원 화면은 final_text 하나만 보여주므로 문장이 없으면 번호만
+    있는 빈 줄이 공개된다. AI가 모호 판정을 하면서 이유를 비워 보내거나, 이번 재설계 전에
+    만들어진 무경고 draft가 그대로 넘어오는 경로가 있어 마지막 그물을 여기 둔다.
     """
-    return [decision for decision in decisions if not decision.is_settled]
+    return [
+        decision for decision in decisions
+        if not decision.is_settled or not decision.published_text
+    ]
 
 
 def publish_decisions(meeting):

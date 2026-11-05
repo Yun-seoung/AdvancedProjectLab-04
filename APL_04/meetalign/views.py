@@ -541,7 +541,9 @@ def decision_review(request, meeting_id):
             "responded": summary.responded.get(decision.id, 0),
             "target_count": len(summary.targets),
         })
-    warned = [row for row in rows if row["decision"].warnings]
+    # 확인이 필요한 항목 수. AI 모호 판정은 warnings가 아니라 divergence_reason에 담기므로
+    # has_warning으로 세야 화면의 숫자와 공개 차단 판정이 어긋나지 않는다.
+    warned = [row for row in rows if row["decision"].has_warning]
     drafts = [row for row in rows if row["decision"].status == Decision.STATUS_DRAFT]
     blockers = [row for row in drafts if row["blocking"]]
     # 미확인 팀원 이름은 진행자 본인에게만 모은다. _require_host는 host가 비어 있는 회의를

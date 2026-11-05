@@ -139,8 +139,11 @@ class Decision(models.Model):
     [누가 · 무엇을 · 언제까지 · 완료 기준 · 확정 여부]가 한 줄의 명세가 되고, 빈칸이나
     모호어가 있으면 warnings에 경고 사유가 쌓인다(회의당 최대 5개까지만 만든다).
 
-    status는 draft(진행자 검토 중) → published(확정 명세 공개) 로 가고, 진행자가 '아직
-    미정'으로 넘긴 항목만 undecided가 되어 다음 회의로 이월된다.
+    AI가 다르게 이해될 수 있다고 본 항목은 divergence_reason이 차고, 규칙 안전망이 걸린
+    항목은 warnings가 찬다. 둘 중 하나라도 있으면(has_warning) 진행자가 확인해야 공개된다.
+
+    status는 draft(진행자 검토 중) → published(확정 문장 공개) 로 가고, 진행자가 '다음 회의로
+    넘김'을 고른 항목만 undecided가 되어 다음 회의로 이월된다.
     """
 
     CONFIRM_CONFIRMED = "confirmed"
@@ -176,8 +179,10 @@ class Decision(models.Model):
     # 그 아래 작게 보여주기 때문이다. 둘 중 하나라도 있으면 진행자 확인 대상이다(has_warning).
     divergence_reason = models.TextField(blank=True, default="")
     status = models.CharField(max_length=12, choices=STATUS_CHOICES, default=STATUS_DRAFT)
-    # 진행자가 확정한 한 줄. 해석 후보에서 고른 문장이거나 직접 쓴 문장이다.
-    # 경고가 없는 항목은 명세 자체가 확정 내용이라 비어 있을 수 있다.
+    # 그대로 공개되는 확정 문장. 공개 경로는 이 칸 하나뿐이다(published_text).
+    # 확인이 필요 없던 항목은 AI가 쓴 문장, 확인이 필요했던 항목은 진행자가 고르거나 직접 쓴
+    # 문장, '다음 회의로 넘김'은 undecided_sentence()가 만든 문장이 들어온다. 문장이 비어 있는
+    # 항목은 공개할 수 없다(publish_blockers가 막는다).
     final_text = models.TextField(blank=True, default="")
     # 진행자가 '아직 미정'으로 넘긴 항목. 공개 시점에 status=undecided가 된다.
     marked_undecided = models.BooleanField(default=False)
@@ -221,11 +226,15 @@ class Decision(models.Model):
 
 
 class Interpretation(models.Model):
-    """경고가 붙은 Decision 하나에 대해 AI가 '가상 청자'로서 만든 서로 다른 해석 후보.
+    """확인이 필요한 Decision 하나에 대해 AI가 만든, 그대로 공개될 확정 문장 후보.
 
-    evidence는 전사 원문에 그대로 등장하는 문장이어야 하며, 지어낸 근거가 붙은 해석은
-    저장 단계에서 버린다(공백을 무시한 뒤 원문에 그 문장이 실제로 있는지 비교한다).
-    정답은 없다 — 진행자가 참고해서 고르거나 직접 쓰는 데 쓴다. 팀원에게는 보여주지 않는다.
+    해석이 아니라 완성된 문장이다 — 진행자가 고르면 그 문장이 복사되어 final_text가 되고
+    팀원에게 그대로 공개된다. 그래서 누가·무엇을·언제까지·완료 기준이 문장 안에 들어 있어야 한다.
+
+    evidence는 전사 원문에 그대로 등장하는 문장이어야 하며, 지어낸 근거가 붙은 후보는 저장
+    단계에서 버린다(공백을 무시한 뒤 원문에 그 문장이 실제로 있는지 비교한다).
+    정답은 없다 — recommended는 근거가 가장 강한 하나를 가리키는 배지일 뿐이고, 미리 선택해
+    두지 않는다. 후보 목록 자체는 진행자에게만 보여주고 팀원에게는 보여주지 않는다.
     """
 
     decision = models.ForeignKey(Decision, on_delete=models.CASCADE, related_name="interpretations")

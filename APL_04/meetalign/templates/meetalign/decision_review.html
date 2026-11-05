@@ -1,8 +1,8 @@
 {% extends "meetalign/base.html" %}
 {% block note %}
-<li>경고 판정(빈칸·모호어·날짜 충돌)은 LLM이 아니라 decision_compiler.py의 규칙으로 센다. 회의당 최대 {{ max_warnings }}개.</li>
-<li>해석 후보의 근거 문장이 전사 원문에 없으면 저장 단계에서 버려진다. 후보는 진행자 참고용이며 팀원에게는 보이지 않는다.</li>
-<li>공개 전에는 팀원 화면에 확정 명세가 아예 담기지 않는다. 경고 항목을 하나라도 확정하지 않으면 공개 버튼이 막힌다.</li>
+<li>모호 여부는 AI가 판단한다. 규칙(decision_compiler.safety_warnings)은 AI가 '명확'이라고 한 항목의 확정 문장과 원문 근거만 되짚는 안전망이고, 확인 항목 수에 상한은 없다.</li>
+<li>후보의 근거 문장이 전사 원문에 없으면 저장 단계에서 버려진다. 후보는 진행자 참고용이며 팀원에게는 보이지 않는다.</li>
+<li>공개 전에는 팀원 화면에 확정 문장이 아예 담기지 않는다. 확인이 필요한 항목을 하나라도 처리하지 않으면 공개 버튼이 막힌다.</li>
 <li>공개 뒤 확정 문장을 고치면 그 항목의 팀원 확인 기록이 모두 지워지고 다시 받는다.</li>
 {% endblock %}
 {% block content %}
@@ -22,8 +22,8 @@
   </div>
   <h2 class="section-title">결정 컴파일 실행</h2>
   <p class="muted" style="margin:-4px 0 14px">
-    전사 원문에서 결정을 찾아 [누가 · 무엇을 · 언제까지 · 완료 기준 · 확정 여부]로 옮기고,
-    빈칸이나 모호한 표현이 있는 항목에는 컴파일 경고를 붙입니다.
+    전사 원문에서 결정을 찾아 그대로 공개될 확정 문장으로 옮기고, 다르게 이해될 수 있는
+    항목에는 후보 2~3개를 붙여 진행자가 고르게 합니다.
   </p>
   <form method="post">{% csrf_token %}
     <button name="action" value="compile">
@@ -39,7 +39,7 @@
     <div>
       <h2 class="section-title" style="margin-top:0">실행 명세 {{ rows|length }}개</h2>
       <p class="muted" style="margin:-4px 0 0">
-        경고 {{ warned_count }}개{% if blocker_count %} · 확정 안 한 항목 {{ blocker_count }}개{% endif %}{% if published_count %} · 공개 {{ published_count }}개{% endif %}{% if undecided_count %} · 미결정 {{ undecided_count }}개{% endif %}
+        확인 필요 {{ warned_count }}개{% if blocker_count %} · 확정 안 한 항목 {{ blocker_count }}개{% endif %}{% if published_count %} · 공개 {{ published_count }}개{% endif %}{% if undecided_count %} · 미결정 {{ undecided_count }}개{% endif %}
       </p>
     </div>
     {% if editable %}
@@ -67,14 +67,18 @@
           </div>
         </div>
         <div class="row" style="gap:6px">
-          {% if row.decision.warnings %}
-            <span class="badge due">경고 {{ row.decision.warnings|length }}</span>
+          {% if row.decision.has_warning %}
+            <span class="badge due">확인 필요</span>
           {% else %}
-            <span class="badge done">경고 없음</span>
+            <span class="badge done">그대로 공개</span>
           {% endif %}
           {% if row.decision.status != status_draft %}<span class="badge processing">{{ row.decision.get_status_display }}</span>{% endif %}
         </div>
       </div>
+
+      {% if row.decision.divergence_reason %}
+      <div style="font-weight:600;font-size:.9rem">{{ row.decision.divergence_reason }}</div>
+      {% endif %}
 
       {% if row.decision.warnings %}
       <div class="record" style="font-size:.88rem">
@@ -146,12 +150,12 @@
           {% endfor %}
         </ul>
       </div>
-      {% elif row.decision.warnings %}
-        <div class="meta">해석 후보가 없습니다 — 근거 검증을 통과한 후보가 하나도 없었습니다. 직접 작성이나 '아직 미정'으로만 처리할 수 있습니다.</div>
+      {% elif row.decision.has_warning %}
+        <div class="meta">확정 문장 후보가 없습니다 — 근거 검증을 통과한 후보가 하나도 없었습니다. 직접 작성이나 '아직 미정'으로만 처리할 수 있습니다.</div>
       {% endif %}
 
-      {# ③ 진행자 확정. 경고가 붙은 항목만 고를 것이 있다. #}
-      {% if editable and row.decision.warnings %}
+      {# ③ 진행자 확정. 확인이 필요한 항목만 고를 것이 있다. #}
+      {% if editable and row.decision.has_warning %}
       <div style="border-top:1px solid var(--line);padding-top:12px">
         <span class="label" style="font-size:.86rem;font-weight:700;color:var(--ink-soft)">이 항목을 어떻게 확정할까요?</span>
         {% if row.blocking %}<span class="badge failed" style="margin-left:6px">미확정</span>{% endif %}
@@ -180,7 +184,7 @@
         </div>
       </div>
       {% elif editable %}
-        <div class="meta">경고가 없어 명세 그대로 공개됩니다. 따로 확정할 것이 없습니다.</div>
+        <div class="meta">다르게 이해될 여지가 없어 위 문장이 그대로 공개됩니다. 따로 고를 것이 없습니다.</div>
       {% endif %}
 
       {# 공개된 뒤: 확정 내용과 수정 폼. 수정하면 그 항목의 팀원 확인 기록이 전부 지워진다. #}
@@ -228,13 +232,13 @@
   {% if editable %}
   <div class="row" style="margin-top:18px">
     <button name="action" value="save" class="secondary">저장</button>
-    <button name="action" value="publish"{% if not can_publish %} disabled title="확정하지 않은 경고 항목이 있습니다"{% endif %}
+    <button name="action" value="publish"{% if not can_publish %} disabled title="처리하지 않은 항목이 있습니다"{% endif %}
       onclick="return confirm('{{ draft_count }}개 항목을 팀원에게 공개할까요? 공개 후에는 명세를 수정할 수 없습니다.');">
       확정 명세 공개 ({{ draft_count }}개)
     </button>
   </div>
   {% if blocker_count %}
-    <p class="muted" style="margin:10px 0 0">확정하지 않은 경고 항목 {{ blocker_count }}개를 처리하면 공개할 수 있습니다. 저장을 먼저 눌러 주세요.</p>
+    <p class="muted" style="margin:10px 0 0">처리하지 않은 항목 {{ blocker_count }}개를 처리하면 공개할 수 있습니다. 저장을 먼저 눌러 주세요.</p>
   {% endif %}
   </form>
   {% endif %}
