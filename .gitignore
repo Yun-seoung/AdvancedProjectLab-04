@@ -24,6 +24,7 @@ staticfiles/
 # Environment variables / secrets
 .env
 .env.*
+!.env.example
 
 # Testing / coverage
 .pytest_cache/
