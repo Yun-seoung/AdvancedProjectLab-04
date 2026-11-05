@@ -23,8 +23,7 @@
     {% for row in rows %}
     <li class="item" style="flex-direction:column;align-items:stretch;gap:10px">
       <div class="item-text">
-        {# 미결정 항목은 확정 문장이 없어 빈칸 명세('? · …')가 되므로 안건 이름만 보인다. #}
-        <span class="title">{{ forloop.counter }}. {% if row.decision.status == status_published %}{{ row.decision.published_text }}{% else %}{{ row.decision.what }}{% endif %}</span>
+        <span class="title">{{ forloop.counter }}. {{ row.decision.published_text }}</span>
         {% if row.decision.status == status_published %}
           {% if row.mine %}
             <div class="meta">내 선택: <b>{{ row.mine.get_kind_display }}</b>{% if row.mine.comment %} · "{{ row.mine.comment }}"{% endif %}</div>

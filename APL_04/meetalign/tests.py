@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import types
@@ -84,6 +85,8 @@ class AuthTests(TestCase):
 
 
 @override_settings(BACKGROUND_RECORDING=False)
+
+
 class PrototypeFlowTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("a", password="pw12345!")
@@ -421,6 +424,8 @@ class LanguageFilterTests(TestCase):
 
 
 @override_settings(BACKGROUND_RECORDING=False)
+
+
 class LocalSTTTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("a", password="pw12345!")
@@ -968,6 +973,8 @@ class SecurityFixTests(TestCase):
 
 
 @override_settings(BACKGROUND_RECORDING=False)
+
+
 class MeetingSummaryTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("a", password="pw12345!")
@@ -1008,6 +1015,8 @@ class MeetingSummaryTests(TestCase):
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(), BACKGROUND_RECORDING=False)
+
+
 class BackgroundProcessingTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("a", password="pw12345!")
@@ -1209,6 +1218,8 @@ class BackgroundProcessingTests(TestCase):
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(), BACKGROUND_RECORDING=False)
+
+
 class StuckAndFileAccessTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("a", password="pw12345!")
@@ -1337,6 +1348,8 @@ class DesignAlignmentTests(TestCase):
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(), BACKGROUND_RECORDING=False)
+
+
 class FollowupTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("a", password="pw12345!")
@@ -1355,6 +1368,8 @@ class FollowupTests(TestCase):
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(), BACKGROUND_RECORDING=False)
+
+
 class MultipleRecordingsTests(TestCase):
     def setUp(self):
         self.user = User.objects.create_user("a", password="pw12345!")
@@ -1447,148 +1462,221 @@ class DeleteTests(TestCase):
         self.assertNotContains(r, "회의 삭제")
 
 
-def _spec(who="민수", what="배포 준비", due="금요일", done="스테이징 확인", state=Decision.CONFIRM_CONFIRMED):
-    return {"who": who, "what": what, "due": due, "done": done, "state": state}
-
-
 class DecisionWarningTests(TestCase):
-    """① 컴파일의 경고 판정. LLM이 아니라 decision_compiler의 규칙으로 세므로 DB도 LLM도 필요 없다."""
+    """규칙 안전망. AI가 '명확'이라 한 항목의 확정 문장과 원문 근거만 되짚는다.
 
-    def test_blank_fields_each_raise_their_own_warning(self):
-        warnings = decision_compiler.warnings_for([_spec(who="", due="", done="")])[0]
-        self.assertEqual(warnings, ["담당자 빈칸", "기한 빈칸", "완료 기준 빈칸"])
+    빈칸은 더 이상 사유가 아니고(빈칸만으로는 묻지 않는다), 모호 판정 자체는 AI가 한다.
+    DB도 LLM도 필요 없는 순수 함수 테스트다.
+    """
 
-    def test_fully_filled_spec_has_no_warning(self):
-        self.assertEqual(decision_compiler.warnings_for([_spec()])[0], [])
+    # ---- safety_warnings: AI가 '명확'이라 한 항목만 되짚는 안전망 ----
 
-    def test_each_ambiguous_phrase_is_detected(self):
-        for phrase in decision_compiler.AMBIGUOUS_PHRASES:
-            warnings = decision_compiler.warnings_for([_spec(due="%s 끝내기" % phrase)])[0]
-            self.assertIn("모호어 '%s'" % phrase, warnings, phrase)
+    def test_safety_catches_an_ambiguous_phrase_in_the_sentence(self):
+        self.assertEqual(
+            decision_compiler.safety_warnings("나중에 로깅 기준을 맞춘다", "로깅은 맞춰야죠"),
+            ["확정 문장에 모호한 표현이 있어요: '나중에'"],
+        )
 
-    def test_two_dates_in_one_spec_raise_a_conflict_warning(self):
-        warnings = decision_compiler.warnings_for([_spec(due="금요일 아니면 다음 주 월요일")])[0]
-        self.assertTrue(any(w.startswith("같은 항목에 다른 날짜") for w in warnings), warnings)
+    def test_safety_catches_an_ambiguous_phrase_only_in_the_transcript(self):
+        """원문은 모호한데 AI가 혼자 해소한 경우 — 회의에서 정해지지 않은 것이므로 묻는다."""
+        self.assertEqual(
+            decision_compiler.safety_warnings("민수가 다음 주 금요일까지 배포한다", "다음 주쯤 할게요"),
+            ["원문에 모호한 표현이 있어요: '쯤'"],
+        )
 
-    def test_a_single_date_written_as_month_and_day_is_not_a_conflict(self):
-        # "12월 5일"을 "12월"과 "5일"로 쪼개 세면 날짜가 하나인 명세에도 경고가 붙는다.
-        warnings = decision_compiler.warnings_for([_spec(due="12월 5일")])[0]
-        self.assertFalse(any(w.startswith("같은 항목에 다른 날짜") for w in warnings), warnings)
+    def test_safety_lists_the_same_phrase_once(self):
+        self.assertEqual(
+            decision_compiler.safety_warnings("나중에 맞춘다", "나중에 맞추죠"),
+            ["확정 문장에 모호한 표현이 있어요: '나중에'"],
+        )
 
-    def test_two_quantities_in_one_spec_raise_a_conflict_warning(self):
-        warnings = decision_compiler.warnings_for([_spec(what="테스트 3개 작성", done="5개 통과")])[0]
-        self.assertTrue(any(w.startswith("같은 항목에 다른 숫자") for w in warnings), warnings)
+    def test_safety_catches_conflicting_dates(self):
+        self.assertEqual(
+            decision_compiler.safety_warnings("금요일 아니면 월요일에 배포한다", ""),
+            ["확정 문장에 다른 날짜가 섞여 있어요: 금요일, 월요일"],
+        )
 
-    def test_same_owner_with_different_due_dates_warns_on_both_items(self):
-        rows = decision_compiler.warnings_for([
-            _spec(who="민수", what="배포", due="금요일"),
-            _spec(who="민수", what="문서", due="다음 주 화요일"),
-        ])
-        for warnings in rows:
-            self.assertTrue(any("'민수'에게 다른 날짜" in w for w in warnings), warnings)
+    def test_safety_does_not_split_a_single_date(self):
+        self.assertEqual(decision_compiler.safety_warnings("12월 5일까지 배포한다", ""), [])
 
-    def test_same_owner_with_the_same_due_date_does_not_warn(self):
-        rows = decision_compiler.warnings_for([
-            _spec(who="민수", what="배포", due="금요일"),
-            _spec(who="민수", what="문서", due="금요일"),
-        ])
-        self.assertEqual(rows, [[], []])
+    def test_safety_reads_a_day_and_a_time_as_one_deadline(self):
+        """"금요일 18시까지"는 기한 하나다 — 날짜와 시각을 섞어 세면 거의 모든 문장이 걸린다."""
+        self.assertEqual(
+            decision_compiler.safety_warnings("민수가 금요일 18시까지 배포 스크립트를 정리한다", ""),
+            [],
+        )
 
-    def test_different_owners_are_not_compared_with_each_other(self):
-        rows = decision_compiler.warnings_for([
-            _spec(who="민수", due="금요일"),
-            _spec(who="영희", due="다음 주 화요일"),
-        ])
-        self.assertEqual(rows, [[], []])
+    def test_safety_catches_two_different_times(self):
+        self.assertEqual(
+            decision_compiler.safety_warnings("14시 아니면 18시에 배포한다", ""),
+            ["확정 문장에 다른 시각이 섞여 있어요: 14시, 18시"],
+        )
 
-    def test_at_most_five_items_keep_their_warnings(self):
-        specs = [_spec(what="할 일 %d" % i, done="") for i in range(7)]
-        rows = decision_compiler.warnings_for(specs)
-        self.assertEqual(sum(1 for warnings in rows if warnings), decision_compiler.MAX_WARNED_DECISIONS)
-        # 잘릴 때는 뒤쪽(전사본에서 나중에 나온) 항목의 경고를 비운다.
-        self.assertTrue(all(rows[i] for i in range(5)))
-        self.assertEqual(rows[5], [])
-        self.assertEqual(rows[6], [])
+    def test_safety_reads_a_deadline_and_a_duration_as_one_sentence(self):
+        """"12월 5일까지 … 30일로"는 기한 하나와 기간 하나다 — 날짜 충돌이 아니다.
 
-    def test_items_without_warnings_do_not_use_up_the_five_slots(self):
-        specs = [_spec(done="") for _ in range(3)] + [_spec() for _ in range(4)] + [_spec(done="") for _ in range(3)]
-        rows = decision_compiler.warnings_for(specs)
-        self.assertEqual(sum(1 for warnings in rows if warnings), 5)
+        확정 문장은 거의 항상 "언제까지 + 얼마나"를 함께 담으므로, 이것을 충돌로 세면
+        빈칸 경고를 없앤 자리에 같은 노이즈가 다시 들어온다.
+        """
+        self.assertEqual(
+            decision_compiler.safety_warnings(
+                "민수가 12월 5일까지 로그 보관 기간을 30일로 바꾼다", ""),
+            [],
+        )
 
-    def test_the_same_warning_reason_is_not_listed_twice(self):
-        warnings = decision_compiler.warnings_for([_spec(who="각자", what="각자 정리", due="", done="")])[0]
-        self.assertEqual(warnings.count("모호어 '각자'"), 1)
+    def test_safety_does_not_count_a_round_or_a_month_span_as_a_quantity(self):
+        self.assertEqual(
+            decision_compiler.safety_warnings(
+                "영희가 12월 8일까지 화면 2개를 QA하고 1차 결과를 공유한다", ""),
+            [],
+        )
+        self.assertEqual(
+            decision_compiler.safety_warnings(
+                "민수가 12월 5일까지 감사 로그 3개월 요건을 문서에 남긴다", ""),
+            [],
+        )
+
+    def test_safety_catches_conflicting_quantities(self):
+        self.assertEqual(
+            decision_compiler.safety_warnings("테스트 3개를 쓰고 5개를 통과시킨다", ""),
+            ["확정 문장에 다른 숫자가 섞여 있어요: 3개, 5개"],
+        )
 
 
 class DecisionParseTests(TestCase):
-    """LLM 응답의 JSON 스키마 검증과 근거 검증."""
+    """통합 응답 파서(parse_items)의 스키마 검증과 근거 검증."""
 
-    def test_parse_decisions_reads_the_documented_schema(self):
-        raw = json.dumps([{"who": "민수", "what": "배포", "due": "금요일", "done": "확인", "state": "확정"}], ensure_ascii=False)
-        specs = decision_compiler.parse_decisions(raw)
-        self.assertEqual(specs, [{
-            "who": "민수", "what": "배포", "due": "금요일", "done": "확인",
-            "state": Decision.CONFIRM_CONFIRMED,
-        }])
+    # ---- parse_items: 결정·모호 여부·이유·후보·근거·추천을 한 응답에서 읽는다 ----
 
-    def test_parse_decisions_survives_code_fences_and_prose(self):
-        raw = "네, 정리했습니다.\n```json\n[{\"what\": \"배포\"}]\n```\n이상입니다."
-        self.assertEqual(len(decision_compiler.parse_decisions(raw)), 1)
+    TOPIC = "로그 보관 기간"
+    CANDIDATES = [
+        {"text": "민수가 30일로 바꾼다", "evidence": "", "recommended": True},
+        {"text": "민수가 90일로 바꾼다", "evidence": ""},
+    ]
 
-    def test_parse_decisions_drops_items_without_what(self):
-        raw = json.dumps([{"who": "민수", "what": "", "due": "금요일"}, {"what": "배포"}], ensure_ascii=False)
-        specs = decision_compiler.parse_decisions(raw)
-        self.assertEqual([spec["what"] for spec in specs], ["배포"])
-
-    def test_parse_decisions_keeps_blank_who_and_due(self):
-        # 빈칸은 버릴 흠이 아니라 경고의 재료이므로 그대로 남아야 한다.
-        specs = decision_compiler.parse_decisions(json.dumps([{"what": "배포"}]))
-        self.assertEqual(specs[0]["who"], "")
-        self.assertEqual(specs[0]["due"], "")
-
-    def test_parse_decisions_defaults_unknown_state_to_unset(self):
-        specs = decision_compiler.parse_decisions(json.dumps([{"what": "배포", "state": "아마도"}], ensure_ascii=False))
-        self.assertEqual(specs[0]["state"], Decision.CONFIRM_UNSET)
-
-    def test_parse_decisions_returns_empty_on_broken_json(self):
-        self.assertEqual(decision_compiler.parse_decisions("JSON 못 만들겠습니다"), [])
-        self.assertEqual(decision_compiler.parse_decisions('[{"what": "배포",]'), [])
-        self.assertEqual(decision_compiler.parse_decisions('{"what": "배포"}'), [])
-
-    def test_parse_decisions_caps_the_number_of_items(self):
-        raw = json.dumps([{"what": "할 일 %d" % i} for i in range(30)], ensure_ascii=False)
-        self.assertEqual(len(decision_compiler.parse_decisions(raw)), decision_compiler.MAX_DECISIONS)
-
-    def test_interpretation_with_evidence_missing_from_the_transcript_is_dropped(self):
-        source = "민수가 금요일까지 배포를 맡기로 했습니다."
+    def test_parse_items_reads_the_new_schema(self):
         raw = json.dumps([
-            {"text": "금요일 퇴근 전까지라는 뜻", "evidence": "민수가 금요일까지 배포를 맡기로 했습니다."},
-            {"text": "다음 주 금요일이라는 뜻", "evidence": "다음 주 금요일까지라고 했습니다."},
+            {"topic": self.TOPIC, "ambiguous": True, "why": "30일인지 90일인지 갈립니다",
+             "final": "무시되어야 한다", "candidates": self.CANDIDATES},
+            {"topic": "후보가 문자열", "ambiguous": True, "why": "x",
+             "candidates": ["문장만 왔다", "이것도"]},
+            {"topic": "배포", "ambiguous": False, "final": "민수가 금요일까지 배포한다",
+             "evidence": "민수가 금요일까지 배포를 맡기로 했습니다."},
         ], ensure_ascii=False)
-        results = decision_compiler.parse_interpretations(raw, source_text=source)
-        self.assertEqual([r["text"] for r in results], ["금요일 퇴근 전까지라는 뜻"])
+        items = decision_compiler.parse_items(raw)
+        self.assertEqual(items[0]["why"], "30일인지 90일인지 갈립니다")
+        self.assertEqual([c["text"] for c in items[0]["candidates"]],
+                         ["민수가 30일로 바꾼다", "민수가 90일로 바꾼다"])
+        # 모호 항목에 final이 함께 와도 후보만 쓴다 — 기준이 둘이 되지 않게.
+        self.assertEqual(items[0]["final"], "")
+        # 후보가 객체가 아니라 문자열로 오면 조용히 버린다(예외를 올리지 않는다).
+        self.assertEqual(items[1]["candidates"], [])
+        self.assertEqual(items[2]["candidates"], [])
+        self.assertEqual(items[2]["final"], "민수가 금요일까지 배포한다")
+        self.assertEqual(items[2]["why"], "")
 
-    def test_evidence_matching_ignores_whitespace_differences(self):
+    def test_parse_items_keeps_only_one_recommendation(self):
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
+            {"text": "첫째", "recommended": "true"},
+            {"text": "둘째", "recommended": True},
+        ]}], ensure_ascii=False)
+        candidates = decision_compiler.parse_items(raw)[0]["candidates"]
+        # "true"·1 같은 비불리언도 참으로 보고, 추천은 처음 하나만 남긴다.
+        self.assertEqual([c["recommended"] for c in candidates], [True, False])
+
+    def test_parse_items_drops_items_without_a_topic(self):
+        raw = json.dumps([{"topic": "", "ambiguous": False, "final": "문장"},
+                          {"topic": "가" * 300, "ambiguous": False, "final": "문장"}],
+                         ensure_ascii=False)
+        items = decision_compiler.parse_items(raw)
+        self.assertEqual(len(items), 1)
+        # 긴 안건 이름은 카드 제목이 레이아웃을 깨지 않게 잘라 둔다.
+        self.assertEqual(len(items[0]["topic"]), 120)
+
+    def test_parse_items_survives_code_fences_and_prose(self):
+        raw = "네.\n```json\n[{\"topic\": \"배포\", \"ambiguous\": false, \"final\": \"문장\"}]\n```\n이상."
+        self.assertEqual(len(decision_compiler.parse_items(raw)), 1)
+
+    def test_parse_items_returns_empty_on_broken_json(self):
+        for raw in ("JSON 못 만들겠습니다", '[{"topic": "배포",]', '{"topic": "배포"}'):
+            self.assertEqual(decision_compiler.parse_items(raw), [], raw)
+
+    def test_parse_items_caps_the_number_of_items(self):
+        raw = json.dumps([{"topic": "안건 %d" % i, "ambiguous": False, "final": "문장"}
+                          for i in range(30)], ensure_ascii=False)
+        self.assertEqual(len(decision_compiler.parse_items(raw)), decision_compiler.MAX_DECISIONS)
+
+    def test_parse_items_drops_duplicate_candidates(self):
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
+            {"text": ""}, {"text": "같은 후보"}, {"text": "같은 후보"},
+        ]}], ensure_ascii=False)
+        self.assertEqual([c["text"] for c in decision_compiler.parse_items(raw)[0]["candidates"]],
+                         ["같은 후보"])
+
+    def test_parse_items_caps_candidates(self):
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x",
+                           "candidates": [{"text": "후보 %d" % i} for i in range(8)]}],
+                         ensure_ascii=False)
+        self.assertEqual(len(decision_compiler.parse_items(raw)[0]["candidates"]),
+                         decision_compiler.MAX_INTERPRETATIONS)
+
+    def test_parse_items_drops_a_candidate_whose_evidence_is_not_in_the_transcript(self):
         source = "민수가 금요일까지 배포를 맡기로 했습니다."
-        raw = json.dumps([{"text": "해석", "evidence": "민수가  금요일까지\n배포를 맡기로"}], ensure_ascii=False)
-        self.assertEqual(len(decision_compiler.parse_interpretations(raw, source_text=source)), 1)
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
+            {"text": "남는다", "evidence": "민수가 금요일까지 배포를 맡기로 했습니다."},
+            {"text": "버려진다", "evidence": "회의에 없던 문장입니다."},
+        ]}], ensure_ascii=False)
+        items = decision_compiler.parse_items(raw, source_text=source)
+        self.assertEqual([c["text"] for c in items[0]["candidates"]], ["남는다"])
 
-    def test_blank_evidence_skips_verification(self):
-        raw = json.dumps([{"text": "해석", "evidence": ""}], ensure_ascii=False)
-        self.assertEqual(len(decision_compiler.parse_interpretations(raw, source_text="아무 내용")), 1)
+    def test_parse_items_matches_evidence_loosely_and_skips_blanks(self):
+        source = "민수가 금요일까지 배포를 맡기로 했습니다."
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
+            {"text": "공백 무시", "evidence": "민수가  금요일까지\n배포를 맡기로"},
+            {"text": "근거 없음", "evidence": ""},
+        ]}], ensure_ascii=False)
+        items = decision_compiler.parse_items(raw, source_text=source)
+        self.assertEqual(len(items[0]["candidates"]), 2)
 
-    def test_interpretations_without_text_or_duplicated_are_dropped(self):
-        raw = json.dumps([{"text": ""}, {"text": "같은 해석"}, {"text": "같은 해석"}], ensure_ascii=False)
-        results = decision_compiler.parse_interpretations(raw)
-        self.assertEqual([r["text"] for r in results], ["같은 해석"])
+    def test_parse_items_requires_evidence_for_a_clear_item(self):
+        """근거가 아예 없는 확정 문장은 검증을 건너뛰지 않고 비운다.
 
-    def test_interpretations_are_capped(self):
-        raw = json.dumps([{"text": "해석 %d" % i} for i in range(8)], ensure_ascii=False)
-        self.assertEqual(len(decision_compiler.parse_interpretations(raw)), decision_compiler.MAX_INTERPRETATIONS)
+        후보 쪽의 빈 근거는 가짜 응답 모드 통로로 남기지만(바로 아래 테스트), 전사 원문을
+        들고 검증하는 중이라면 근거 없는 문장은 "원문에 있다"고 볼 수 없다.
+        """
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": False,
+                           "final": "민수가 30일로 바꾼다"}], ensure_ascii=False)
+        self.assertEqual(decision_compiler.parse_items(raw, source_text="로그 이야기")[0]["final"], "")
+        # 원문을 들고 있지 않을 때(가짜 응답 모드)는 그대로 둔다.
+        self.assertEqual(decision_compiler.parse_items(raw)[0]["final"], "민수가 30일로 바꾼다")
+
+    def test_parse_items_clears_a_final_whose_evidence_is_not_in_the_transcript(self):
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": False,
+                           "final": "민수가 30일로 바꾼다", "evidence": "회의에 없던 문장"}],
+                         ensure_ascii=False)
+        item = decision_compiler.parse_items(raw, source_text="로그 이야기")[0]
+        self.assertEqual(item["final"], "")
 
 
 class DecisionCompileTests(TestCase):
-    """①+② 전체. LLM 유무, 파싱 실패 재시도, 가짜 응답 모드를 본다."""
+    """한 번의 AI 호출로 결정·모호 여부·후보를 받아 저장하는 전체 흐름.
+
+    LLM 유무, 파싱 실패 재시도, 규칙 안전망의 승격, 가짜 응답 모드를 본다.
+    """
+
+    SOURCE = ("로그는 일단 한 달 정도면 충분할 것 같은데요. "
+              "배포 스크립트는 제가 금요일까지 정리할게요. "
+              "QA는 다음 주쯤 할게요.")
+    CLEAR = {"topic": "배포 스크립트 정리", "ambiguous": False,
+             "final": "민수가 금요일까지 배포 스크립트를 정리한다",
+             "evidence": "배포 스크립트는 제가 금요일까지 정리할게요."}
+    AMBIGUOUS = {"topic": "로그 보관 기간", "ambiguous": True,
+                 "why": "30일인지 90일인지 갈립니다",
+                 "candidates": [{"text": "민수가 30일로 바꾼다",
+                                 "evidence": "로그는 일단 한 달 정도면 충분할 것 같은데요.",
+                                 "recommended": True},
+                                {"text": "민수가 90일로 바꾼다",
+                                 "evidence": "로그는 일단 한 달 정도면 충분할 것 같은데요."}]}
 
     def setUp(self):
         self.host = User.objects.create_user("host", password="pw12345!")
@@ -1596,109 +1684,230 @@ class DecisionCompileTests(TestCase):
         self.team.members.add(self.host)
         self.meeting = Meeting.objects.create(
             team=self.team, title="m", host=self.host,
-            processing_status=Meeting.STATUS_DONE,
-            transcript="민수가 금요일까지 배포를 맡기로 했습니다. 디자인은 각자 보기로 했습니다.",
+            processing_status=Meeting.STATUS_DONE, transcript=self.SOURCE,
         )
-
-    def test_fake_mode_runs_the_whole_flow_without_any_llm(self):
-        with patch.dict(os.environ, {}, clear=True):
-            summary = decision_compiler.compile_meeting(self.meeting)
-        self.assertEqual(summary["decisions"], len(decision_compiler.FAKE_DECISIONS))
-        self.assertEqual(self.meeting.decisions.count(), len(decision_compiler.FAKE_DECISIONS))
-        # 가짜 명세 3개 중 완전히 채워진 1개는 경고가 없고, 나머지 2개는 해석 후보까지 생긴다.
-        self.assertEqual(summary["warned"], 2)
-        self.assertEqual(summary["few_candidates"], 0)
-        self.assertEqual(Interpretation.objects.filter(decision__meeting=self.meeting).count(), 4)
-        # 경고가 붙은 2개 항목은 모두 후보를 2개씩 받아 진행자가 고를 수 있는 상태다.
-        with_candidates = [
-            d for d in self.meeting.decisions.all()
-            if d.interpretations.count() >= decision_compiler.MIN_INTERPRETATIONS
-        ]
-        self.assertEqual(len(with_candidates), 2)
-
-    def test_items_without_warnings_get_no_interpretations(self):
-        with patch.dict(os.environ, {}, clear=True):
-            decision_compiler.compile_meeting(self.meeting)
-        for decision in self.meeting.decisions.all():
-            if decision.warnings:
-                self.assertGreater(decision.interpretations.count(), 0, decision.spec_line)
-            else:
-                self.assertEqual(decision.interpretations.count(), 0, decision.spec_line)
 
     def _llm(self, *responses):
         return patch.object(services, "_generate", side_effect=list(responses))
 
-    def test_compile_uses_the_llm_response_when_a_model_is_configured(self):
-        compiled = json.dumps([{"who": "민수", "what": "배포", "due": "금요일", "done": "", "state": "확정"}], ensure_ascii=False)
-        interpretations = json.dumps([
-            {"text": "이번 주 금요일이라는 뜻", "evidence": "민수가 금요일까지 배포를 맡기로 했습니다."},
-            {"text": "다음 주 금요일이라는 뜻", "evidence": "디자인은 각자 보기로 했습니다."},
-        ], ensure_ascii=False)
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), self._llm(compiled, interpretations):
-            decision_compiler.compile_meeting(self.meeting)
-        decision = self.meeting.decisions.get()
-        self.assertEqual(decision.who, "민수")
-        self.assertEqual(decision.warnings, ["완료 기준 빈칸"])
-        self.assertEqual(decision.interpretations.count(), 2)
+    def _compiled(self, *items):
+        """한 응답으로 컴파일하고 (요약, {안건: Decision}, 호출 mock)을 돌려준다."""
+        raw = json.dumps(list(items), ensure_ascii=False)
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), \
+             patch.object(services, "_generate", return_value=raw) as gen:
+            summary = decision_compiler.compile_meeting(self.meeting)
+        return summary, {d.what: d for d in self.meeting.decisions.all()}, gen
+
+    # ---- 호출 한 번 ----
+
+    def test_the_llm_is_called_exactly_once(self):
+        _, _, gen = self._compiled(self.CLEAR, self.AMBIGUOUS)
+        self.assertEqual(gen.call_count, 1)
 
     def test_transcript_is_sent_in_the_compile_prompt(self):
-        compiled = json.dumps([{"what": "배포", "who": "민수", "due": "금요일", "done": "확인"}], ensure_ascii=False)
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), self._llm(compiled) as gen:
-            decision_compiler.compile_meeting(self.meeting)
+        _, _, gen = self._compiled(self.CLEAR)
         self.assertIn(self.meeting.transcript, gen.call_args_list[0][0][0])
+
+    def test_compile_uses_the_llm_response_when_a_model_is_configured(self):
+        _, by_topic, _ = self._compiled(self.CLEAR, self.AMBIGUOUS)
+        self.assertEqual(sorted(by_topic), ["로그 보관 기간", "배포 스크립트 정리"])
+
+    # ---- 명확한 결정: 탭 없이 공개 ----
+
+    def test_a_clear_item_is_published_without_a_tap(self):
+        _, by_topic, _ = self._compiled(self.CLEAR)
+        decision = by_topic["배포 스크립트 정리"]
+        self.assertEqual(decision.final_text, "민수가 금요일까지 배포 스크립트를 정리한다")
+        self.assertEqual(decision.interpretations.count(), 0)
+        self.assertEqual(decision.warnings, [])
+        self.assertEqual(decision.divergence_reason, "")
+        self.assertFalse(decision.blocks_publish)
+        # 추출 필드는 더 이상 채우지 않는다 — 공개되는 것은 final_text 하나다.
+        self.assertEqual(decision.who, "")
+        self.assertEqual(decision.due_text, "")
+        self.assertEqual(decision.done_criteria, "")
+
+    # ---- 모호한 결정: 진행자가 탭해야 공개 ----
+
+    def test_an_ambiguous_item_waits_for_the_host(self):
+        _, by_topic, _ = self._compiled(self.AMBIGUOUS)
+        decision = by_topic["로그 보관 기간"]
+        self.assertEqual(decision.divergence_reason, "30일인지 90일인지 갈립니다")
+        self.assertEqual(decision.final_text, "")
+        self.assertTrue(decision.blocks_publish)
+        self.assertEqual([i.text for i in decision.interpretations.all()],
+                         ["민수가 30일로 바꾼다", "민수가 90일로 바꾼다"])
+        self.assertEqual([i.recommended for i in decision.interpretations.all()], [True, False])
+
+    # ---- 규칙 안전망의 승격 ----
+
+    def test_a_rule_hit_on_the_sentence_promotes_a_clear_item(self):
+        _, by_topic, _ = self._compiled(dict(self.CLEAR, final="나중에 배포 스크립트를 정리한다"))
+        decision = by_topic["배포 스크립트 정리"]
+        self.assertEqual(decision.warnings, ["확정 문장에 모호한 표현이 있어요: '나중에'"])
+        # AI가 쓴 문장은 "이 문장 그대로 공개" 후보 하나로 올라간다.
+        self.assertEqual([i.text for i in decision.interpretations.all()],
+                         ["나중에 배포 스크립트를 정리한다"])
+        self.assertEqual(decision.final_text, "")
+        self.assertTrue(decision.blocks_publish)
+
+    def test_a_rule_hit_on_the_transcript_promotes_a_clear_item(self):
+        """원문은 모호한데 AI가 혼자 해소한 경우도 진행자에게 묻는다."""
+        _, by_topic, _ = self._compiled({"topic": "QA 범위", "ambiguous": False,
+                                         "final": "민수가 다음 주 금요일까지 QA를 끝낸다",
+                                         "evidence": "QA는 다음 주쯤 할게요."})
+        decision = by_topic["QA 범위"]
+        self.assertEqual(decision.warnings, ["원문에 모호한 표현이 있어요: '쯤'"])
+        self.assertEqual(decision.interpretations.count(), 1)
+        self.assertTrue(decision.blocks_publish)
+
+    def test_an_ambiguous_item_without_a_reason_still_needs_the_host(self):
+        """AI가 모호하다고 하면서 이유를 비워 보내도 확인 대상으로 남아야 한다.
+
+        이유와 규칙 사유가 모두 비면 has_warning이 False가 되어, AI가 갈린다고 본 항목이
+        진행자 확인 없이 '그대로 공개될 결정'으로 분류된다.
+        """
+        item = {"topic": "로그 보관 기간", "ambiguous": True,
+                "candidates": self.AMBIGUOUS["candidates"]}
+        _, by_topic, _ = self._compiled(item)
+        decision = by_topic["로그 보관 기간"]
+        self.assertTrue(decision.divergence_reason)
+        self.assertTrue(decision.has_warning)
+        self.assertTrue(decision.blocks_publish)
+        self.assertEqual(decision.interpretations.count(), 2)
+
+    def test_compiling_twice_at_once_is_refused_not_crashed(self):
+        """두 요청이 동시에 컴파일하면 사유를 보여준다 — 500이 아니라.
+
+        이미 컴파일됐는지 보는 검사가 LLM 호출 앞에 있으므로, 버튼을 두 번 누르면 두 요청이
+        모두 빈 상태를 보고 통과해 같은 order를 쓰려 한다.
+        """
+        def create_then_answer(*args, **kwargs):
+            # 먼저 들어온 요청이 저장을 끝낸 상황을 흉내 낸다.
+            Decision.objects.create(meeting=self.meeting, order=0, what="먼저 저장된 결정")
+            return json.dumps([self.CLEAR], ensure_ascii=False)
+
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), \
+             patch.object(services, "_generate", side_effect=create_then_answer):
+            with self.assertRaises(decision_compiler.DecisionCompileError):
+                decision_compiler.compile_meeting(self.meeting)
+        # 먼저 저장된 결정만 남고 반쯤 저장된 항목이 섞이지 않는다.
+        self.assertEqual([d.what for d in self.meeting.decisions.all()], ["먼저 저장된 결정"])
+
+    def test_the_rules_do_not_scan_candidates_of_an_ambiguous_item(self):
+        item = dict(self.AMBIGUOUS, candidates=[
+            dict(self.AMBIGUOUS["candidates"][0], text="나중에 30일로 바꾼다"),
+            self.AMBIGUOUS["candidates"][1]])
+        _, by_topic, _ = self._compiled(item)
+        decision = by_topic["로그 보관 기간"]
+        self.assertEqual(decision.warnings, [])
+        self.assertTrue(decision.divergence_reason)
+
+    # ---- 근거 검증 ----
+
+    def test_a_clear_item_without_usable_evidence_is_promoted(self):
+        _, by_topic, _ = self._compiled(dict(self.CLEAR, evidence="회의에 없던 문장입니다."))
+        decision = by_topic["배포 스크립트 정리"]
+        self.assertEqual(decision.final_text, "")
+        self.assertEqual(decision.interpretations.count(), 0)
+        self.assertTrue(decision.has_warning)
+        self.assertTrue(decision.blocks_publish)
+
+    def test_an_ambiguous_item_loses_candidates_with_fabricated_evidence(self):
+        item = dict(self.AMBIGUOUS, candidates=[
+            {"text": "해석 1", "evidence": "회의에 없던 문장입니다."},
+            {"text": "해석 2", "evidence": "이것도 없습니다."}])
+        summary, by_topic, _ = self._compiled(item)
+        self.assertEqual(summary["ambiguous"], 1)
+        self.assertEqual(summary["few_candidates"], 1)
+        self.assertEqual(by_topic["로그 보관 기간"].interpretations.count(), 0)
+
+    def test_one_broken_item_does_not_take_the_others_down(self):
+        broken = {"topic": "회의록 공유", "ambiguous": True, "why": "범위가 갈립니다",
+                  "candidates": [{"text": "A", "evidence": "회의에 없던 문장입니다."},
+                                 {"text": "B", "evidence": "이것도 없습니다."}]}
+        summary, by_topic, _ = self._compiled(self.CLEAR, self.AMBIGUOUS, broken)
+        self.assertEqual(summary["decisions"], 3)
+        self.assertEqual(summary["few_candidates"], 1)
+        self.assertEqual(by_topic["회의록 공유"].interpretations.count(), 0)
+        self.assertTrue(by_topic["배포 스크립트 정리"].final_text)
+        self.assertEqual(by_topic["로그 보관 기간"].interpretations.count(), 2)
+
+    # ---- 상한 없음 ----
+
+    def test_eight_ambiguous_items_all_wait_for_the_host(self):
+        summary, _, _ = self._compiled(*[dict(self.AMBIGUOUS, topic="안건 %d" % i)
+                                         for i in range(8)])
+        self.assertEqual(summary["ambiguous"], 8)
+        self.assertEqual(
+            len(decision_compiler.publish_blockers(list(self.meeting.decisions.all()))), 8)
+
+    # ---- 실패 처리와 가짜 응답 모드 ----
 
     def test_broken_json_is_retried_once_then_fails(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), self._llm("못 하겠습니다", "역시 못 하겠습니다") as gen:
             with self.assertRaises(decision_compiler.DecisionCompileError):
                 decision_compiler.compile_meeting(self.meeting)
         self.assertEqual(gen.call_count, decision_compiler.PARSE_RETRIES + 1)
-        # 실패했으면 반쯤 저장된 명세가 남아 있어서는 안 된다.
+        # 실패했으면 반쯤 저장된 결정이 남아 있어서는 안 된다.
         self.assertEqual(self.meeting.decisions.count(), 0)
 
     def test_second_attempt_succeeding_is_accepted(self):
-        good = json.dumps([{"what": "배포", "who": "민수", "due": "금요일", "done": "확인"}], ensure_ascii=False)
+        good = json.dumps([self.CLEAR], ensure_ascii=False)
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), self._llm("못 하겠습니다", good) as gen:
             decision_compiler.compile_meeting(self.meeting)
         self.assertEqual(gen.call_count, 2)
         self.assertEqual(self.meeting.decisions.count(), 1)
-
-    def test_connection_failure_falls_back_to_fake_specs(self):
-        # 기존 퀴즈 생성과 같은 처리 — 연결 실패는 실패 표시 대신 가짜 응답으로 흐름을 잇는다.
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", side_effect=OSError("연결 실패")):
-            summary = decision_compiler.compile_meeting(self.meeting)
-        self.assertEqual(summary["decisions"], len(decision_compiler.FAKE_DECISIONS))
-
-    def test_interpretations_with_fabricated_evidence_leave_the_item_without_candidates(self):
-        compiled = json.dumps([{"who": "민수", "what": "배포", "due": "금요일", "done": "", "state": "확정"}], ensure_ascii=False)
-        # 두 해석 모두 전사 원문에 없는 문장을 근거로 달았으므로 전부 버려진다.
-        interpretations = json.dumps([
-            {"text": "해석 1", "evidence": "회의에 없던 문장입니다."},
-            {"text": "해석 2", "evidence": "이것도 없습니다."},
-        ], ensure_ascii=False)
-        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), self._llm(compiled, interpretations, interpretations):
-            summary = decision_compiler.compile_meeting(self.meeting)
-        self.assertEqual(summary["warned"], 1)
-        self.assertEqual(summary["few_candidates"], 1)
-        self.assertEqual(Interpretation.objects.filter(decision__meeting=self.meeting).count(), 0)
-
-    def test_recompiling_an_already_compiled_meeting_is_refused(self):
-        with patch.dict(os.environ, {}, clear=True):
-            decision_compiler.compile_meeting(self.meeting)
-            with self.assertRaises(decision_compiler.DecisionCompileError):
-                decision_compiler.compile_meeting(self.meeting)
 
     def test_compile_fails_when_no_decision_can_be_extracted(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), self._llm("[]", "[]"):
             with self.assertRaises(decision_compiler.DecisionCompileError):
                 decision_compiler.compile_meeting(self.meeting)
 
-    def test_dropped_warning_count_is_reported(self):
-        specs = [_spec(what="할 일 %d" % i, done="") for i in range(7)]
-        with patch.dict(os.environ, {}, clear=True), patch.object(decision_compiler, "compile_specs", return_value=specs):
+    def test_recompiling_an_already_compiled_meeting_is_refused(self):
+        # 공개 뒤에 결정이 바뀌면 팀원이 확인한 내용과 달라진다.
+        with patch.dict(os.environ, {}, clear=True):
+            decision_compiler.compile_meeting(self.meeting)
+            with self.assertRaises(decision_compiler.DecisionCompileError):
+                decision_compiler.compile_meeting(self.meeting)
+
+    def test_connection_failure_falls_back_to_the_fake_response(self):
+        # 연결 실패는 실패 표시 대신 가짜 응답으로 흐름을 잇는다.
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", side_effect=OSError("연결 실패")):
             summary = decision_compiler.compile_meeting(self.meeting)
-        self.assertEqual(summary["decisions"], 7)
-        self.assertEqual(summary["warned"], decision_compiler.MAX_WARNED_DECISIONS)
-        self.assertEqual(summary["dropped_warnings"], 2)
+        self.assertEqual(summary["decisions"], len(decision_compiler.FAKE_DECISIONS))
+
+    def test_fake_mode_runs_the_whole_flow_without_any_llm(self):
+        with patch.dict(os.environ, {}, clear=True):
+            summary = decision_compiler.compile_meeting(self.meeting)
+        self.assertEqual(summary["decisions"], 3)
+        self.assertEqual(summary["ambiguous"], 2)
+        self.assertEqual(summary["few_candidates"], 0)
+        self.assertEqual(Interpretation.objects.filter(decision__meeting=self.meeting).count(), 4)
+        # 모호 항목마다 'AI 추천' 배지가 정확히 하나씩 붙는다.
+        self.assertEqual(
+            Interpretation.objects.filter(decision__meeting=self.meeting, recommended=True).count(), 2)
+
+    def test_fake_mode_candidates_carry_evidence(self):
+        """가짜 모드도 '근거: …'가 보이도록 원문 인용을 담는다 — 시연에서 가장 중요한 칸이다."""
+        with patch.dict(os.environ, {}, clear=True):
+            decision_compiler.compile_meeting(self.meeting)
+        candidates = Interpretation.objects.filter(decision__meeting=self.meeting)
+        self.assertEqual(candidates.count(), 4)
+        for candidate in candidates:
+            self.assertTrue(candidate.evidence, candidate.text)
+
+    def test_fake_mode_leaves_the_clear_item_ready_to_publish(self):
+        with patch.dict(os.environ, {}, clear=True):
+            decision_compiler.compile_meeting(self.meeting)
+        clear = [d for d in self.meeting.decisions.all() if not d.has_warning]
+        self.assertEqual(len(clear), 1)
+        self.assertTrue(clear[0].final_text)
+        self.assertEqual(clear[0].interpretations.count(), 0)
+        for decision in self.meeting.decisions.all():
+            if decision.has_warning:
+                self.assertGreater(decision.interpretations.count(), 0, decision.what)
+
 
 
 class DecisionReviewTests(TestCase):
@@ -1754,7 +1963,8 @@ class DecisionReviewTests(TestCase):
         self.assertEqual(self.meeting.decisions.count(), len(decision_compiler.FAKE_DECISIONS))
         r = self.client.get(self.url)
         self.assertTrue(r.context["compiled"])
-        self.assertEqual(r.context["warned_count"], 2)
+        # 가짜 응답 3건 중 2건이 확인 필요(모호)이고, 둘 다 아직 진행자가 고르지 않았다.
+        self.assertEqual(r.context["blocker_count"], 2)
 
     def test_compile_failure_is_shown_on_the_page(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="안 되겠습니다"):
@@ -1762,42 +1972,6 @@ class DecisionReviewTests(TestCase):
         self.assertEqual(r.status_code, 200)
         self.assertContains(r, "읽지 못했습니다")
         self.assertEqual(self.meeting.decisions.count(), 0)
-
-    def test_editing_a_spec_clears_the_warnings_it_fixes(self):
-        self._compile()
-        decision = self.meeting.decisions.filter(who="").first()
-        self.assertIn("담당자 빈칸", decision.warnings)
-        self.client.post(self.url, {
-            "action": "save",
-            "who_%d" % decision.id: "민수",
-            "what_%d" % decision.id: decision.what,
-            "due_%d" % decision.id: "금요일",
-            "done_%d" % decision.id: "스테이징 배포 확인",
-            "confirm_state_%d" % decision.id: Decision.CONFIRM_CONFIRMED,
-        })
-        decision.refresh_from_db()
-        self.assertEqual(decision.who, "민수")
-        self.assertEqual(decision.warnings, [])
-        self.assertEqual(decision.confirm_state, Decision.CONFIRM_CONFIRMED)
-
-    def test_saving_a_blank_what_leaves_the_item_untouched(self):
-        self._compile()
-        decision = self.meeting.decisions.first()
-        before = decision.what
-        self.client.post(self.url, {"action": "save", "what_%d" % decision.id: "   "})
-        decision.refresh_from_db()
-        self.assertEqual(decision.what, before)
-
-    def test_dropping_every_candidate_leaves_the_item_with_none(self):
-        self._compile()
-        decision = next(d for d in self.meeting.decisions.all() if d.warnings)
-        fields = {"action": "save", "what_%d" % decision.id: decision.what}
-        for interpretation in decision.interpretations.all():
-            fields["drop_interpretation_%d" % interpretation.id] = "1"
-        self.client.post(self.url, fields)
-        # 후보가 하나도 없으면 진행자는 직접 작성이나 '아직 미정'으로만 처리할 수 있다.
-        self.assertEqual(Interpretation.objects.filter(decision=decision).count(), 0)
-        self.assertContains(self.client.get(self.url), "해석 후보가 없습니다")
 
     def test_specs_cannot_be_edited_once_published(self):
         self._compile()
@@ -1831,6 +2005,218 @@ class DecisionReviewTests(TestCase):
         r = self.client.get(self.url)
         for name in ("member", "outsider"):
             self.assertNotContains(r, name)
+
+    def test_the_screen_offers_choices_for_an_ai_only_ambiguous_item(self):
+        """AI가 모호하다고 본 항목(규칙 사유는 없음)에도 선택지를 그려야 한다.
+
+        그리지 않으면 진행자는 "확정하지 않은 항목이 있습니다"를 보면서 처리할 UI를 찾을 수
+        없고 공개가 영구 차단된다.
+        """
+        self._compile()
+        decision = next(d for d in self.meeting.decisions.all() if d.has_warning)
+        self.assertEqual(decision.warnings, [])          # AI 판정만 있는 항목
+        html = self.client.get(self.url).content.decode()
+        self.assertIn('name="choice_%d"' % decision.id, html)
+        # 사유에 따옴표가 들어 있어 템플릿이 이스케이프한다.
+        from django.utils.html import escape
+
+        self.assertIn(escape(decision.divergence_reason), html)
+
+    def test_the_note_block_does_not_mention_a_removed_limit(self):
+        html = self.client.get(self.url).content.decode()
+        self.assertNotIn("회의당 최대 개", html)
+        self.assertNotIn("빈칸", html)
+
+    def test_the_header_counts_items_that_need_the_host(self):
+        self._compile()
+        r = self.client.get(self.url)
+        # 가짜 응답 3건 중 2건이 확인 필요다. warnings만 세면 0개로 나와 공개 차단과 모순된다.
+        self.assertEqual(r.context["ambiguous_count"], 2)
+
+    def test_the_screen_splits_items_into_two_groups(self):
+        """확인이 필요한 결정과 그대로 공개될 결정을 따로 묶어 보여준다."""
+        self._compile()
+        r = self.client.get(self.url)
+        self.assertEqual(len(r.context["ambiguous_rows"]), 2)
+        self.assertEqual(len(r.context["clear_rows"]), 1)
+        for row in r.context["ambiguous_rows"]:
+            self.assertTrue(row["decision"].has_warning)
+        for row in r.context["clear_rows"]:
+            self.assertFalse(row["decision"].has_warning)
+            # 그대로 공개될 항목은 AI가 쓴 문장을 이미 갖고 있다.
+            self.assertTrue(row["decision"].final_text)
+        self.assertContains(r, "확인이 필요한 결정")
+        self.assertContains(r, "그대로 공개될 결정")
+
+    def test_the_screen_has_no_spec_input_fields_left(self):
+        """누가·무엇을·언제까지·완료기준 입력 칸과 후보 편집 UI가 화면에서 사라졌다."""
+        self._compile()
+        html = self.client.get(self.url).content.decode()
+        decision = self.meeting.decisions.first()
+        for name in ("who_", "what_", "due_", "done_", "confirm_state_", "drop_interpretation_"):
+            self.assertNotIn("%s%d" % (name, decision.id), html)
+        self.assertNotIn('name="interpretation_', html)
+
+    def test_the_recommended_candidate_is_not_preselected(self):
+        """'AI 추천'은 배지일 뿐이다 — 진행자가 읽고 직접 탭해야 한다."""
+        self._compile()
+        r = self.client.get(self.url)
+        self.assertContains(r, "AI 추천")
+        for row in r.context["ambiguous_rows"]:
+            for interpretation in row["interpretations"]:
+                self.assertFalse(interpretation.chosen)
+        # checked 속성이 붙은 input이 하나도 없어야 한다(스크립트의 :checked 선택자와 구별한다).
+        self.assertEqual(re.findall(r"<input[^>]*\bchecked\b", r.content.decode()), [])
+
+    def test_publishing_saves_the_choices_on_the_screen_first(self):
+        """'확정 문장 공개'가 화면의 선택을 함께 저장한 뒤 공개한다 — 저장을 따로 누르지 않아도.
+
+        저장과 공개가 두 단계로 나뉘어 있어서, 라디오를 다 고르고 공개를 누르면 "처리하지 않은
+        항목이 있습니다"가 나오는 것이 진행자가 가장 자주 걸리던 지점이었다.
+        """
+        self._compile()
+        fields = {"action": "publish"}
+        for decision in self.meeting.decisions.all():
+            if decision.has_warning:
+                fields["choice_%d" % decision.id] = "%s%d" % (
+                    decision_compiler.CHOICE_CANDIDATE_PREFIX,
+                    decision.interpretations.first().id,
+                )
+        self.client.post(self.url, fields)
+        for decision in self.meeting.decisions.all():
+            self.assertEqual(decision.status, Decision.STATUS_PUBLISHED, decision.what)
+            self.assertTrue(decision.final_text, decision.what)
+
+    def test_publishing_with_a_bad_choice_keeps_what_was_saved(self):
+        """선택이 부족하면 저장된 만큼은 남기고 사유를 보여준다."""
+        self._compile()
+        ambiguous = [d for d in self.meeting.decisions.all() if d.has_warning]
+        first, second = ambiguous[0], ambiguous[1]
+        r = self.client.post(self.url, {
+            "action": "publish",
+            "choice_%d" % first.id: "%s%d" % (
+                decision_compiler.CHOICE_CANDIDATE_PREFIX, first.interpretations.first().id),
+            "choice_%d" % second.id: decision_compiler.CHOICE_CUSTOM,
+            "custom_text_%d" % second.id: "   ",
+        })
+        self.assertContains(r, "한 줄 적어 주세요")
+        first.refresh_from_db()
+        second.refresh_from_db()
+        self.assertTrue(first.final_text)                      # 저장된 만큼은 남는다
+        self.assertEqual(second.final_text, "")
+        self.assertEqual(first.status, Decision.STATUS_DRAFT)  # 공개는 안 됐다
+
+    def test_each_draft_item_is_marked_for_the_button_script(self):
+        """공개 버튼을 저장 전에도 갱신할 수 있도록, 선택을 바꿀 수 있는 항목마다 표시를 남긴다.
+
+        마커는 draft 전체에 붙고, '미확정' 배지의 초기 노출만 blocks_publish를 따른다.
+        """
+        self._compile()
+        html = self.client.get(self.url).content.decode()
+        for decision in self.meeting.decisions.all():
+            self.assertIn('data-choice-name="choice_%d"' % decision.id, html, decision.what)
+            badge = 'data-unsettled-for="choice_%d"' % decision.id
+            if decision.blocks_publish:
+                self.assertIn(badge, html, decision.what)
+        self.assertIn("disabled", html)
+
+    def test_the_publish_confirmation_says_how_to_undo(self):
+        """공개 후에도 되돌릴 길이 있다 — 확인창이 그렇게 말해야 한다.
+
+        팀원이 확인하기 전에는 '공개 취소'로 draft로 내릴 수 있고, 그 뒤에는 항목별로
+        '확정 문장 수정'을 쓸 수 있다.
+        """
+        self._compile()
+        html = self.client.get(self.url).content.decode()
+        self.assertIn("팀원이 확인하기 전에는", html)
+        self.assertIn("되돌릴 수 있고, 그 뒤에는 항목별로 문장을 고칠 수 있어요", html)
+        self.assertNotIn("공개 후에는 선택을 되돌릴 수 없습니다", html)
+
+    def test_the_screen_marks_rows_and_the_header_for_live_updates(self):
+        """'미확정' 배지와 상단 '처리 안 한 항목' 수도 저장 전에 갱신할 수 있게 표시를 남긴다."""
+        self._compile()
+        html = self.client.get(self.url).content.decode()
+        blocking = [d for d in self.meeting.decisions.all() if d.blocks_publish]
+        self.assertEqual(len(blocking), 2)
+        for decision in blocking:
+            self.assertIn('data-unsettled-for="choice_%d"' % decision.id, html)
+        self.assertIn('id="blocker-count"', html)
+        self.assertIn('id="blocker-note"', html)
+
+    def test_an_empty_published_sentence_can_still_be_fixed(self):
+        """문장이 빈 공개 항목에도 수정 폼이 있어야 한다 — 없으면 손댈 방법이 전혀 없다."""
+        self._compile()
+        empty = Decision.objects.create(
+            meeting=self.meeting, order=81, what="문장이 빈 공개 항목",
+            status=Decision.STATUS_PUBLISHED, final_text="",
+        )
+        html = self.client.get(self.url).content.decode()
+        self.assertIn('value="%d"' % empty.id, html)
+        self.assertIn("문장이 비어 있어요", html)
+
+    def test_the_revise_form_is_collapsed_under_the_published_sentence(self):
+        """공개 뒤 '문장 고치기'는 확정 문장 바로 아래에서 찾을 수 있다."""
+        self._compile()
+        for decision in self.meeting.decisions.all():
+            if decision.has_warning:
+                self.client.post(self.url, {
+                    "action": "save",
+                    "choice_%d" % decision.id: "%s%d" % (
+                        decision_compiler.CHOICE_CANDIDATE_PREFIX,
+                        decision.interpretations.first().id),
+                })
+        self.client.post(self.url, {"action": "publish"})
+        html = self.client.get(self.url).content.decode()
+        self.assertIn("<summary", html)
+        self.assertIn("문장 고치기", html)
+        self.assertIn('name="final_text"', html)
+
+    def test_numbering_runs_across_both_groups(self):
+        self._compile()
+        html = self.client.get(self.url).content.decode()
+        # 확인 필요 2건 + 그대로 공개 1건이므로 번호는 1, 2, 3으로 이어진다.
+        for number in ("1", "2", "3"):
+            self.assertIn('<span class="item-icon">%s</span>' % number, html)
+
+    def test_the_intro_line_describes_the_new_flow(self):
+        self.assertContains(
+            self.client.get(self.url),
+            "회의에서 다르게 이해할 수 있는 결정을 AI가 찾아 문장 후보를 보여줍니다.",
+        )
+
+    def test_an_old_draft_without_a_sentence_is_shown_as_needing_the_host(self):
+        """0022 이전에 만들어진 무경고 draft(문장 없음)는 공개를 막고 '확인 필요'로 보인다.
+
+        화면의 판정과 서버의 거부가 어긋나면, 진행자는 "처리 안 한 항목 0개"를 보면서 공개가
+        막히는 이유를 찾을 수 없다.
+        """
+        self._compile()
+        old = Decision.objects.create(
+            meeting=self.meeting, order=80, what="이전 흐름에서 만든 항목",
+            warnings=[], divergence_reason="", final_text="",
+        )
+        r = self.client.get(self.url)
+        self.assertIn(old.id, [row["decision"].id for row in r.context["ambiguous_rows"]])
+        self.assertTrue(next(row for row in r.context["rows"]
+                             if row["decision"].id == old.id)["blocking"])
+        self.assertGreaterEqual(r.context["blocker_count"], 1)
+        self.assertFalse(r.context["can_publish"])
+
+    def test_the_server_ignores_posted_spec_edits(self):
+        """화면에서 칸을 없앴으니 서버도 그 값을 받지 않는다."""
+        self._compile()
+        decision = self.meeting.decisions.first()
+        before = decision.what
+        self.client.post(self.url, {
+            "action": "save",
+            "who_%d" % decision.id: "바뀐 담당자",
+            "what_%d" % decision.id: "바뀐 안건",
+            "due_%d" % decision.id: "바뀐 기한",
+        })
+        decision.refresh_from_db()
+        self.assertEqual(decision.who, "")
+        self.assertEqual(decision.what, before)
+        self.assertEqual(decision.due_text, "")
 
 
 class DecisionEntryLinkTests(TestCase):
@@ -2040,29 +2426,82 @@ class DecisionModelTests(TestCase):
         self.assertEqual(Decision.objects.get(pk=empty.pk).warnings, [])
         self.assertFalse(empty.has_warning)
 
-    def test_spec_line_shows_blank_fields_as_question_marks(self):
-        decision = self._decision(done_criteria="", confirm_state=Decision.CONFIRM_UNSET)
-        self.assertEqual(decision.spec_line, "민수 · 배포 준비 · 다음 주쯤 · ? · 미정")
+    def test_publishing_is_blocked_until_the_item_has_a_sentence(self):
+        """공개를 막는 조건은 하나다 — 공개할 문장이 있는가.
 
-    def test_is_settled_requires_a_sentence_or_the_undecided_mark(self):
+        '다음 회의로 넘김'도 문장을 받으므로(undecided_sentence) 여기서 갈라지지 않는다.
+        """
         decision = self._decision()
-        # 경고가 붙었는데 진행자가 아무것도 고르지 않았으면 공개할 수 없다.
-        self.assertFalse(decision.is_settled)
+        self.assertTrue(decision.blocks_publish)
         decision.final_text = "금요일까지 스테이징 배포"
-        self.assertTrue(decision.is_settled)
-        decision.final_text = ""
-        decision.marked_undecided = True
-        self.assertTrue(decision.is_settled)
+        self.assertFalse(decision.blocks_publish)
 
-    def test_items_without_warnings_are_settled_with_nothing_to_choose(self):
-        decision = self._decision(warnings=[])
-        self.assertTrue(decision.is_settled)
+    def test_an_ai_only_reason_still_needs_the_host(self):
+        """AI가 "다르게 이해할 수 있다"고 본 항목은 규칙 사유가 없어도 확인 대상이다."""
+        ai_only = self._decision(
+            order=5, warnings=[], divergence_reason="'충분히'가 30일인지 90일인지 갈립니다",
+        )
+        self.assertTrue(ai_only.has_warning)
+        self.assertTrue(ai_only.needs_host)
+        self.assertTrue(ai_only.blocks_publish)
+        ai_only.final_text = "민수가 12월 5일까지 30일로 바꾼다"
+        self.assertFalse(ai_only.blocks_publish)
+        # 문장을 골랐어도 '확인이 필요했던 항목'이라는 사실은 그대로다(묶음이 바뀌지 않는다).
+        self.assertTrue(ai_only.needs_host)
 
-    def test_published_text_falls_back_to_the_spec_line(self):
-        decision = self._decision(warnings=[], done_criteria="스테이징 확인", confirm_state=Decision.CONFIRM_CONFIRMED)
-        self.assertEqual(decision.published_text, decision.spec_line)
-        decision.final_text = "금요일까지 스테이징 배포"
-        self.assertEqual(decision.published_text, "금요일까지 스테이징 배포")
+    def _migration(self):
+        from importlib import import_module
+
+        return import_module("meetalign.migrations.0022_decision_candidates")
+
+    def test_0022_builds_a_sentence_from_the_old_fields(self):
+        spec_sentence = self._migration().spec_sentence
+        self.assertEqual(spec_sentence("민수", "배포", "금요일", "확인"), "민수 · 배포 · 금요일 · 확인")
+        self.assertEqual(spec_sentence("", "배포", "", ""), "배포")
+        self.assertEqual(spec_sentence("", "", "", ""), "")
+
+    def test_0022_backfills_only_published_rows_without_a_sentence(self):
+        """폴백을 지우면 문장이 비는 레코드만 채운다 — draft와 이미 쓰인 문장은 건드리지 않는다."""
+        fill = self._migration().fill_missing_final_text
+        draft = self._decision(order=11, who="민수", what="배포", due_text="금요일", done_criteria="확인")
+        empty = self._decision(
+            order=12, who="민수", what="문서", due_text="", done_criteria="",
+            status=Decision.STATUS_PUBLISHED,
+        )
+        kept = self._decision(
+            order=13, who="", what="QA", due_text="", done_criteria="",
+            status=Decision.STATUS_UNDECIDED, final_text="이미 있는 문장",
+        )
+        self.assertEqual(fill(Decision), 1)
+        draft.refresh_from_db()
+        empty.refresh_from_db()
+        kept.refresh_from_db()
+        self.assertEqual(draft.final_text, "")
+        self.assertEqual(empty.final_text, "민수 · 문서")
+        self.assertEqual(kept.final_text, "이미 있는 문장")
+
+    def test_0022_marks_backfilled_undecided_rows_as_carried_over(self):
+        """보정된 미결정 행은 다음 회의로 넘어간 안건임이 문장에 드러나야 한다.
+
+        팀원 화면이 상태 분기를 없애고 final_text만 보여주므로, 꼬리말이 없으면 미결정이
+        보통 확정 결정과 똑같이 읽힌다.
+        """
+        fill = self._migration().fill_missing_final_text
+        carried = self._decision(
+            order=14, who="민수", what="배포 범위 정하기", due_text="", done_criteria="",
+            status=Decision.STATUS_UNDECIDED,
+        )
+        self.assertEqual(fill(Decision), 1)
+        carried.refresh_from_db()
+        self.assertEqual(
+            carried.final_text,
+            "민수 · 배포 범위 정하기 — 이번 회의에서 결론이 나지 않았음 (다음 회의로)",
+        )
+
+    def test_items_without_warnings_do_not_need_the_host(self):
+        decision = self._decision(warnings=[], final_text="민수가 금요일까지 배포한다")
+        self.assertFalse(decision.needs_host)
+        self.assertFalse(decision.blocks_publish)
 
     def test_duplicate_decision_order_in_one_meeting_is_rejected_by_db(self):
         self._decision(order=0)
@@ -2209,8 +2648,9 @@ class DecisionConfirmTests(TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.client.post(self.url, {"action": "compile"})
         decisions = list(self.meeting.decisions.all())
-        self.warned = [d for d in decisions if d.warnings]
-        self.plain = [d for d in decisions if not d.warnings]
+        # 모호 판정은 AI가 하므로 divergence_reason만 있고 warnings는 빈 항목이 정상이다.
+        self.warned = [d for d in decisions if d.has_warning]
+        self.plain = [d for d in decisions if not d.has_warning]
         # 가짜 명세 3개 중 2개에 경고가 붙고 1개는 완전히 채워져 있다.
         self.assertEqual(len(self.warned), 2)
         self.assertEqual(len(self.plain), 1)
@@ -2237,23 +2677,21 @@ class DecisionConfirmTests(TestCase):
         decision.refresh_from_db()
         self.assertEqual(decision.final_text, candidate.text)
         self.assertFalse(decision.marked_undecided)
-        self.assertTrue(decision.is_settled)
+        self.assertFalse(decision.blocks_publish)
 
     def test_the_chosen_text_is_a_snapshot_not_a_live_link(self):
-        # 확정한 뒤 후보 문장을 고쳐도 확정 내용은 따라 바뀌지 않아야 한다.
+        """고른 시점의 문장을 복사해 둔다 — 후보가 나중에 바뀌어도 확정 내용은 그대로다."""
         decision = self.warned[0]
         candidate = decision.interpretations.first()
         self.client.post(self.url, {
             "action": "save", "choice_%d" % decision.id: self._candidate_value(candidate),
         })
-        self.client.post(self.url, {
-            "action": "save",
-            "interpretation_%d" % candidate.id: "완전히 다른 후보 문장",
-        })
+        chosen_text = candidate.text
+        Interpretation.objects.filter(pk=candidate.pk).update(text="완전히 다른 후보 문장")
         decision.refresh_from_db()
         candidate.refresh_from_db()
         self.assertEqual(candidate.text, "완전히 다른 후보 문장")
-        self.assertNotEqual(decision.final_text, candidate.text)
+        self.assertEqual(decision.final_text, chosen_text)
 
     def test_the_review_screen_shows_which_option_is_chosen(self):
         decision = self.warned[0]
@@ -2297,7 +2735,7 @@ class DecisionConfirmTests(TestCase):
         self.assertContains(r, "한 줄 적어 주세요")
         decision.refresh_from_db()
         self.assertEqual(decision.final_text, "")
-        self.assertFalse(decision.is_settled)
+        self.assertTrue(decision.blocks_publish)
 
     def test_custom_text_is_shown_back_in_its_own_box(self):
         decision = self.warned[0]
@@ -2310,9 +2748,17 @@ class DecisionConfirmTests(TestCase):
         self.assertEqual(row["choice"], decision_compiler.CHOICE_CUSTOM)
         self.assertEqual(row["custom_text"], "내가 쓴 확정 문장")
 
-    # ---- 아직 미정 ----
+    # ---- 다음 회의로 넘김 ----
 
-    def test_marking_undecided_sets_the_flag_and_clears_the_sentence(self):
+    def test_undecided_sentence_names_the_topic(self):
+        """문구는 한 곳에서만 만든다 — 진행자 화면·팀원 화면·이월 목록이 같은 문장을 쓴다."""
+        self.assertEqual(
+            decision_compiler.undecided_sentence("로그 보관 기간"),
+            "로그 보관 기간 — 이번 회의에서 결론이 나지 않았음 (다음 회의로)",
+        )
+
+    def test_marking_undecided_sets_the_flag_and_writes_a_sentence(self):
+        """'다음 회의로 넘김'도 자기 문장을 갖는다 — 공개되는 것은 언제나 final_text 하나다."""
         decision = self.warned[0]
         self.client.post(self.url, {
             "action": "save",
@@ -2324,8 +2770,12 @@ class DecisionConfirmTests(TestCase):
         })
         decision.refresh_from_db()
         self.assertTrue(decision.marked_undecided)
-        self.assertEqual(decision.final_text, "")
-        self.assertTrue(decision.is_settled)
+        self.assertEqual(
+            decision.final_text,
+            "%s — 이번 회의에서 결론이 나지 않았음 (다음 회의로)" % decision.what,
+        )
+        self.assertEqual(decision.published_text, decision.final_text)
+        self.assertFalse(decision.blocks_publish)
 
     def test_switching_from_undecided_back_to_a_candidate_clears_the_flag(self):
         decision = self.warned[0]
@@ -2363,29 +2813,110 @@ class DecisionConfirmTests(TestCase):
         decision.refresh_from_db()
         self.assertEqual(decision.final_text, "")
 
-    def test_spec_edits_and_the_choice_are_saved_in_one_submit(self):
-        decision = self.warned[0]
+    # ---- 이 결정 빼기 ----
+
+    def test_a_clear_item_can_be_rewritten_by_hand(self):
+        """'그대로 공개될 결정'도 접힌 '고치기'로 문장을 바꿀 수 있다."""
+        decision = self.plain[0]
         self.client.post(self.url, {
             "action": "save",
-            "who_%d" % decision.id: "민수",
-            "what_%d" % decision.id: decision.what,
-            "due_%d" % decision.id: "금요일",
-            "done_%d" % decision.id: "스테이징 확인",
-            "confirm_state_%d" % decision.id: Decision.CONFIRM_CONFIRMED,
             "choice_%d" % decision.id: decision_compiler.CHOICE_CUSTOM,
-            "custom_text_%d" % decision.id: "금요일 18시까지",
+            "custom_text_%d" % decision.id: "민수가 금요일 18시까지 끝낸다",
         })
         decision.refresh_from_db()
-        self.assertEqual(decision.who, "민수")
-        self.assertEqual(decision.warnings, [])
-        self.assertEqual(decision.final_text, "금요일 18시까지")
+        self.assertEqual(decision.final_text, "민수가 금요일 18시까지 끝낸다")
 
-    def test_items_without_warnings_are_settled_with_no_choice(self):
+    def test_dropping_an_item_removes_it_from_the_publish_set(self):
+        """AI가 회의에 없던 결정을 만들어 냈을 때 쓰는 통로 — 두 묶음 모두에서 된다."""
+        for decision in (self.plain[0], self.warned[0]):
+            self.client.post(self.url, {
+                "action": "save", "choice_%d" % decision.id: decision_compiler.CHOICE_DROP,
+            })
+            self.assertFalse(Decision.objects.filter(pk=decision.pk).exists(), decision.what)
+            self.assertEqual(Interpretation.objects.filter(decision_id=decision.pk).count(), 0)
+        r = self.client.get(self.url)
+        self.assertEqual(r.context["draft_count"], self.meeting.decisions.count())
+
+    def test_dropping_is_refused_after_publishing(self):
+        """공개된 뒤에는 뺄 수 없다 — 팀원 확인 기록이 딸려 있다."""
+        decision = self.plain[0]
+        Decision.objects.filter(pk=decision.pk).update(status=Decision.STATUS_PUBLISHED)
+        r = self.client.post(self.url, {
+            "action": "save", "choice_%d" % decision.id: decision_compiler.CHOICE_DROP,
+        })
+        self.assertContains(r, "공개된 항목은 뺄 수 없습니다")
+        self.assertTrue(Decision.objects.filter(pk=decision.pk).exists())
+
+    def test_a_failed_choice_holds_back_the_irreversible_drop(self):
+        """제출이 실패하면 '이 결정 빼기'는 보류한다 — 되돌릴 수 없는 동작이기 때문이다.
+
+        같은 제출이 거부됐는데 삭제만 커밋되면 진행자는 복구할 방법이 없다(다시 컴파일하면
+        다른 선택도 전부 사라진다). 반면 나머지 선택은 그대로 저장해, 고른 것이 화면에서
+        사라지지 않게 한다.
+        """
+        keep = self.plain[0]
+        broken = self.warned[0]
+        r = self.client.post(self.url, {
+            "action": "publish",
+            "choice_%d" % keep.id: decision_compiler.CHOICE_DROP,
+            "choice_%d" % broken.id: decision_compiler.CHOICE_CUSTOM,
+            "custom_text_%d" % broken.id: "   ",
+        })
+        self.assertContains(r, "한 줄 적어 주세요")
+        self.assertTrue(Decision.objects.filter(pk=keep.pk).exists())
+        self.assertEqual(self.meeting.decisions.filter(status=Decision.STATUS_PUBLISHED).count(), 0)
+
+    def test_the_screen_asks_before_dropping_a_decision(self):
+        """빼기는 비가역이므로 제출 전에 확인을 받는다(다른 파괴적 동작과 같은 수준)."""
+        html = self.client.get(self.url).content.decode()
+        self.assertIn('data-drop-value="%s"' % decision_compiler.CHOICE_DROP, html)
+        self.assertIn("되돌릴 수 없어요", html)
+
+    def test_a_carried_over_item_is_not_shown_as_publishing(self):
+        """'다음 회의로 넘김'을 고른 항목을 '그대로 공개될 결정'으로 보여주면 안 된다.
+
+        그 항목은 공개되지 않고 다음 회의로 이월된다 — 화면과 서버가 다른 말을 하면 진행자는
+        자기가 고른 것이 반영됐는지 알 수 없다.
+        """
+        decision = self.plain[0]
+        self.client.post(self.url, {
+            "action": "save", "choice_%d" % decision.id: decision_compiler.CHOICE_UNDECIDED,
+        })
+        r = self.client.get(self.url)
+        ids = lambda rows: [row["decision"].id for row in rows]
+        self.assertNotIn(decision.id, ids(r.context["clear_rows"]))
+        self.assertIn(decision.id, ids(r.context["carried_rows"]))
+        self.assertContains(r, "다음 회의로 넘길 결정")
+        html = r.content.decode()
+        self.assertNotIn("다르게 이해될 여지가 없어 위 문장이 그대로 공개됩니다", html)
+
+    def test_every_draft_row_is_tracked_by_the_button_script(self):
+        """선택을 바꿀 수 있는 모든 항목을 스크립트가 추적해야 한다.
+
+        처리한 항목만 빠지면, 그 항목을 빈 '직접 쓰기'로 바꿔도 배지와 개수가 반응하지 않는다.
+        """
+        html = self.client.get(self.url).content.decode()
+        for decision in self.meeting.decisions.all():
+            self.assertIn('data-choice-name="choice_%d"' % decision.id, html, decision.what)
+        # 빈 '직접 쓰기'를 처리됨으로 세지 않도록 스크립트가 본문까지 본다.
+        self.assertIn("custom_text_", html)
+
+    def test_dropping_every_item_leaves_nothing_to_publish(self):
+        for decision in list(self.meeting.decisions.all()):
+            self.client.post(self.url, {
+                "action": "save", "choice_%d" % decision.id: decision_compiler.CHOICE_DROP,
+            })
+        self.assertEqual(self.meeting.decisions.count(), 0)
+        # 회의에 결정이 하나도 남지 않았으면 "공개할 항목이 없다"가 아니라 그 사실을 말해야 한다.
+        self.assertContains(self.client.post(self.url, {"action": "publish"}),
+                            "모든 결정을 뺐습니다")
+
+    def test_items_without_warnings_are_ready_with_no_choice(self):
         plain = self.plain[0]
-        self.assertTrue(plain.is_settled)
+        self.assertFalse(plain.blocks_publish)
         row = next(r for r in self.client.get(self.url).context["rows"] if r["decision"].id == plain.id)
         self.assertFalse(row["blocking"])
-        self.assertContains(self.client.get(self.url), "따로 확정할 것이 없습니다")
+        self.assertContains(self.client.get(self.url), "따로 고를 것이 없습니다")
 
     def test_non_host_cannot_confirm(self):
         client = Client()
@@ -2417,8 +2948,9 @@ class DecisionPublishTests(TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.client.post(self.url, {"action": "compile"})
         decisions = list(self.meeting.decisions.all())
-        self.warned = [d for d in decisions if d.warnings]
-        self.plain = [d for d in decisions if not d.warnings]
+        # 모호 판정은 AI가 하므로 divergence_reason만 있고 warnings는 빈 항목이 정상이다.
+        self.warned = [d for d in decisions if d.has_warning]
+        self.plain = [d for d in decisions if not d.has_warning]
 
     def _confirm(self, decision, choice=None):
         choice = choice or "%s%d" % (
@@ -2463,6 +2995,25 @@ class DecisionPublishTests(TestCase):
         r = self.client.post(self.url, {"action": "publish"})
         self.assertContains(r, "공개할 항목이 없습니다")
 
+    def test_an_item_without_a_sentence_cannot_be_published(self):
+        """문장이 빈 항목은 어떤 경로로 들어왔든 공개를 막는다.
+
+        팀원 화면은 final_text 하나만 보여주므로, 문장이 없으면 번호만 있는 빈 줄이 공개된다.
+        AI가 모호 판정을 하면서 이유를 비워 보내거나, 이번 재설계 전에 만들어진 무경고
+        draft가 그대로 공개로 넘어가면 그 상태가 된다.
+        """
+        self._confirm_all()
+        blank = Decision.objects.create(
+            meeting=self.meeting, order=90, what="문장이 비어 있는 항목",
+            warnings=[], divergence_reason="", final_text="",
+        )
+        self.assertIn(blank, decision_compiler.publish_blockers(
+            list(self.meeting.decisions.filter(status=Decision.STATUS_DRAFT))))
+        r = self.client.post(self.url, {"action": "publish"})
+        self.assertContains(r, "아직 확정하지 않은 항목")
+        blank.refresh_from_db()
+        self.assertEqual(blank.status, Decision.STATUS_DRAFT)
+
     # ---- 공개 ----
 
     def test_publishing_covers_items_without_warnings_too(self):
@@ -2470,11 +3021,11 @@ class DecisionPublishTests(TestCase):
         r = self.client.post(self.url, {"action": "publish"})
         self.assertRedirects(r, self.url)
         for decision in self.meeting.decisions.all():
-            self.assertEqual(decision.status, Decision.STATUS_PUBLISHED, decision.spec_line)
-        # 경고가 없던 항목은 확정 문장이 없어도 명세 한 줄이 확정 내용이 된다.
+            self.assertEqual(decision.status, Decision.STATUS_PUBLISHED, decision.what)
+        # 확인이 필요 없던 항목은 AI가 쓴 확정 문장이 그대로 공개된다.
         plain = self.meeting.decisions.get(pk=self.plain[0].pk)
-        self.assertEqual(plain.final_text, "")
-        self.assertEqual(plain.published_text, plain.spec_line)
+        self.assertTrue(plain.final_text)
+        self.assertEqual(plain.published_text, plain.final_text)
 
     def test_items_marked_undecided_become_undecided_not_published(self):
         self._confirm(self.warned[0])
@@ -2720,11 +3271,12 @@ class DecisionUnpublishTests(TestCase):
         self.assertEqual(self.decision.final_text, "금요일 18시까지")
         self.assertTrue(self.client.get(self.url).context["editable"])
 
-    def test_the_spec_edit_section_comes_back_after_unpublishing(self):
-        # 이게 공개 취소를 넣은 이유다 — 공개 뒤에는 명세 수정 영역이 사라진다.
-        self.assertNotContains(self.client.get(self.url), "무엇을")
+    def test_the_choice_section_comes_back_after_unpublishing(self):
+        # 이게 공개 취소를 넣은 이유다 — 공개 뒤에는 확정 선택 UI가 사라진다.
+        radio = 'name="choice_%d"' % self.decision.id
+        self.assertNotIn(radio, self.client.get(self.url).content.decode())
         self.client.post(self.url, {"action": "unpublish"})
-        self.assertContains(self.client.get(self.url), "무엇을")
+        self.assertIn(radio, self.client.get(self.url).content.decode())
 
     def test_undecided_items_are_restored_too(self):
         Decision.objects.filter(pk=self.decision.pk).update(
@@ -2753,7 +3305,7 @@ class DecisionUnpublishTests(TestCase):
         Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)
         r = self.client.get(self.url)
         self.assertFalse(r.context["can_unpublish"])
-        self.assertNotContains(r, "공개 취소")
+        self.assertNotContains(r, 'value="unpublish"')
 
     def test_unpublishing_with_nothing_published_is_refused(self):
         Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)
