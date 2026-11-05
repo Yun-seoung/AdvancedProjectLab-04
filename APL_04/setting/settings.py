@@ -14,9 +14,16 @@ import os
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# .env를 항상 자동으로 읽는다(manage.py·wsgi·asgi 모두 이 파일을 거친다). 실행 위치와 무관하게 파일 기준
+# 절대경로로 찾고, APL_04/.env → 저장소 루트 .env 순서다. 이미 설정된 환경변수는 덮어쓰지 않으므로
+# 터미널에서 `$env:KEY=...`로 준 값이 .env보다 우선한다(일시적 override). 양식은 APL_04/.env.example.
+for _env_file in (BASE_DIR / '.env', BASE_DIR.parent / '.env'):
+    load_dotenv(_env_file, override=False)
 
 
 # Quick-start development settings - unsuitable for production

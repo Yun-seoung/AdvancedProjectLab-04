@@ -42,21 +42,7 @@ GROQ_API_KEY=발급받은_API_키                # (선택) CLOVA 다음 순위.
 FASTER_WHISPER_MODEL=large-v3-turbo        # CLOVA·Groq 모두 없거나 실패 시 쓸 로컬 Whisper (Windows 포함 모든 OS)
 ```
 
-프로젝트가 `.env`를 자동으로 읽지 않으므로, 서버 실행 전에 불러옵니다:
-
-```bash
-# macOS / Linux / Git Bash
-cd APL_04
-set -a && source ../.env && set +a
-python manage.py runserver
-```
-
-```powershell
-# Windows PowerShell
-cd APL_04
-Get-Content ..\.env | Where-Object { $_ -match '^\s*([^#=]+)=([^#]*)' } | ForEach-Object { [Environment]::SetEnvironmentVariable($matches[1].Trim(), $matches[2].Trim(), 'Process') }
-python manage.py runserver
-```
+서버는 시작할 때 `APL_04/.env`와 저장소 루트의 `.env`를 자동으로 읽습니다(APL_04가 우선). 모든 항목의 설명은 `APL_04/.env.example`에 있으니 복사해서 채우세요: `copy APL_04\.env.example APL_04\.env`. 터미널에서 먼저 지정한 환경변수(`$env:KEY="값"`)는 `.env`보다 우선하므로 일시적으로 바꿔 쓸 수 있습니다.
 
 | 환경변수 | 설명 |
 |---|---|
