@@ -120,6 +120,10 @@
               {% if row.choice == choice_undecided %}checked{% endif %}>
             <span><b>다음 회의로 넘김</b> — 이 회의에서 결론이 나지 않았다</span>
           </label>
+          <label class="meta" style="display:flex;gap:9px;align-items:flex-start;padding:7px 0">
+            <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_drop }}" style="width:auto;margin-top:3px">
+            <span>이 결정 빼기 — 회의에 없던 결정이에요</span>
+          </label>
         </div>
       </div>
       {% elif row.interpretations %}
@@ -235,6 +239,10 @@
             <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_undecided }}" style="width:auto;margin-top:3px"
               {% if row.choice == choice_undecided %}checked{% endif %}>
             <span><b>다음 회의로 넘김</b> — 이 회의에서 결론이 나지 않았다</span>
+          </label>
+          <label class="meta" style="display:flex;gap:9px;align-items:flex-start;padding:7px 0">
+            <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_drop }}" style="width:auto;margin-top:3px">
+            <span>이 결정 빼기 — 회의에 없던 결정이에요</span>
           </label>
         </div>
         </div>

@@ -438,6 +438,9 @@ def _resolve_item(item):
 CHOICE_CANDIDATE_PREFIX = "candidate:"
 CHOICE_CUSTOM = "custom"
 CHOICE_UNDECIDED = "undecided"
+# AI가 회의에 없던 결정을 만들어 냈을 때 그 항목을 지운다. '다음 회의로 넘김'과 달라야 하는
+# 이유: 없던 안건을 이월하면 다음 회의마다 계속 보이게 된다.
+CHOICE_DROP = "drop"
 
 
 def undecided_sentence(topic):

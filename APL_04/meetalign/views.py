@@ -346,6 +346,12 @@ def _apply_host_choice(request, decision):
     if not raw:
         return None
 
+    if raw == decision_compiler.CHOICE_DROP:
+        # AI가 회의에 없던 결정을 만들어 낸 경우. 삭제했으므로 아래 save()를 타지 않도록
+        # 여기서 바로 돌아간다(Interpretation은 cascade로 함께 지워진다).
+        decision.delete()
+        return None
+
     if raw == decision_compiler.CHOICE_UNDECIDED:
         # 미정 항목도 문장을 갖는다 — 팀원 화면과 이월 목록이 final_text 하나만 보기 때문이다.
         decision.final_text = decision_compiler.undecided_sentence(decision.what)
@@ -374,13 +380,17 @@ def _apply_host_choice(request, decision):
 def _save_decision_edits(request, meeting):
     """진행자의 확정 선택을 저장한다. draft 항목만 대상이다.
 
-    고를 수 있는 것은 [후보 | 직접 쓰기 | 다음 회의로 넘김]뿐이다 — 누가·무엇을·언제까지·
-    완료 기준을 직접 입력하는 칸은 없앴고(기준이 둘이 되지 않게), 후보 문장도 읽기 전용이다.
-    실패 사유 문자열 또는 None을 돌려준다.
+    고를 수 있는 것은 [후보 | 직접 쓰기 | 다음 회의로 넘김 | 이 결정 빼기]뿐이다 — 누가·
+    무엇을·언제까지·완료 기준을 직접 입력하는 칸은 없앴고(기준이 둘이 되지 않게), 후보 문장도
+    읽기 전용이다. 실패 사유 문자열 또는 None을 돌려준다.
     """
     error = None
     for decision in meeting.decisions.all():
         if decision.status != Decision.STATUS_DRAFT:
+            # 공개된 항목은 선택을 받지 않는다. 다만 '이 결정 빼기'는 조용히 무시하지 않고
+            # 사유를 돌려준다 — 진행자가 왜 안 됐는지 알아야 '확정 문장 수정'으로 갈 수 있다.
+            if request.POST.get("choice_%d" % decision.id, "") == decision_compiler.CHOICE_DROP and error is None:
+                error = "공개된 항목은 뺄 수 없습니다. 내용을 고치려면 '확정 문장 수정'을 쓰세요."
             continue
         failed = _apply_host_choice(request, decision)
         if failed and error is None:
@@ -570,6 +580,7 @@ def decision_review(request, meeting_id):
         "choice_candidate_prefix": decision_compiler.CHOICE_CANDIDATE_PREFIX,
         "choice_custom": decision_compiler.CHOICE_CUSTOM,
         "choice_undecided": decision_compiler.CHOICE_UNDECIDED,
+        "choice_drop": decision_compiler.CHOICE_DROP,
         "editable": all(row["decision"].status == Decision.STATUS_DRAFT for row in rows),
         "status_draft": Decision.STATUS_DRAFT,
         "status_published": Decision.STATUS_PUBLISHED,

@@ -2638,6 +2638,49 @@ class DecisionConfirmTests(TestCase):
         decision.refresh_from_db()
         self.assertEqual(decision.final_text, "")
 
+    # ---- 이 결정 빼기 ----
+
+    def test_a_clear_item_can_be_rewritten_by_hand(self):
+        """'그대로 공개될 결정'도 접힌 '고치기'로 문장을 바꿀 수 있다."""
+        decision = self.plain[0]
+        self.client.post(self.url, {
+            "action": "save",
+            "choice_%d" % decision.id: decision_compiler.CHOICE_CUSTOM,
+            "custom_text_%d" % decision.id: "민수가 금요일 18시까지 끝낸다",
+        })
+        decision.refresh_from_db()
+        self.assertEqual(decision.final_text, "민수가 금요일 18시까지 끝낸다")
+
+    def test_dropping_an_item_removes_it_from_the_publish_set(self):
+        """AI가 회의에 없던 결정을 만들어 냈을 때 쓰는 통로 — 두 묶음 모두에서 된다."""
+        for decision in (self.plain[0], self.warned[0]):
+            self.client.post(self.url, {
+                "action": "save", "choice_%d" % decision.id: decision_compiler.CHOICE_DROP,
+            })
+            self.assertFalse(Decision.objects.filter(pk=decision.pk).exists(), decision.what)
+            self.assertEqual(Interpretation.objects.filter(decision_id=decision.pk).count(), 0)
+        r = self.client.get(self.url)
+        self.assertEqual(r.context["draft_count"], self.meeting.decisions.count())
+
+    def test_dropping_is_refused_after_publishing(self):
+        """공개된 뒤에는 뺄 수 없다 — 팀원 확인 기록이 딸려 있다."""
+        decision = self.plain[0]
+        Decision.objects.filter(pk=decision.pk).update(status=Decision.STATUS_PUBLISHED)
+        r = self.client.post(self.url, {
+            "action": "save", "choice_%d" % decision.id: decision_compiler.CHOICE_DROP,
+        })
+        self.assertContains(r, "공개된 항목은 뺄 수 없습니다")
+        self.assertTrue(Decision.objects.filter(pk=decision.pk).exists())
+
+    def test_dropping_every_item_leaves_nothing_to_publish(self):
+        for decision in list(self.meeting.decisions.all()):
+            self.client.post(self.url, {
+                "action": "save", "choice_%d" % decision.id: decision_compiler.CHOICE_DROP,
+            })
+        self.assertEqual(self.meeting.decisions.count(), 0)
+        self.assertContains(self.client.post(self.url, {"action": "publish"}),
+                            "공개할 항목이 없습니다")
+
     def test_items_without_warnings_are_settled_with_no_choice(self):
         plain = self.plain[0]
         self.assertTrue(plain.is_settled)
