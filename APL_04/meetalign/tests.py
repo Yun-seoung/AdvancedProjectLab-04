@@ -2094,6 +2094,46 @@ class DecisionReviewTests(TestCase):
                 self.assertNotIn(marker, html, decision.what)
         self.assertIn("disabled", html)
 
+    def test_the_publish_confirmation_says_how_to_undo(self):
+        """공개 후에도 되돌릴 길이 있다 — 확인창이 그렇게 말해야 한다.
+
+        팀원이 확인하기 전에는 '공개 취소'로 draft로 내릴 수 있고, 그 뒤에는 항목별로
+        '확정 문장 수정'을 쓸 수 있다.
+        """
+        self._compile()
+        html = self.client.get(self.url).content.decode()
+        self.assertIn("팀원이 확인하기 전에는", html)
+        self.assertIn("되돌릴 수 있고, 그 뒤에는 항목별로 문장을 고칠 수 있어요", html)
+        self.assertNotIn("공개 후에는 선택을 되돌릴 수 없습니다", html)
+
+    def test_the_screen_marks_rows_and_the_header_for_live_updates(self):
+        """'미확정' 배지와 상단 '처리 안 한 항목' 수도 저장 전에 갱신할 수 있게 표시를 남긴다."""
+        self._compile()
+        html = self.client.get(self.url).content.decode()
+        blocking = [d for d in self.meeting.decisions.all() if d.blocks_publish]
+        self.assertEqual(len(blocking), 2)
+        for decision in blocking:
+            self.assertIn('data-unsettled-for="choice_%d"' % decision.id, html)
+        self.assertIn('id="blocker-count"', html)
+        self.assertIn('id="blocker-note"', html)
+
+    def test_the_revise_form_is_collapsed_under_the_published_sentence(self):
+        """공개 뒤 '문장 고치기'는 확정 문장 바로 아래에서 찾을 수 있다."""
+        self._compile()
+        for decision in self.meeting.decisions.all():
+            if decision.has_warning:
+                self.client.post(self.url, {
+                    "action": "save",
+                    "choice_%d" % decision.id: "%s%d" % (
+                        decision_compiler.CHOICE_CANDIDATE_PREFIX,
+                        decision.interpretations.first().id),
+                })
+        self.client.post(self.url, {"action": "publish"})
+        html = self.client.get(self.url).content.decode()
+        self.assertIn("<summary", html)
+        self.assertIn("문장 고치기", html)
+        self.assertIn('name="final_text"', html)
+
     def test_numbering_runs_across_both_groups(self):
         self._compile()
         html = self.client.get(self.url).content.decode()
@@ -3167,7 +3207,7 @@ class DecisionUnpublishTests(TestCase):
         Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)
         r = self.client.get(self.url)
         self.assertFalse(r.context["can_unpublish"])
-        self.assertNotContains(r, "공개 취소")
+        self.assertNotContains(r, 'value="unpublish"')
 
     def test_unpublishing_with_nothing_published_is_refused(self):
         Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)

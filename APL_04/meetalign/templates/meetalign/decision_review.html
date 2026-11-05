@@ -39,7 +39,7 @@
     <div>
       <h2 class="section-title" style="margin-top:0">결정 {{ rows|length }}개</h2>
       <p class="muted" style="margin:-4px 0 0">
-        확인 필요 {{ ambiguous_count }}개{% if blocker_count %} · 처리 안 한 항목 {{ blocker_count }}개{% endif %}{% if published_count %} · 공개 {{ published_count }}개{% endif %}{% if undecided_count %} · 미결정 {{ undecided_count }}개{% endif %}
+        확인 필요 {{ ambiguous_count }}개<span id="blocker-note"{% if not blocker_count %} hidden{% endif %}> · 처리 안 한 항목 <span id="blocker-count">{{ blocker_count }}</span>개</span>{% if published_count %} · 공개 {{ published_count }}개{% endif %}{% if undecided_count %} · 미결정 {{ undecided_count }}개{% endif %}
       </p>
     </div>
     {% if editable %}
@@ -52,6 +52,9 @@
       <button name="action" value="unpublish" class="btn sm secondary"
         onclick="return confirm('공개를 취소하고 수정 가능한 상태로 되돌릴까요?');">공개 취소</button>
     </form>
+    {% elif published_count %}
+    {# 공개 취소는 팀원 확인이 하나도 없을 때만 된다. 버튼이 사라진 이유를 적어 둔다. #}
+    <span class="muted" style="max-width:220px;text-align:right">팀원이 확인을 시작해 공개 취소는 할 수 없어요. 항목별로 문장을 고칠 수 있습니다.</span>
     {% endif %}
   </div>
 
@@ -89,7 +92,7 @@
       {% if editable %}
       <div style="border-top:1px solid var(--line);padding-top:12px">
         <span class="label" style="font-size:.86rem;font-weight:700;color:var(--ink-soft)">어느 문장으로 공개할까요?</span>
-        {% if row.blocking %}<span class="badge failed" style="margin-left:6px">미확정</span>{% endif %}
+        <span class="badge failed" style="margin-left:6px" data-unsettled-for="choice_{{ row.decision.id }}"{% if not row.blocking %} hidden{% endif %}>미확정</span>
         <div style="margin-top:8px"{% if row.blocking %} data-choice-name="choice_{{ row.decision.id }}"{% endif %}>
           {% for interpretation in row.interpretations %}
           <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
@@ -141,6 +144,24 @@
       {# 공개된 뒤: 확정 내용과 수정 폼. 수정하면 그 항목의 팀원 확인 기록이 전부 지워진다. #}
       {% if row.decision.status == status_published %}
       <div class="success" style="margin:0">확정: {{ row.decision.published_text }}</div>
+      {% if row.decision.final_text %}
+      {# 확정 문장 바로 아래에 둔다 — 응답 집계 밑에 묻혀 있어 찾기 어려웠다. #}
+      <details>
+        <summary class="meta" style="cursor:pointer">문장 고치기</summary>
+        <form method="post" style="margin:8px 0 0">{% csrf_token %}
+          <input type="hidden" name="decision_id" value="{{ row.decision.id }}">
+          <div class="field" style="margin:0">
+            <label for="final_text_{{ row.decision.id }}">이 항목의 확정 문장</label>
+            <input type="text" id="final_text_{{ row.decision.id }}" name="final_text" value="{{ row.decision.final_text }}">
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button name="action" value="revise" class="btn sm secondary"
+              onclick="return confirm('문장을 고치면 이 항목의 팀원 확인 기록이 모두 지워지고 다시 받습니다. 계속할까요?');">확정 문장 수정</button>
+            {% if row.decision.revised %}<span class="muted">수정됨 — 팀원에게 다시 확인 요청 중</span>{% endif %}
+          </div>
+        </form>
+      </details>
+      {% endif %}
       {% comment %}
         작성자 없는 숫자와 의견 문장만 받는다 — 누가 '달랐어요'를 골랐는지는 뷰에서부터 담지 않는다.
         응답 대상 전원이 응답하기 전에는 row.ack 자체가 없다(응답자가 적을 때 숫자만으로
@@ -155,20 +176,6 @@
       <ul class="plain" style="margin:0">
         {% for comment in row.comments %}<li class="meta">· "{{ comment }}"</li>{% endfor %}
       </ul>
-      {% endif %}
-      {% if row.decision.final_text %}
-      <form method="post" style="margin:0">{% csrf_token %}
-        <input type="hidden" name="decision_id" value="{{ row.decision.id }}">
-        <div class="field" style="margin:0">
-          <label for="final_text_{{ row.decision.id }}">확정 문장 수정</label>
-          <input type="text" id="final_text_{{ row.decision.id }}" name="final_text" value="{{ row.decision.final_text }}">
-        </div>
-        <div class="row" style="margin-top:10px">
-          <button name="action" value="revise" class="btn sm secondary"
-            onclick="return confirm('문장을 고치면 이 항목의 팀원 확인 기록이 모두 지워지고 다시 받습니다. 계속할까요?');">확정 문장 수정</button>
-          {% if row.decision.revised %}<span class="muted">수정됨 — 팀원에게 다시 확인 요청 중</span>{% endif %}
-        </div>
-      </form>
       {% endif %}
       {% elif row.decision.status == status_undecided %}
       <div class="notice" style="margin:0">
@@ -245,6 +252,24 @@
       {# 공개된 뒤: 확정 내용과 수정 폼. 수정하면 그 항목의 팀원 확인 기록이 전부 지워진다. #}
       {% if row.decision.status == status_published %}
       <div class="success" style="margin:0">확정: {{ row.decision.published_text }}</div>
+      {% if row.decision.final_text %}
+      {# 확정 문장 바로 아래에 둔다 — 응답 집계 밑에 묻혀 있어 찾기 어려웠다. #}
+      <details>
+        <summary class="meta" style="cursor:pointer">문장 고치기</summary>
+        <form method="post" style="margin:8px 0 0">{% csrf_token %}
+          <input type="hidden" name="decision_id" value="{{ row.decision.id }}">
+          <div class="field" style="margin:0">
+            <label for="final_text_{{ row.decision.id }}">이 항목의 확정 문장</label>
+            <input type="text" id="final_text_{{ row.decision.id }}" name="final_text" value="{{ row.decision.final_text }}">
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button name="action" value="revise" class="btn sm secondary"
+              onclick="return confirm('문장을 고치면 이 항목의 팀원 확인 기록이 모두 지워지고 다시 받습니다. 계속할까요?');">확정 문장 수정</button>
+            {% if row.decision.revised %}<span class="muted">수정됨 — 팀원에게 다시 확인 요청 중</span>{% endif %}
+          </div>
+        </form>
+      </details>
+      {% endif %}
       {% comment %}
         작성자 없는 숫자와 의견 문장만 받는다 — 누가 '달랐어요'를 골랐는지는 뷰에서부터 담지 않는다.
         응답 대상 전원이 응답하기 전에는 row.ack 자체가 없다(응답자가 적을 때 숫자만으로
@@ -259,20 +284,6 @@
       <ul class="plain" style="margin:0">
         {% for comment in row.comments %}<li class="meta">· "{{ comment }}"</li>{% endfor %}
       </ul>
-      {% endif %}
-      {% if row.decision.final_text %}
-      <form method="post" style="margin:0">{% csrf_token %}
-        <input type="hidden" name="decision_id" value="{{ row.decision.id }}">
-        <div class="field" style="margin:0">
-          <label for="final_text_{{ row.decision.id }}">확정 문장 수정</label>
-          <input type="text" id="final_text_{{ row.decision.id }}" name="final_text" value="{{ row.decision.final_text }}">
-        </div>
-        <div class="row" style="margin-top:10px">
-          <button name="action" value="revise" class="btn sm secondary"
-            onclick="return confirm('문장을 고치면 이 항목의 팀원 확인 기록이 모두 지워지고 다시 받습니다. 계속할까요?');">확정 문장 수정</button>
-          {% if row.decision.revised %}<span class="muted">수정됨 — 팀원에게 다시 확인 요청 중</span>{% endif %}
-        </div>
-      </form>
       {% endif %}
       {% elif row.decision.status == status_undecided %}
       <div class="notice" style="margin:0">
@@ -289,7 +300,7 @@
   <div class="row" style="margin-top:18px">
     <button name="action" value="save" class="secondary">저장</button>
     <button name="action" value="publish" id="publish-btn"{% if not can_publish %} disabled title="처리하지 않은 항목이 있습니다"{% endif %}
-      onclick="return confirm('{{ draft_count }}개 항목을 팀원에게 공개할까요? 공개 후에는 선택을 되돌릴 수 없습니다.');">
+      onclick="return confirm('{{ draft_count }}개 항목을 팀원에게 공개할까요? 팀원이 확인하기 전에는 \'공개 취소\'로 되돌릴 수 있고, 그 뒤에는 항목별로 문장을 고칠 수 있어요.');">
       확정 문장 공개 ({{ draft_count }}개)
     </button>
   </div>
@@ -305,14 +316,22 @@
     var button = document.getElementById("publish-btn");
     if (!form || !button) return;
     var groups = form.querySelectorAll("[data-choice-name]");
+    var note = document.getElementById("blocker-note");
+    var count = document.getElementById("blocker-count");
     function refresh() {
-      var ready = true;
+      var left = 0;
       groups.forEach(function (group) {
         var name = group.getAttribute("data-choice-name");
-        if (!form.querySelector('input[name="' + name + '"]:checked')) ready = false;
+        var chosen = !!form.querySelector('input[name="' + name + '"]:checked');
+        if (!chosen) left += 1;
+        // 그 항목의 '미확정' 배지도 함께 감춘다(저장 전 화면 표시만 바뀐다).
+        var badge = form.querySelector('[data-unsettled-for="' + name + '"]');
+        if (badge) badge.hidden = chosen;
       });
-      button.disabled = !ready;
-      button.title = ready ? "" : "처리하지 않은 항목이 있습니다";
+      button.disabled = left > 0;
+      button.title = left > 0 ? "처리하지 않은 항목이 있습니다" : "";
+      if (count) count.textContent = left;
+      if (note) note.hidden = left === 0;
     }
     form.addEventListener("change", refresh);
     refresh();
