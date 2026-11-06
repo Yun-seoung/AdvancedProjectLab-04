@@ -1216,6 +1216,101 @@ class BackgroundProcessingTests(TestCase):
             services._generate("hi")
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 42)
 
+    # ---- Groq(LLM) — Gemini와 Ollama 사이의 두 번째 단계 ----
+
+    def _fake_groq_urlopen(self, captured, payload):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return json.dumps(payload).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            captured["headers"] = dict(request.header_items())
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return FakeResponse()
+        return fake_urlopen
+
+    def test_groq_llm_needs_both_api_key_and_model(self):
+        with patch.dict(os.environ, {"GROQ_API_KEY": "k1", "GROQ_LLM_MODEL": "llama-x"}, clear=True):
+            self.assertTrue(services._enabled())
+        with patch.dict(os.environ, {"GROQ_API_KEY": "k1"}, clear=True):
+            self.assertFalse(services._enabled())
+        with patch.dict(os.environ, {"GROQ_LLM_MODEL": "llama-x"}, clear=True):
+            self.assertFalse(services._enabled())
+
+    def test_groq_llm_request_and_response(self):
+        captured = {}
+        payload = {"choices": [{"message": {"content": " 답변 "}}]}
+        fake = self._fake_groq_urlopen(captured, payload)
+        with patch.dict(os.environ, {"GROQ_API_KEY": "k1", "GROQ_LLM_MODEL": "llama-x"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=fake):
+            result = services._generate("hi", temperature=0.3)
+        self.assertEqual(result, "답변")
+        self.assertEqual(captured["url"], services.GROQ_CHAT_URL)
+        self.assertEqual(captured["headers"].get("Authorization"), "Bearer k1")
+        self.assertEqual(captured["body"]["messages"][0]["content"], "hi")
+        self.assertEqual(captured["body"]["temperature"], 0.3)
+
+    def test_gemini_failure_falls_back_to_groq(self):
+        import urllib.error
+        error = urllib.error.HTTPError("u", 503, "Service Unavailable", {}, None)
+        urls = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return json.dumps({"choices": [{"message": {"content": "그록 답"}}]}).encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            urls.append(request.full_url)
+            if "generativelanguage" in request.full_url:
+                raise error
+            return FakeResponse()
+
+        with patch.dict(os.environ, {
+            "GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x", "GROQ_API_KEY": "k2", "GROQ_LLM_MODEL": "llama-x",
+        }, clear=True), patch("urllib.request.urlopen", side_effect=fake_urlopen), patch.object(services.time, "sleep"):
+            self.assertEqual(services._generate("hi"), "그록 답")
+        self.assertEqual(urls[-1], services.GROQ_CHAT_URL)
+
+    def test_groq_llm_failure_falls_back_to_ollama_when_configured(self):
+        import urllib.error
+        error = urllib.error.HTTPError("u", 503, "Service Unavailable", {}, None)
+        urls = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return '{"response": "올라마 답"}'.encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            urls.append(request.full_url)
+            if request.full_url == services.GROQ_CHAT_URL:
+                raise error
+            return FakeResponse()
+
+        with patch.dict(os.environ, {
+            "GROQ_API_KEY": "k1", "GROQ_LLM_MODEL": "llama-x", "OLLAMA_MODEL": "m1",
+        }, clear=True), patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            self.assertEqual(services._generate("hi"), "올라마 답")
+        self.assertEqual(urls[-1], services.OLLAMA_URL)
+
+    def test_groq_llm_failure_without_ollama_raises(self):
+        with patch.dict(os.environ, {"GROQ_API_KEY": "k1", "GROQ_LLM_MODEL": "llama-x"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")) as urlopen:
+            self.assertRaises(OSError, services._generate, "hi")
+        self.assertEqual(urlopen.call_count, 1)
+
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(), BACKGROUND_RECORDING=False)
 
@@ -1542,6 +1637,22 @@ class DecisionWarningTests(TestCase):
             ["확정 문장에 다른 숫자가 섞여 있어요: 3개, 5개"],
         )
 
+    # ---- 확정 문장에 남은 지시어(REFERENT_PHRASES) ----
+
+    def test_safety_catches_a_referent_left_in_the_final_text(self):
+        """담당자는 … 해당 분에게 넘긴다"처럼, 확정 문장이 실제로 이름을 못 정한 경우."""
+        self.assertEqual(
+            decision_compiler.safety_warnings("담당자는 그쪽에서 받은 파일을 넘긴다", "어제 그쪽에서 보내준 파일"),
+            ["확정 문장에 모호한 표현이 있어요: '그쪽'"],
+        )
+
+    def test_safety_ignores_a_referent_that_only_appears_in_the_transcript(self):
+        """원문(자연스러운 대화체)에 지시어가 있어도, 확정 문장이 깔끔하면 걸리지 않는다."""
+        self.assertEqual(
+            decision_compiler.safety_warnings("민수가 금요일까지 배포한다", "그쪽에서 얘기한 대로 민수가 금요일까지 배포하기로 했어요"),
+            [],
+        )
+
 
 class DecisionParseTests(TestCase):
     """통합 응답 파서(parse_items)의 스키마 검증과 근거 검증."""
@@ -1656,6 +1767,53 @@ class DecisionParseTests(TestCase):
                          ensure_ascii=False)
         item = decision_compiler.parse_items(raw, source_text="로그 이야기")[0]
         self.assertEqual(item["final"], "")
+
+    # ---- 중복 제거: topic과 근거가 둘 다 같을 때만 같은 안건으로 본다 ----
+
+    def test_same_topic_and_evidence_are_deduped(self):
+        """실제로 겪은 버그: 같은 안건을 문구만 살짝 바꿔 두 번 만들어내는 경우."""
+        source = "새 기능은 적당히 빠르면 됩니다."
+        raw = json.dumps([
+            {"topic": "새로 추가하는 기능", "ambiguous": True, "why": "x",
+             "candidates": [{"text": "이번 주 안에 완료", "evidence": source}]},
+            {"topic": "새로 추가하는 기능", "ambiguous": True, "why": "y",
+             "candidates": [{"text": "다음 주 안에 완료", "evidence": source}]},
+        ], ensure_ascii=False)
+        items = decision_compiler.parse_items(raw, source_text=source)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["candidates"][0]["text"], "이번 주 안에 완료")
+
+    def test_different_topics_sharing_one_evidence_sentence_are_kept_separate(self):
+        """한 문장에서 서로 다른 결정 두 개가 나올 수 있다 — topic까지 같아야 중복으로 본다."""
+        source = "민수가 로그는 30일로 줄이고 QA는 다음 주까지 진행합니다."
+        raw = json.dumps([
+            {"topic": "로그 보관 기간", "ambiguous": False, "final": "로그는 30일로 줄인다",
+             "evidence": source},
+            {"topic": "QA 일정", "ambiguous": False, "final": "QA는 다음 주까지 진행한다",
+             "evidence": source},
+        ], ensure_ascii=False)
+        items = decision_compiler.parse_items(raw, source_text=source)
+        self.assertEqual(len(items), 2)
+
+    def test_same_topic_with_different_evidence_is_not_deduped(self):
+        """이름만 우연히 같은 서로 다른 안건까지 합치면 안 된다."""
+        raw = json.dumps([
+            {"topic": self.TOPIC, "ambiguous": False, "final": "x", "evidence": "문장 하나"},
+            {"topic": self.TOPIC, "ambiguous": False, "final": "y", "evidence": "다른 문장"},
+        ], ensure_ascii=False)
+        items = decision_compiler.parse_items(raw, source_text="문장 하나 다른 문장")
+        self.assertEqual(len(items), 2)
+
+    def test_items_with_blank_evidence_are_never_deduped_even_with_the_same_topic(self):
+        """근거가 비어 있으면(가짜 응답 모드 등) topic이 같아도 중복으로 보지 않는다."""
+        raw = json.dumps([
+            {"topic": "안건1", "ambiguous": True, "why": "x",
+             "candidates": [{"text": "후보", "evidence": ""}]},
+            {"topic": "안건1", "ambiguous": True, "why": "y",
+             "candidates": [{"text": "후보2", "evidence": ""}]},
+        ], ensure_ascii=False)
+        items = decision_compiler.parse_items(raw)
+        self.assertEqual(len(items), 2)
 
 
 class DecisionCompileTests(TestCase):
@@ -1908,6 +2066,78 @@ class DecisionCompileTests(TestCase):
             if decision.has_warning:
                 self.assertGreater(decision.interpretations.count(), 0, decision.what)
 
+    # ---- 보류 신호(DEFERRAL_PHRASES) 자동 처리 ----
+
+    def test_non_deferred_ambiguous_item_is_not_marked_undecided(self):
+        _, by_topic, _ = self._compiled(self.AMBIGUOUS)
+        self.assertFalse(by_topic["로그 보관 기간"].marked_undecided)
+
+    def test_deferred_candidate_sets_undecided_by_default(self):
+        """'내일 다시 얘기' 같은 근거가 있으면 AI가 뭐라고 했든 '다음 회의로 넘김'을 기본값으로 건다."""
+        source = "A안과 B안을 놓고 일단 둘 다 준비해보면서 내일 다시 얘기해보기로 했다."
+        self.meeting.transcript = source
+        self.meeting.save(update_fields=["transcript"])
+        item = {
+            "topic": "디자인 선택", "ambiguous": True, "why": "A안/B안 중 무엇을 고를지 아직 안 정해짐",
+            "candidates": [
+                {"text": "A안으로 진행한다", "evidence": source, "recommended": True},
+                {"text": "B안으로 진행한다", "evidence": source},
+            ],
+        }
+        _, by_topic, _ = self._compiled(item)
+        decision = by_topic["디자인 선택"]
+        self.assertTrue(decision.marked_undecided)
+        self.assertEqual(decision.final_text, decision_compiler.undecided_sentence("디자인 선택"))
+        self.assertEqual(decision.published_text, decision.final_text)
+        # 후보는 그대로 남겨 둬서 진행자가 보고 다시 고를 수 있다.
+        self.assertEqual(decision.interpretations.count(), 2)
+
+    def test_clear_item_with_deferral_evidence_is_also_marked_undecided(self):
+        source = "예산 건은 보류하고 다음에 다시 얘기하기로 했다."
+        self.meeting.transcript = source
+        self.meeting.save(update_fields=["transcript"])
+        item = {"topic": "예산", "ambiguous": False, "final": "예산은 보류한다", "evidence": source}
+        _, by_topic, _ = self._compiled(item)
+        self.assertTrue(by_topic["예산"].marked_undecided)
+
+
+class DecisionAmbiguityHintTests(TestCase):
+    """_review_hints(정규식 탐지 → 프롬프트 힌트)와 _looks_deferred(보류 강제)는 DB 없이 동작하는 순수 함수다."""
+
+    def test_review_hints_picks_sentences_with_known_phrases(self):
+        source = "오늘은 날씨가 좋다. 그거 두 번째 걸로 그분한테 넘겨주세요. 예산은 대충 여유있게 잡아주세요."
+        hints = decision_compiler._review_hints(source)
+        self.assertEqual(len(hints), 2)
+        self.assertTrue(any("그분" in h for h in hints))
+        self.assertTrue(any("대충" in h for h in hints))
+
+    def test_review_hints_is_empty_when_nothing_matches(self):
+        self.assertEqual(decision_compiler._review_hints("오늘은 날씨가 좋다. 내일 또 보자."), [])
+
+    def test_compile_prompt_includes_hint_sentences(self):
+        prompt = decision_compiler._compile_prompt("예산은 대충 여유있게 잡아주세요.")
+        self.assertIn("반드시 검토하라", prompt)
+        self.assertIn("예산은 대충 여유있게 잡아주세요.", prompt)
+
+    def test_compile_prompt_has_no_hint_block_when_nothing_matches(self):
+        prompt = decision_compiler._compile_prompt("오늘 회의를 마칩니다.")
+        self.assertNotIn("반드시 검토하라", prompt)
+
+    def test_looks_deferred_true_for_ambiguous_candidate_evidence(self):
+        item = {"ambiguous": True, "candidates": [
+            {"evidence": "일단 둘 다 준비해보고 내일 다시 얘기하자", "text": "x", "recommended": False},
+        ]}
+        self.assertTrue(decision_compiler._looks_deferred(item))
+
+    def test_looks_deferred_false_without_deferral_phrase(self):
+        item = {"ambiguous": True, "candidates": [
+            {"evidence": "50개로 확정한다", "text": "x", "recommended": False},
+        ]}
+        self.assertFalse(decision_compiler._looks_deferred(item))
+
+    def test_looks_deferred_checks_evidence_for_clear_items_too(self):
+        item = {"ambiguous": False, "evidence": "예산 건은 보류하기로 했다"}
+        self.assertTrue(decision_compiler._looks_deferred(item))
 
 
 class DecisionReviewTests(TestCase):
