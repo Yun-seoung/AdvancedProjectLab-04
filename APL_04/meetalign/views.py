@@ -546,11 +546,23 @@ def decision_review(request, meeting_id):
                 decision_compiler.CHOICE_CANDIDATE_PREFIX, interpretation.id,
             )
             interpretation.chosen = choice == interpretation.choice_value
+            # 근거 한 문장만으론 판단하기 어려울 때(예: 확정 문장은 여러 문장을 합쳤는데 근거는
+            # 하나만 인용한 경우) 앞뒤 맥락을 더 보여준다. 저장되지 않는 임시 속성이다.
+            interpretation.context = (
+                decision_compiler.context_around(meeting.transcript, interpretation.evidence)
+                if interpretation.evidence else ""
+            )
         rows.append({
             "decision": decision,
             "interpretations": interpretations,
             "choice": choice,
             "custom_text": custom_text,
+            # 경고에 찍힌 표현(예: '그쪽')이 원문 어디서 나왔는지. 근거 문장 위치와 다를 수
+            # 있어 따로 찾는다 — warning_context 참고.
+            "warning_rows": [
+                {"text": warning, "context": decision_compiler.warning_context(meeting.transcript, warning)}
+                for warning in decision.warnings
+            ],
             # 경고가 붙었는데 아직 고르지 않은 항목 — 공개를 막는다.
             "blocking": decision.blocks_publish,
             # 공개 항목의 "확인 N명 / 달랐어요 M명". 작성자 없는 숫자와 의견 문자열만 담고,

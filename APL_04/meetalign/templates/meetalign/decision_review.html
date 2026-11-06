@@ -83,9 +83,12 @@
       {% if row.decision.divergence_reason %}
       <div style="font-weight:600;font-size:.9rem">{{ row.decision.divergence_reason }}</div>
       {% endif %}
-      {% if row.decision.warnings %}
+      {% if row.warning_rows %}
       <div class="record" style="font-size:.88rem">
-        {% for warning in row.decision.warnings %}<div>· {{ warning }}</div>{% endfor %}
+        {% for warning in row.warning_rows %}
+        <div>· {{ warning.text }}</div>
+        {% if warning.context %}<div class="meta" style="margin:2px 0 4px 14px">원문 맥락: "{{ warning.context }}"</div>{% endif %}
+        {% endfor %}
       </div>
       {% endif %}
 
@@ -101,6 +104,7 @@
             <span>
               <span>{{ interpretation.text }}</span>{% if interpretation.recommended %}<span class="badge processing" style="margin-left:6px;vertical-align:1px;white-space:nowrap">AI 추천</span>{% endif %}
               {% if interpretation.evidence %}<div class="meta" style="margin-top:4px">근거: "{{ interpretation.evidence }}"</div>{% endif %}
+              {% if interpretation.context %}<div class="meta" style="margin-top:2px">앞뒤 맥락: "{{ interpretation.context }}"</div>{% endif %}
             </span>
           </label>
           {% endfor %}
@@ -110,7 +114,7 @@
             <span style="flex:1 1 auto">
               <b>직접 쓰기</b>
               <input type="text" name="custom_text_{{ row.decision.id }}" value="{{ row.custom_text }}"
-                placeholder="예: 민수가 금요일 18시까지 배포 스크립트를 정리하고 스테이징에서 한 번 돌려 본다" style="margin-top:6px">
+                placeholder="{% if row.decision.draft_hint %}참고: {{ row.decision.draft_hint }}{% else %}예: 민수가 금요일 18시까지 배포 스크립트를 정리하고 스테이징에서 한 번 돌려 본다{% endif %}" style="margin-top:6px">
             </span>
           </label>
           <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
@@ -132,6 +136,7 @@
           <li style="padding:10px 0;border-top:1px solid var(--line)">
             <div>{{ interpretation.text }}{% if interpretation.recommended %}<span class="badge processing" style="margin-left:6px">AI 추천</span>{% endif %}</div>
             {% if interpretation.evidence %}<div class="meta" style="margin-top:4px">근거: "{{ interpretation.evidence }}"</div>{% endif %}
+            {% if interpretation.context %}<div class="meta" style="margin-top:2px">앞뒤 맥락: "{{ interpretation.context }}"</div>{% endif %}
           </li>
           {% endfor %}
         </ul>
@@ -223,6 +228,7 @@
             <span>
               <span>{{ interpretation.text }}</span>{% if interpretation.recommended %}<span class="badge processing" style="margin-left:6px;vertical-align:1px;white-space:nowrap">AI 추천</span>{% endif %}
               {% if interpretation.evidence %}<div class="meta" style="margin-top:4px">근거: "{{ interpretation.evidence }}"</div>{% endif %}
+              {% if interpretation.context %}<div class="meta" style="margin-top:2px">앞뒤 맥락: "{{ interpretation.context }}"</div>{% endif %}
             </span>
           </label>
           {% endfor %}
@@ -232,7 +238,7 @@
             <span style="flex:1 1 auto">
               <b>직접 쓰기</b>
               <input type="text" name="custom_text_{{ row.decision.id }}" value="{{ row.custom_text }}"
-                placeholder="예: 민수가 금요일 18시까지 배포 스크립트를 정리하고 스테이징에서 한 번 돌려 본다" style="margin-top:6px">
+                placeholder="{% if row.decision.draft_hint %}참고: {{ row.decision.draft_hint }}{% else %}예: 민수가 금요일 18시까지 배포 스크립트를 정리하고 스테이징에서 한 번 돌려 본다{% endif %}" style="margin-top:6px">
             </span>
           </label>
           <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
@@ -247,7 +253,7 @@
         </div>
         </div>
       </details>
-      <div class="meta">다르게 이해될 여지가 없어 위 문장이 그대로 공개됩니다. 따로 고를 것이 없습니다.</div>
+      <div class="meta">다르게 이해될 여지가 없어 위 문장이 기본값으로 그대로 공개돼요. 그래도 바꾸고 싶으면 위 '고치기'에서 직접 쓰거나, 다음 회의로 넘기거나, 이 결정을 뺄 수 있어요.</div>
       {% endif %}
 
       {# 공개된 뒤: 확정 내용과 수정 폼. 수정하면 그 항목의 팀원 확인 기록이 전부 지워진다. #}
