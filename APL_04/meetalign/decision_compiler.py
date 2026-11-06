@@ -24,10 +24,11 @@ AI를 한 번 부른다. 전사 원문을 보내고 결정마다
 ※ services.py의 내부(_로 시작하는) 함수에 의존한다. 아래 셋의 이름이나 동작이 바뀌면 이
    모듈도 같이 고쳐야 한다.
    - services._enabled()
-       Gemini(GEMINI_API_KEY+GEMINI_MODEL) 또는 Ollama(OLLAMA_MODEL)가 설정돼 있는지.
-       False면 LLM을 아예 부르지 않고 가짜 응답(FAKE_DECISIONS)으로 전체 흐름을 시연한다.
+       Gemini(GEMINI_API_KEY+GEMINI_MODEL) · Groq(GROQ_API_KEY+GROQ_LLM_MODEL) · Ollama(OLLAMA_MODEL)
+       중 하나라도 설정돼 있는지. False면 LLM을 아예 부르지 않고 가짜 응답(FAKE_DECISIONS)으로
+       전체 흐름을 시연한다.
    - services._generate_clean(prompt, retries=1, temperature=None)
-       프롬프트를 Gemini → Ollama 순으로 보내고 응답 문자열을 돌려준다. 한국어/영어 외
+       프롬프트를 Gemini → Groq → Ollama 순으로 보내고 응답 문자열을 돌려준다. 한국어/영어 외
        언어가 섞이면 재시도 후 None을 주고, 연결 자체가 실패하면 OSError를 올린다.
    - services._normalize_for_match(text)
        공백을 모두 지운 비교용 문자열. 근거 문장이 전사 원문에 있는지 볼 때 쓴다.
@@ -52,7 +53,19 @@ PARSE_RETRIES = 1
 # 이월된다. 상한은 프롬프트로만 유도한다(_compile_prompt).
 
 # 확정 문장에 섞이면 사람마다 다르게 읽는 표현. 팀에서 합의한 목록이라 자동 추출이 아니라 고정 목록이다.
-AMBIGUOUS_PHRASES = ("쯤", "시간 되면", "각자", "나중에", "아까 정한 대로")
+AMBIGUOUS_PHRASES = ("쯤", "시간 되면", "각자", "나중에", "아까 정한 대로", "적당히", "대충")
+
+# 지시어·대명사. 전사본을 훑어 "이 문장은 결정으로 다룰지 반드시 검토하라"고 LLM에 미리 짚어주는
+# 용도로만 쓴다(아래 _review_hints) — AMBIGUOUS_PHRASES와 달리 이것만으로 바로 확인 필요를
+# 만들지는 않는다. 일상 대화에 워낙 흔히 섞여서, safety_warnings처럼 바로 확인 필요로 만드는
+# 용도로 쓰면 '명확' 판정을 과도하게 뒤집어 버린다.
+REFERENT_PHRASES = ("그쪽", "그분", "그 사람", "그거", "저쪽")
+
+# 결론을 다음으로 미루는 표현. 후보 근거 문장에 있으면 AI가 뭐라고 판단했든 '다음 회의로 넘김'을
+# compile 시점에 기본값으로 걸어 둔다(_looks_deferred) — 생성형 모델은 "미정"보다 그럴듯한 답을
+# 내놓는 쪽으로 치우치기 쉽고, 프롬프트만으로는 그 습성이 쉽게 재발하기 때문이다. 진행자는 화면에서
+# 언제든 다른 후보나 직접 작성으로 바꿀 수 있다.
+DEFERRAL_PHRASES = ("내일 다시", "다음에 얘기", "나중에 정하", "일단 둘 다", "보류")
 
 
 # 날짜 표현 하나를 통째로 잡는다. "12월 5일"을 "12월"과 "5일" 두 개로 쪼개면 날짜가 하나뿐인
@@ -191,12 +204,34 @@ def _json_array(raw):
     return data if isinstance(data, list) else None
 
 
+def _review_hints(source):
+    """전사본에서 모호 표현이 있는 문장만 추려 LLM이 놓치지 않게 짚어준다.
+
+    강제로 모호 판정을 내리는 게 아니라 '검토 대상'으로만 넘긴다 — 결정으로 다룰지, 다룬다면
+    ambiguous로 볼지는 LLM이 그대로 판단한다. 그래서 REFERENT_PHRASES처럼 일상 대화에 흔한
+    표현을 섞어도 과도하게 틀어막는(false positive) 비용이 없다 — LLM이 '결정이 아니다'로
+    걸러내면 그만이다.
+    """
+    sentences = re.split(r"(?<=[.!?])\s+", source.strip())
+    hint_phrases = AMBIGUOUS_PHRASES + REFERENT_PHRASES
+    return [s for s in sentences if any(phrase in s for phrase in hint_phrases)]
+
+
 def _compile_prompt(source):
+    hints = _review_hints(source)
+    hint_block = (
+        "\n전사본에서 아래 문장들은 모호한 표현이 있을 가능성이 높다 — 결정으로 다룰 내용인지, "
+        "다룬다면 ambiguous로 볼지 하나씩 반드시 검토하라(검토 결과 결정이 아니면 넣지 않아도 "
+        "된다):\n" + "\n".join("- %s" % s for s in hints) + "\n"
+    ) if hints else ""
     return (
         "다음은 회의 녹음의 전사 원문이다. 이 회의에서 나온 '결정'을 찾아라. 결정마다 그것이 "
-        "사람마다 다르게 이해될 수 있는지 판단하고, 아래 JSON 형식으로 답하라.\n\n"
-        "다르게 이해될 수 있는 결정(ambiguous: true):\n"
-        "  why에 \"왜 다르게 이해할 수 있나\"를 한 줄로 쓴다. 누가 틀렸다는 식으로 쓰지 마라.\n"
+        "사람마다 다르게 이해될 수 있는지 판단하고, 아래 JSON 형식으로 답하라.\n"
+        + hint_block +
+        "\n다르게 이해될 수 있는 결정(ambiguous: true):\n"
+        "  why에 \"왜 다르게 이해할 수 있나\"를 한 줄로 쓰되, 원인이 된 전사본 표현을 따옴표로 "
+        "그대로 인용해라(예: \"'한 달 정도면 충분'이 30일인지 90일인지 갈립니다\"). 누가 틀렸다는 "
+        "식으로 쓰지 마라.\n"
         "  candidates에 그 결정이 갈릴 수 있는 방향마다 '그대로 공개될 확정 문장'을 2~3개 쓴다.\n"
         "다르게 이해될 여지가 없는 결정(ambiguous: false):\n"
         "  final에 '그대로 공개될 확정 문장' 하나를 쓴다. candidates는 쓰지 않는다.\n\n"
@@ -206,7 +241,10 @@ def _compile_prompt(source):
         "- 전사본에 나오지 않은 내용을 넣지 마라. 전사본에서 담당자나 기한을 찾을 수 없으면 "
         "그 방향의 후보는 쓰지 마라.\n"
         "- \"~라는 뜻\", \"A일 수도 B일 수도\" 같은 해설체로 쓰지 마라. 실행할 문장으로 쓴다.\n"
-        "- 어느 후보가 맞는지 쓰지 마라. 고르는 것은 회의 진행자다.\n\n"
+        "- 어느 후보가 맞는지 쓰지 마라. 고르는 것은 회의 진행자다.\n"
+        "- 결론을 다음으로 미루기로 한 안건(\"내일 다시 얘기\", \"일단 보류\" 등)은 둘 중 하나를 "
+        "고른 것처럼 쓰지 마라. ambiguous: true로 두고, candidates에는 아직 정해지지 않았다는 "
+        "사실 그대로를 반영해 쓴다.\n\n"
         "evidence 규칙: 그 문장의 근거가 된 전사본 원문 문장을 토씨 하나 틀리지 않고 그대로 "
         "복사해서 써라. 원문에 없는 문장을 쓰면 그 후보는 버려진다.\n"
         "recommended 규칙: 근거가 가장 강한 후보 하나에만 true를 붙인다.\n"
@@ -379,6 +417,16 @@ def compile_meeting(meeting):
     }
 
 
+def _looks_deferred(item):
+    """결론을 다음으로 미루기로 한 근거 문장인가(DEFERRAL_PHRASES).
+
+    모호 항목은 후보들의 근거를, 명확 항목은 그 근거 하나를 본다 — 둘 다 전사 원문에서 가져온
+    텍스트라 AI가 쓴 topic/why보다 믿을 수 있다.
+    """
+    texts = [c["evidence"] for c in item["candidates"]] if item["ambiguous"] else [item["evidence"]]
+    return any(phrase in text for text in texts for phrase in DEFERRAL_PHRASES)
+
+
 def _save_items(meeting, items):
     """응답 항목들을 Decision/Interpretation으로 저장하고 (확인 필요 수, 후보 없는 수)를 돌려준다."""
     ambiguous_count = 0
@@ -386,9 +434,15 @@ def _save_items(meeting, items):
     with transaction.atomic():
         for order, item in enumerate(items):
             warnings, divergence_reason, final_text, candidates = _resolve_item(item)
+            # 미루기로 한 안건은 AI가 뭐라고 썼든 '다음 회의로 넘김'을 기본값으로 건다 —
+            # 진행자가 수동으로 고르는 것과 똑같이 final_text/marked_undecided를 같이 채운다
+            # (views._save_decision_edits의 CHOICE_UNDECIDED 처리와 동일).
+            deferred = _looks_deferred(item)
             decision = Decision.objects.create(
                 meeting=meeting, order=order, what=item["topic"],
-                warnings=warnings, divergence_reason=divergence_reason, final_text=final_text,
+                warnings=warnings, divergence_reason=divergence_reason,
+                final_text=undecided_sentence(item["topic"]) if deferred else final_text,
+                marked_undecided=deferred,
             )
             for candidate_order, candidate in enumerate(candidates):
                 Interpretation.objects.create(

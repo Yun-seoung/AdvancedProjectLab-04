@@ -1,5 +1,6 @@
-"""LLM/STT 연결 지점. GEMINI_API_KEY와 GEMINI_MODEL이 모두 있으면 Gemini API를, 아니고 OLLAMA_MODEL이 있으면 로컬 Ollama를 LLM으로 쓴다.
-둘 다 설정돼 있으면 Gemini를 먼저 쓰고, Gemini 호출이 실패하면 Ollama로 다시 시도한다.
+"""LLM/STT 연결 지점. LLM은 Gemini(GEMINI_API_KEY+GEMINI_MODEL) → Groq(GROQ_API_KEY+GROQ_LLM_MODEL) →
+로컬 Ollama(OLLAMA_MODEL) 순으로 설정된 것을 쓰고, 앞 단계가 없거나 호출이 실패하면 다음으로 넘어간다.
+GROQ_API_KEY는 STT(Whisper)와 LLM 양쪽에 같은 키를 쓴다 — Groq 콘솔에서 발급 한 번이면 된다.
 STT는 CLOVA_SPEECH_INVOKE_URL과 CLOVA_SPEECH_SECRET_KEY가 모두 있으면 네이버 CLOVA Speech를 쓰되, 이번 달 무료 사용량
 (CLOVA_SPEECH_FREE_MINUTES, 기본 20분)을 다 썼거나 호출이 실패하면 GROQ_API_KEY가 있을 때 Groq의 Whisper API로,
 그마저 없거나 실패하면 로컬 Whisper(MLX_WHISPER_MODEL 또는 FASTER_WHISPER_MODEL)로 넘어간다. 해당 환경변수가 없으면
@@ -42,8 +43,15 @@ def _gemini_enabled():
     return bool(os.environ.get("GEMINI_API_KEY") and os.environ.get("GEMINI_MODEL"))
 
 
+GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+
+def _groq_llm_enabled():
+    return bool(os.environ.get("GROQ_API_KEY") and os.environ.get("GROQ_LLM_MODEL"))
+
+
 def _enabled():
-    return _gemini_enabled() or bool(os.environ.get("OLLAMA_MODEL"))
+    return _gemini_enabled() or _groq_llm_enabled() or bool(os.environ.get("OLLAMA_MODEL"))
 
 
 def _is_korean_or_english(text):
@@ -322,7 +330,14 @@ def _generate(prompt, temperature=None):
         try:
             return _generate_gemini(prompt, temperature=temperature)
         except OSError:
-            # 재시도 후에도 Gemini가 안 되면(과부하, 타임아웃, 키 오류 등) Ollama가 설정돼 있을 때만 그쪽으로 넘어간다.
+            # 재시도 후에도 Gemini가 안 되면(과부하, 타임아웃, 키 오류 등) Groq나 Ollama가
+            # 설정돼 있을 때만 그쪽으로 넘어간다.
+            if not (_groq_llm_enabled() or os.environ.get("OLLAMA_MODEL")):
+                raise
+    if _groq_llm_enabled():
+        try:
+            return _generate_groq_llm(prompt, temperature=temperature)
+        except OSError:
             if not os.environ.get("OLLAMA_MODEL"):
                 raise
     num_ctx = int(os.environ.get("OLLAMA_NUM_CTX", "16384"))
@@ -372,6 +387,28 @@ def _generate_gemini(prompt, temperature=None):
         raise OSError("Gemini 응답에 텍스트가 없습니다: %s" % str(data)[:300])
     if not text.strip():
         raise OSError("Gemini 응답에 텍스트가 없습니다")
+    return text.strip()
+
+
+def _generate_groq_llm(prompt, temperature=None):
+    """Groq의 OpenAI 호환 채팅 API 호출. HTTPError/URLError는 모두 OSError의 하위 클래스라 별도
+    처리 없이도 그대로 올라가 호출자의 기존 대체 처리(다음 단계로 넘어가기)가 동작한다."""
+    payload = {"model": os.environ["GROQ_LLM_MODEL"], "messages": [{"role": "user", "content": prompt}]}
+    if temperature is not None:
+        payload["temperature"] = temperature
+    body = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        GROQ_CHAT_URL, data=body,
+        headers={"Content-Type": "application/json", "Authorization": "Bearer %s" % os.environ["GROQ_API_KEY"]},
+    )
+    with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    try:
+        text = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        raise OSError("Groq 응답에 텍스트가 없습니다: %s" % str(data)[:300])
+    if not text.strip():
+        raise OSError("Groq 응답에 텍스트가 없습니다")
     return text.strip()
 
 
