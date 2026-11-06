@@ -314,22 +314,43 @@ def compile_specs(source):
 MAX_TOPIC_LENGTH = 120
 
 
+def _draft_hint_text(text):
+    """모호어·지시어가 남은 문장에서 그 부분만 빈칸 표시로 바꾼다.
+
+    담당자·기한처럼 AI가 이미 정한 부분은 그대로 살리고, 끝내 못 정한 부분만 빈칸으로
+    남겨서 '직접 쓰기' 칸의 출발점으로 쓴다 — 진행자가 그 자리만 채우면 되게 한다.
+    """
+    for phrase in AMBIGUOUS_PHRASES + REFERENT_PHRASES:
+        text = text.replace(phrase, "(구체적으로 적기)")
+    return text
+
+
 def _parse_candidates(raw_candidates, normalized_source):
-    """후보 배열 → [{"text","evidence","recommended"}, ...].
+    """후보 배열 → ([{"text","evidence","recommended"}, ...], draft_hint).
 
     - 객체가 아닌 항목(문자열만 온 경우)은 조용히 버린다. 한 항목의 형식이 틀렸다고 회의
       전체를 실패시키지 않는다.
+    - 확정 문장에 모호어·지시어(AMBIGUOUS_PHRASES, REFERENT_PHRASES)가 그대로 남은 후보는
+      선택지에서 버린다. 모호함을 없애야 할 후보가 그 모호함을 그대로 되풀이하면("적당히
+      올린다") 고를 의미가 없다 — safety_warnings가 '명확' 항목의 확정 문장에 적용하는 것과
+      같은 기준이다. 버리기 전에 그 문장을 draft_hint로 하나만 남겨 둔다(_draft_hint_text) —
+      완전히 버리지 않고 '직접 쓰기'의 출발점으로 재활용한다.
     - 근거가 원문에 없는 후보는 버린다. evidence가 빈 문자열이면 검증을 건너뛴다
       (가짜 응답 모드에는 대조할 원문이 없다).
     - 추천은 처음 하나만 인정한다 — 화면의 'AI 추천' 배지는 하나여야 읽는 순서가 생긴다.
     """
     results = []
     recommended_taken = False
+    draft_hint = ""
     for item in raw_candidates if isinstance(raw_candidates, list) else []:
         if not isinstance(item, dict):
             continue
         text = str(item.get("text", "")).strip()
         if not text:
+            continue
+        if any(phrase in text for phrase in AMBIGUOUS_PHRASES + REFERENT_PHRASES):
+            if not draft_hint:
+                draft_hint = _draft_hint_text(text)
             continue
         evidence = str(item.get("evidence", "")).strip()
         if normalized_source is not None and evidence and services._normalize_for_match(evidence) not in normalized_source:
@@ -341,7 +362,7 @@ def _parse_candidates(raw_candidates, normalized_source):
         results.append({"text": text, "evidence": evidence, "recommended": recommended})
         if len(results) >= MAX_INTERPRETATIONS:
             break
-    return results
+    return results, draft_hint
 
 
 def parse_items(raw, source_text=None):
@@ -379,13 +400,15 @@ def parse_items(raw, source_text=None):
             not evidence or services._normalize_for_match(evidence) not in normalized_source
         ):
             final = ""
+        candidates, draft_hint = _parse_candidates(row.get("candidates"), normalized_source) if ambiguous else ([], "")
         items.append({
             "topic": topic,
             "ambiguous": ambiguous,
             "why": str(row.get("why", "")).strip() if ambiguous else "",
             "final": final,
             "evidence": evidence,
-            "candidates": _parse_candidates(row.get("candidates"), normalized_source) if ambiguous else [],
+            "candidates": candidates,
+            "draft_hint": draft_hint,
         })
         if len(items) >= MAX_DECISIONS:
             break
@@ -473,7 +496,7 @@ def _save_items(meeting, items):
     few_candidates = 0
     with transaction.atomic():
         for order, item in enumerate(items):
-            warnings, divergence_reason, final_text, candidates = _resolve_item(item)
+            warnings, divergence_reason, final_text, candidates, draft_hint = _resolve_item(item)
             # 미루기로 한 안건은 AI가 뭐라고 썼든 '다음 회의로 넘김'을 기본값으로 건다 —
             # 진행자가 수동으로 고르는 것과 똑같이 final_text/marked_undecided를 같이 채운다
             # (views._save_decision_edits의 CHOICE_UNDECIDED 처리와 동일).
@@ -482,7 +505,7 @@ def _save_items(meeting, items):
                 meeting=meeting, order=order, what=item["topic"],
                 warnings=warnings, divergence_reason=divergence_reason,
                 final_text=undecided_sentence(item["topic"]) if deferred else final_text,
-                marked_undecided=deferred,
+                marked_undecided=deferred, draft_hint=draft_hint,
             )
             for candidate_order, candidate in enumerate(candidates):
                 Interpretation.objects.create(
@@ -498,29 +521,37 @@ def _save_items(meeting, items):
 
 
 def _resolve_item(item):
-    """응답 항목 하나 → (warnings, divergence_reason, final_text, candidates).
+    """응답 항목 하나 → (warnings, divergence_reason, final_text, candidates, draft_hint).
 
     세 갈래다.
     1. AI가 모호하다고 본 항목: AI의 이유와 후보를 그대로 쓴다. 규칙은 부르지 않는다 —
-       이미 진행자에게 묻고 있으므로 중복 검사할 이유가 없다.
+       이미 진행자에게 묻고 있으므로 중복 검사할 이유가 없다. draft_hint는 _parse_candidates가
+       버린 후보에서 이미 만들어 둔 것을 그대로 쓴다.
     2. AI가 명확하다고 했지만 근거를 원문에서 확인하지 못한 항목(parse_items가 final을
        비운 경우): 확인 필요로 올리고 후보는 두지 않는다.
     3. AI가 명확하다고 하고 근거도 확인된 항목: 규칙 안전망을 돌린다. 걸리면 확인 필요로
        올리고 AI가 쓴 문장을 "이 문장 그대로 공개" 후보 하나로 보여준다. 걸리지 않으면 그
-       문장이 곧 확정 내용이고 진행자는 탭하지 않는다.
+       문장이 곧 확정 내용이고 진행자는 탭하지 않는다. 경고가 모호어·지시어 때문이면 그
+       문장에서 바로 draft_hint를 만든다 — "이 문장 그대로 공개" 후보를 고르지 않을 호스트를
+       위한 출발점이다.
     """
     if item["ambiguous"]:
         # AI가 이유를 비워 보낼 수 있다. 사유가 비면 has_warning이 False가 되어 모호한 결정이
         # 확인 없이 공개되므로, 기본 문구로라도 채워 확인 대상으로 남긴다.
-        return [], item["why"] or "AI가 다르게 이해할 수 있다고 봤어요", "", item["candidates"]
+        return [], item["why"] or "AI가 다르게 이해할 수 있다고 봤어요", "", item["candidates"], item["draft_hint"]
     if not item["final"]:
-        return [], "근거를 원문에서 확인하지 못했어요", "", []
+        return [], "근거를 원문에서 확인하지 못했어요", "", [], ""
     warnings = safety_warnings(item["final"], item["evidence"])
     if not warnings:
-        return [], "", item["final"], []
+        return [], "", item["final"], [], ""
+    draft_hint = (
+        _draft_hint_text(item["final"])
+        if any(phrase in item["final"] for phrase in AMBIGUOUS_PHRASES + REFERENT_PHRASES) else ""
+    )
     return (
         warnings, "", "",
         [{"text": item["final"], "evidence": item["evidence"], "recommended": False}],
+        draft_hint,
     )
 
 
@@ -540,6 +571,55 @@ CHOICE_UNDECIDED = "undecided"
 # AI가 회의에 없던 결정을 만들어 냈을 때 그 항목을 지운다. '다음 회의로 넘김'과 달라야 하는
 # 이유: 없던 안건을 이월하면 다음 회의마다 계속 보이게 된다.
 CHOICE_DROP = "drop"
+
+
+def context_around(source, evidence, window=1):
+    """근거 문장이 전사본에서 실제로 있던 자리를 찾아 앞뒤로 window개씩 문장을 더해 돌려준다.
+
+    근거 한 문장만으로는 판단하기 어려울 때(예: 확정 문장이 원문 여러 문장을 합쳐 썼는데
+    근거는 그중 한 문장만 인용한 경우) 앞뒤 맥락을 보여주면 진행자가 판단하기 쉬워진다.
+    근거를 원문에서 못 찾거나 앞뒤에 더할 문장이 없으면 빈 문자열을 돌려준다 — 화면에서
+    근거와 똑같은 내용을 두 번 보여주지 않기 위해서다.
+
+    경고에 찍힌 표현(예: '그쪽')이 왜 모호한지는 이 함수로 못 본다 — 그 표현은 근거 문장이
+    아니라 확정 문장에서 나온 것이라 원문에서의 위치가 근거와 다를 수 있다. 그건 아래
+    warning_context가 표현 자체를 원문에서 찾아 보여준다.
+    """
+    if not evidence or not source:
+        return ""
+    sentences = re.split(r"(?<=[.!?])\s+", source.strip())
+    normalized_evidence = services._normalize_for_match(evidence)
+    for i, sentence in enumerate(sentences):
+        if services._normalize_for_match(sentence) == normalized_evidence:
+            start, end = max(0, i - window), min(len(sentences), i + window + 1)
+            if end - start <= 1:
+                return ""
+            return " ".join(sentences[start:end])
+    return ""
+
+
+_QUOTED_PHRASE = re.compile(r"'([^']+)'$")
+
+
+def warning_context(source, warning, window=1):
+    """경고 문구에 인용된 표현(예: "확정 문장에 모호한 표현이 있어요: '그쪽'")이 전사
+    원문 어디서 나왔는지 앞뒤 맥락과 함께 보여준다.
+
+    이 표현은 확정 문장(AI가 쓴 문장)에서 찾은 것이지, 근거 문장에서 찾은 게 아니다 — 그래서
+    context_around와 달리 근거 위치가 아니라 '표현 자체'를 원문에서 직접 검색한다. 날짜·
+    시각·숫자 충돌 경고("...섞여 있어요: 30개, 50개")처럼 인용 부호가 없는 경고는 그 자체로
+    이미 어떤 값이 충돌하는지 다 보여주므로 빈 문자열을 돌려준다.
+    """
+    match = _QUOTED_PHRASE.search(warning)
+    if not match or not source:
+        return ""
+    phrase = match.group(1)
+    sentences = re.split(r"(?<=[.!?])\s+", source.strip())
+    for i, sentence in enumerate(sentences):
+        if phrase in sentence:
+            start, end = max(0, i - window), min(len(sentences), i + window + 1)
+            return " ".join(sentences[start:end])
+    return ""
 
 
 def undecided_sentence(topic):

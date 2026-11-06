@@ -185,6 +185,10 @@ class Decision(models.Model):
     # 문장, '다음 회의로 넘김'은 undecided_sentence()가 만든 문장이 들어온다. 문장이 비어 있는
     # 항목은 공개할 수 없다(publish_blockers가 막는다).
     final_text = models.TextField(blank=True, default="")
+    # AI가 쓴 후보 중 모호어·지시어가 남아 선택지에서는 빠졌지만("_parse_candidates"),
+    # 그 부분만 빈칸 표시로 바꾸면 '직접 쓰기'의 출발점으로 쓸 만한 문장. 담당자·기한처럼
+    # AI가 이미 정한 부분은 살리고 못 정한 부분만 채우면 되게 한다. 없으면 빈 문자열.
+    draft_hint = models.TextField(blank=True, default="")
     # 진행자가 '아직 미정'으로 넘긴 항목. 공개 시점에 status=undecided가 된다.
     marked_undecided = models.BooleanField(default=False)
     # 공개 뒤에 확정 문장이 수정된 항목. 팀원 화면에 "내용이 수정되었어요"를 띄우는 데 쓴다.

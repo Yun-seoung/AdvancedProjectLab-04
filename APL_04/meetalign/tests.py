@@ -1724,6 +1724,37 @@ class DecisionParseTests(TestCase):
         self.assertEqual([c["text"] for c in decision_compiler.parse_items(raw)[0]["candidates"]],
                          ["같은 후보"])
 
+    def test_parse_items_drops_a_candidate_that_still_has_the_ambiguous_phrase(self):
+        """모호함을 없애라고 만든 후보가 그 모호어를 그대로 되풀이하면 고를 의미가 없다."""
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
+            {"text": "테스트 커버리지를 적당히 올린다", "evidence": ""},
+            {"text": "테스트 커버리지를 80퍼센트로 올린다", "evidence": ""},
+        ]}], ensure_ascii=False)
+        self.assertEqual([c["text"] for c in decision_compiler.parse_items(raw)[0]["candidates"]],
+                         ["테스트 커버리지를 80퍼센트로 올린다"])
+
+    def test_parse_items_drops_a_candidate_that_still_has_an_unresolved_referent(self):
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
+            {"text": "문서를 그쪽에 넘긴다", "evidence": ""},
+        ]}], ensure_ascii=False)
+        item = decision_compiler.parse_items(raw)[0]
+        self.assertEqual(item["candidates"], [])
+        # 버린 후보를 통째로 잃지 않는다 — 모호한 부분만 빈칸으로 바꿔 draft_hint로 남긴다.
+        self.assertEqual(item["draft_hint"], "문서를 (구체적으로 적기)에 넘긴다")
+
+    def test_parse_items_draft_hint_is_empty_when_no_candidate_was_dropped(self):
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
+            {"text": "80퍼센트로 올린다", "evidence": ""},
+        ]}], ensure_ascii=False)
+        self.assertEqual(decision_compiler.parse_items(raw)[0]["draft_hint"], "")
+
+    def test_parse_items_draft_hint_keeps_only_the_first_dropped_candidate(self):
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
+            {"text": "그쪽에 전달한다", "evidence": ""},
+            {"text": "그분한테 전달한다", "evidence": ""},
+        ]}], ensure_ascii=False)
+        self.assertEqual(decision_compiler.parse_items(raw)[0]["draft_hint"], "(구체적으로 적기)에 전달한다")
+
     def test_parse_items_caps_candidates(self):
         raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x",
                            "candidates": [{"text": "후보 %d" % i} for i in range(8)]}],
@@ -2100,6 +2131,26 @@ class DecisionCompileTests(TestCase):
         _, by_topic, _ = self._compiled(item)
         self.assertTrue(by_topic["예산"].marked_undecided)
 
+    # ---- draft_hint: '직접 쓰기' 출발점 ----
+
+    def test_ambiguous_item_carries_its_draft_hint_onto_the_decision(self):
+        item = {"topic": "문서 전달", "ambiguous": True, "why": "x",
+                "candidates": [{"text": "문서를 그쪽에 넘긴다", "evidence": "", "recommended": True}]}
+        _, by_topic, _ = self._compiled(item)
+        self.assertEqual(by_topic["문서 전달"].draft_hint, "문서를 (구체적으로 적기)에 넘긴다")
+
+    def test_clear_item_whose_final_text_has_a_referent_gets_a_draft_hint(self):
+        source = "담당자가 그쪽에 문서를 넘긴다."
+        self.meeting.transcript = source
+        self.meeting.save(update_fields=["transcript"])
+        item = {"topic": "문서 전달", "ambiguous": False, "final": source, "evidence": source}
+        _, by_topic, _ = self._compiled(item)
+        self.assertEqual(by_topic["문서 전달"].draft_hint, "담당자가 (구체적으로 적기)에 문서를 넘긴다.")
+
+    def test_clear_item_without_a_warning_has_no_draft_hint(self):
+        _, by_topic, _ = self._compiled(self.CLEAR)
+        self.assertEqual(by_topic["배포 스크립트 정리"].draft_hint, "")
+
 
 class DecisionAmbiguityHintTests(TestCase):
     """_review_hints(정규식 탐지 → 프롬프트 힌트)와 _looks_deferred(보류 강제)는 DB 없이 동작하는 순수 함수다."""
@@ -2138,6 +2189,50 @@ class DecisionAmbiguityHintTests(TestCase):
     def test_looks_deferred_checks_evidence_for_clear_items_too(self):
         item = {"ambiguous": False, "evidence": "예산 건은 보류하기로 했다"}
         self.assertTrue(decision_compiler._looks_deferred(item))
+
+    # ---- context_around: 근거 문장 앞뒤 맥락 ----
+
+    def test_context_around_adds_the_sentence_before_and_after(self):
+        source = "첫 문장이다. 근거가 되는 문장이다. 마지막 문장이다."
+        context = decision_compiler.context_around(source, "근거가 되는 문장이다.")
+        self.assertEqual(context, source)
+
+    def test_context_around_matches_loosely(self):
+        """공백 차이는 무시하고 찾는다(services._normalize_for_match와 같은 기준)."""
+        source = "첫 문장이다. 근거가  되는\n문장이다. 마지막 문장이다."
+        context = decision_compiler.context_around(source, "근거가 되는 문장이다.")
+        self.assertIn("첫 문장이다.", context)
+        self.assertIn("마지막 문장이다.", context)
+
+    def test_context_around_is_empty_when_evidence_is_the_whole_source(self):
+        """더할 앞뒤 문장이 없으면 근거와 똑같은 내용을 또 보여주지 않는다."""
+        self.assertEqual(decision_compiler.context_around("문장 하나뿐이다.", "문장 하나뿐이다."), "")
+
+    def test_context_around_is_empty_when_evidence_is_not_found(self):
+        self.assertEqual(decision_compiler.context_around("원문입니다.", "회의에 없던 문장"), "")
+
+    def test_context_around_is_empty_without_evidence_or_source(self):
+        self.assertEqual(decision_compiler.context_around("원문입니다.", ""), "")
+        self.assertEqual(decision_compiler.context_around("", "근거"), "")
+
+    # ---- warning_context: 경고에 찍힌 표현이 원문 어디서 나왔는지 ----
+
+    def test_warning_context_finds_the_quoted_phrase_in_the_transcript(self):
+        """실제로 겪은 버그: 근거 문장엔 '그쪽'이 없는데 확정 문장엔 남아있던 경우."""
+        source = "그거 정리해서 그쪽에 넘겨주실 수 있나요? 네, 제가 할게요. 목요일까지 넘기겠습니다."
+        warning = "확정 문장에 모호한 표현이 있어요: '그쪽'"
+        context = decision_compiler.warning_context(source, warning)
+        self.assertIn("그쪽", context)
+        self.assertIn("그거 정리해서", context)
+
+    def test_warning_context_is_empty_for_a_quantity_conflict_warning(self):
+        """숫자·날짜 충돌 경고는 인용 부호가 없다 — 값 자체가 이미 경고 문구에 다 있다."""
+        warning = "확정 문장에 다른 숫자가 섞여 있어요: 30개, 50개"
+        self.assertEqual(decision_compiler.warning_context("아무 원문", warning), "")
+
+    def test_warning_context_is_empty_when_the_phrase_is_not_in_the_transcript(self):
+        warning = "확정 문장에 모호한 표현이 있어요: '그쪽'"
+        self.assertEqual(decision_compiler.warning_context("저쪽에 관한 이야기만 있는 원문입니다.", warning), "")
 
 
 class DecisionReviewTests(TestCase):
@@ -3118,7 +3213,7 @@ class DecisionConfirmTests(TestCase):
         self.assertIn(decision.id, ids(r.context["carried_rows"]))
         self.assertContains(r, "다음 회의로 넘길 결정")
         html = r.content.decode()
-        self.assertNotIn("다르게 이해될 여지가 없어 위 문장이 그대로 공개됩니다", html)
+        self.assertNotIn("기본값으로 그대로 공개돼요", html)
 
     def test_every_draft_row_is_tracked_by_the_button_script(self):
         """선택을 바꿀 수 있는 모든 항목을 스크립트가 추적해야 한다.
@@ -3146,7 +3241,7 @@ class DecisionConfirmTests(TestCase):
         self.assertFalse(plain.blocks_publish)
         row = next(r for r in self.client.get(self.url).context["rows"] if r["decision"].id == plain.id)
         self.assertFalse(row["blocking"])
-        self.assertContains(self.client.get(self.url), "따로 고를 것이 없습니다")
+        self.assertContains(self.client.get(self.url), "기본값으로 그대로 공개돼요")
 
     def test_non_host_cannot_confirm(self):
         client = Client()
