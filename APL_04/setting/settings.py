@@ -155,3 +155,13 @@ BACKGROUND_RECORDING = True
 LOGIN_URL = 'login'
 LOGIN_REDIRECT_URL = 'index'
 LOGOUT_REDIRECT_URL = 'index'
+
+# meetalign 앱 로그(어느 LLM이 응답했는지, Gemini 실패·Ollama 전환, 전사 엔진 전환 등)를 서버 터미널에 보여준다.
+# 로그 설정이 없으면 파이썬 기본값이 WARNING 이상만 내보내서 "LLM 응답: Gemini(...) 12.3초" 같은 INFO가 보이지 않는다.
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {'simple': {'format': '[%(asctime)s] %(levelname)s %(message)s', 'datefmt': '%H:%M:%S'}},
+    'handlers': {'console': {'class': 'logging.StreamHandler', 'formatter': 'simple'}},
+    'loggers': {'meetalign': {'handlers': ['console'], 'level': os.environ.get('MEETALIGN_LOG_LEVEL', 'INFO')}},
+}
