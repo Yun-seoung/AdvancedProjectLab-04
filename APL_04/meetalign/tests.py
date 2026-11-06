@@ -1752,6 +1752,53 @@ class DecisionParseTests(TestCase):
         item = decision_compiler.parse_items(raw, source_text="로그 이야기")[0]
         self.assertEqual(item["final"], "")
 
+    # ---- 중복 제거: topic과 근거가 둘 다 같을 때만 같은 안건으로 본다 ----
+
+    def test_same_topic_and_evidence_are_deduped(self):
+        """실제로 겪은 버그: 같은 안건을 문구만 살짝 바꿔 두 번 만들어내는 경우."""
+        source = "새 기능은 적당히 빠르면 됩니다."
+        raw = json.dumps([
+            {"topic": "새로 추가하는 기능", "ambiguous": True, "why": "x",
+             "candidates": [{"text": "이번 주 안에 완료", "evidence": source}]},
+            {"topic": "새로 추가하는 기능", "ambiguous": True, "why": "y",
+             "candidates": [{"text": "다음 주 안에 완료", "evidence": source}]},
+        ], ensure_ascii=False)
+        items = decision_compiler.parse_items(raw, source_text=source)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["candidates"][0]["text"], "이번 주 안에 완료")
+
+    def test_different_topics_sharing_one_evidence_sentence_are_kept_separate(self):
+        """한 문장에서 서로 다른 결정 두 개가 나올 수 있다 — topic까지 같아야 중복으로 본다."""
+        source = "민수가 로그는 30일로 줄이고 QA는 다음 주까지 진행합니다."
+        raw = json.dumps([
+            {"topic": "로그 보관 기간", "ambiguous": False, "final": "로그는 30일로 줄인다",
+             "evidence": source},
+            {"topic": "QA 일정", "ambiguous": False, "final": "QA는 다음 주까지 진행한다",
+             "evidence": source},
+        ], ensure_ascii=False)
+        items = decision_compiler.parse_items(raw, source_text=source)
+        self.assertEqual(len(items), 2)
+
+    def test_same_topic_with_different_evidence_is_not_deduped(self):
+        """이름만 우연히 같은 서로 다른 안건까지 합치면 안 된다."""
+        raw = json.dumps([
+            {"topic": self.TOPIC, "ambiguous": False, "final": "x", "evidence": "문장 하나"},
+            {"topic": self.TOPIC, "ambiguous": False, "final": "y", "evidence": "다른 문장"},
+        ], ensure_ascii=False)
+        items = decision_compiler.parse_items(raw, source_text="문장 하나 다른 문장")
+        self.assertEqual(len(items), 2)
+
+    def test_items_with_blank_evidence_are_never_deduped_even_with_the_same_topic(self):
+        """근거가 비어 있으면(가짜 응답 모드 등) topic이 같아도 중복으로 보지 않는다."""
+        raw = json.dumps([
+            {"topic": "안건1", "ambiguous": True, "why": "x",
+             "candidates": [{"text": "후보", "evidence": ""}]},
+            {"topic": "안건1", "ambiguous": True, "why": "y",
+             "candidates": [{"text": "후보2", "evidence": ""}]},
+        ], ensure_ascii=False)
+        items = decision_compiler.parse_items(raw)
+        self.assertEqual(len(items), 2)
+
 
 class DecisionCompileTests(TestCase):
     """한 번의 AI 호출로 결정·모호 여부·후보를 받아 저장하는 전체 흐름.

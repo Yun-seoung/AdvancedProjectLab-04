@@ -343,6 +343,8 @@ def parse_items(raw, source_text=None):
       항목은 final/evidence만 쓰고 candidates를 버린다 — 공개 기준이 둘이 되지 않게.
     - source_text가 주어지면 근거를 원문과 대조한다. 명확 항목의 근거가 원문에 없으면
       final을 비워 돌려주고(호출자가 '확인 필요'로 올린다), 후보는 그 후보만 버린다.
+    - 근거 문장이 겹치는 항목은 중복으로 보고 먼저 나온 것만 남긴다(_dedupe_items) — 같은
+      전사 문장을 topic만 바꿔 두 번 만들어내는 LLM 응답을 걸러낸다.
     """
     data = _json_array(raw)
     if data is None:
@@ -374,7 +376,32 @@ def parse_items(raw, source_text=None):
         })
         if len(items) >= MAX_DECISIONS:
             break
-    return items
+    return _dedupe_items(items)
+
+
+def _dedupe_items(items):
+    """topic과 근거 문장이 둘 다 같은 항목은 중복 추출로 보고 먼저 나온 것만 남긴다.
+
+    근거만 보고 합치면 위험하다 — 한 문장에서 서로 다른 결정 두 개가 나올 수 있다(예: "민수가
+    로그는 30일로 줄이고 QA는 다음 주까지 진행합니다"는 '로그 보관 기간'과 'QA 일정' 둘 다의
+    근거일 수 있다). topic만 보고 합쳐도 위험하다 — 우연히 같은 이름을 쓴 서로 다른 안건을
+    잃을 수 있다. 그래서 둘 다 같을 때만(같은 안건을 문구만 살짝 바꿔 두 번 만들어낸 경우)
+    중복으로 본다. 더 좁게 잡는 대신, 서로 다른 안건을 잘못 합치는 사고를 내지 않는다.
+    """
+    seen_evidence_by_topic = {}
+    deduped = []
+    for item in items:
+        evidences = (
+            {services._normalize_for_match(c["evidence"]) for c in item["candidates"] if c["evidence"]}
+            if item["ambiguous"] else
+            ({services._normalize_for_match(item["evidence"])} if item["evidence"] else set())
+        )
+        prior = seen_evidence_by_topic.get(item["topic"])
+        if evidences and prior and evidences & prior:
+            continue
+        seen_evidence_by_topic[item["topic"]] = (prior or set()) | evidences
+        deduped.append(item)
+    return deduped
 
 
 # ---------------------------------------------------------------------------
