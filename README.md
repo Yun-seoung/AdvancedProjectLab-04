@@ -46,9 +46,12 @@ FASTER_WHISPER_MODEL=large-v3-turbo        # CLOVA·Groq 모두 없거나 실패
 
 | 환경변수 | 설명 |
 |---|---|
-| `GEMINI_API_KEY`, `GEMINI_MODEL` | 둘 다 있으면 Gemini API 사용 (모델 ID는 필수, 기본값 없음) |
-| `GEMINI_TIMEOUT` | (선택) Gemini 응답 최대 대기 시간(초), 기본 300 |
-| `OLLAMA_MODEL` | Gemini 설정이 없으면 Ollama만 사용, 있으면 Gemini 실패 시 예비로 사용. [Ollama](https://ollama.com) 설치 후 `ollama pull qwen2.5:7b` |
+| `GEMINI_API_KEY`, `GEMINI_MODEL` | 둘 다 있으면 Gemini API 사용 (모델 ID는 필수, 기본값 없음). 쉼표로 여러 모델을 적으면 앞에서부터 시도하고 모두 실패하면 Groq(`GROQ_LLM_MODEL` 설정 시) → Ollama로 넘어감 — 무료 한도는 모델마다 따로라서 예: `gemini-3.8-flash,gemini-3.5-flash`. 키 하나로 여러 모델을 쓸 수 있음 |
+| `GEMINI_TIMEOUT` | (선택) Gemini 응답 최대 대기 시간(초), 기본 60. 응답이 없으면 다음 Gemini 모델로(마지막 모델은 한 번 더 기다림), 모두 안 되면 Groq → Ollama로 넘어감 |
+| `GROQ_LLM_MODEL` | (선택) `GROQ_API_KEY`와 함께 있으면 Gemini 다음, Ollama 앞 단계로 Groq의 LLM을 씀(전사와 같은 키). 모델 ID는 Groq 콘솔의 무료 모델 목록에서 확인 |
+| `GEMINI_COOLDOWN` | (선택) 실패한 Gemini 모델을 건너뛰는 시간(초), 기본 600. 모든 모델을 건너뛰는 중이면 바로 다음 단계(Groq → Ollama)를 씀(둘 다 없으면 다시 시도). `0`이면 매번 모든 모델을 시도 |
+| `OLLAMA_MODEL` | Gemini 설정이 없으면 Ollama만 사용, 있으면 Gemini 실패 시 예비로 사용. [Ollama](https://ollama.com) 설치 후 `ollama pull gemma3:4b` (GPU 메모리 4GB 노트북에서 결정 컴파일 비교 시 가장 나았음) |
+| `OLLAMA_TIMEOUT` | (선택) Ollama 응답 대기 시간(초), 기본 300. 큰 모델로 긴 회의를 컴파일하면 늘림 |
 | `CLOVA_SPEECH_INVOKE_URL`, `CLOVA_SPEECH_SECRET_KEY` | 둘 다 있으면 네이버 CLOVA Speech로 전사. 이번 달 무료 사용량이 남아 있을 때만 호출 |
 | `CLOVA_SPEECH_FREE_MINUTES` | (선택) 한 달에 CLOVA로 보낼 최대 분량(분), 기본 20(Free 플랜 무료 제공량). 유료(Basic) 플랜이면 크게 올려서 사용 |
 | `CLOVA_SPEECH_DIARIZATION` | (선택) `1`이면 화자 구분을 켜서 전사본을 "화자 A: …" 줄로 나눔. Basic 플랜에서는 화자인식이 따로 과금됨 |
@@ -60,7 +63,7 @@ FASTER_WHISPER_MODEL=large-v3-turbo        # CLOVA·Groq 모두 없거나 실패
 
 LLM/STT 환경변수를 하나도 설정하지 않으면 자동으로 가짜 응답 모드로 동작하므로, 화면만 보여줄 목적이라면 생략해도 됩니다.
 
-> Gemini 무료 등급은 응답에 수십 초~몇 분이 걸리거나, 요청이 몰릴 때 일시적 오류(429/503)가 날 수 있습니다. 일시적 오류는 자동으로 재시도하고, 그래도 실패하면 Ollama(설정 시) 또는 가짜 응답으로 대체됩니다.
+> Gemini 무료 등급은 응답에 수십 초~몇 분이 걸리거나, 요청이 몰릴 때 일시적 오류(429/503)가 날 수 있습니다. 일시적 오류는 한 번만 다시 시도하고, 응답 지연(기본 60초)이나 하루 한도 초과·키 오류는 바로 다음 Gemini 모델로 넘어갑니다. Gemini 모델이 모두 실패하면 Groq(`GROQ_LLM_MODEL` 설정 시) → Ollama(설정 시) 순으로 넘어가고, 실패한 Gemini 모델은 10분 동안 건너뜁니다. 모두 없으면 가짜 응답으로 대체됩니다. 어느 모델이 응답했는지와 걸린 시간은 서버 터미널에 `LLM 응답: Gemini(...) 12.3초`, `LLM 응답: Groq(...) 3.2초`, `LLM 응답: 로컬 Ollama(...) 8.1초`처럼 표시됩니다.
 
 ### STT(전사) 설정
 
@@ -82,7 +85,7 @@ LLM/STT 환경변수를 하나도 설정하지 않으면 자동으로 가짜 응
 
 1. 가입 후 API Keys에서 키를 발급받아 `.env`의 `GROQ_API_KEY`에 넣습니다. 신용카드 등록 없이 바로 쓸 수 있는 무료 등급이 있습니다.
 2. Groq가 호스팅하는 모델도 로컬에서 쓰는 것과 같은 Whisper(large-v3-turbo)라서 전사 품질은 로컬과 동일하고, 다만 계산을 Groq 서버에서 빠르게 처리해 줍니다. 공식 모델 페이지 기준 시간당 과금은 \$0.04이고, 무료 등급 한도는 계정마다 다를 수 있으니 가입 후 콘솔의 Limits 페이지에서 확인하세요.
-3. 화자 구분(diarization)은 지원하지 않습니다 — 화자를 구분해야 하는 회의는 CLOVA(`CLOVA_SPEECH_DIARIZATION=1`)를 계속 쓰세요.
+3. Groq 자체는 화자 구분(diarization)을 지원하지 않습니다 — 화자를 구분하려면 아래 **로컬 화자 분리**(`LOCAL_DIARIZATION=1`)를 켜거나 CLOVA(`CLOVA_SPEECH_DIARIZATION=1`)를 쓰세요.
 4. 스트리밍(실시간 자막)은 지원하지 않고 파일을 통째로 보낸 뒤 한 번에 결과를 받는 방식이라, 녹음을 다 올린 뒤 전사하는 이 프로젝트의 구조와는 잘 맞습니다.
 
 **로컬 Whisper 준비 (Windows / Linux / Intel Mac)**
@@ -96,6 +99,21 @@ pip install nvidia-cublas-cu12 "nvidia-cudnn-cu12==9.*"
 > `"av<19"`: PyPI의 faster-whisper 1.2.1은 PyAV 19에서 제거된 인자를 아직 쓰고 있어서, 그냥 `pip install faster-whisper`만 하면 전사할 때 `open() got an unexpected keyword argument 'metadata_errors'`로 실패합니다(2026-10 기준). 수정이 들어간 faster-whisper 다음 버전이 나오면 고정을 풀어도 됩니다.
 
 `.env`에 `FASTER_WHISPER_MODEL=large-v3-turbo`를 넣으면 됩니다. GPU가 없거나 CUDA 설정이 안 되면 `FASTER_WHISPER_DEVICE=cpu FASTER_WHISPER_COMPUTE_TYPE=int8`로 CPU에서 돌릴 수 있습니다. 모델이 클수록 정확하지만 느리므로, CPU만 있는 PC에서 긴 회의를 자주 전사한다면 `small`이나 `medium`도 고려해 보세요. 실측(Windows 노트북, RTX 4060 Laptop): `large-v3-turbo`는 GPU에서 24초 음성을 모델 로딩 포함 7초에, `base`는 CPU int8로 4초에 전사했습니다. 첫 실행은 모델 다운로드(1.6GB) 때문에 몇 분 더 걸립니다. Apple Silicon Mac은 기존처럼 `MLX_WHISPER_MODEL`을 쓰는 편이 빠릅니다.
+
+**로컬 화자 분리 (Groq·로컬 Whisper 공통, 모든 OS)**
+
+```bash
+pip install sherpa-onnx "av<19"  # 모델(약 47MB)은 첫 화자 분리 때 자동 다운로드. Hugging Face 토큰 불필요, CPU로 동작
+```
+
+`.env`에 `LOCAL_DIARIZATION=1`을 넣으면 Groq나 로컬 Whisper로 전사한 결과가 "화자 A: …" 줄로 나뉩니다(CLOVA 화자 분리와 같은 형식). Whisper가 준 문장 구간마다 그 시간에 가장 오래 말한 화자를 붙이는 방식이라, 한 구간 안에서 화자가 바뀌면 더 오래 말한 쪽으로 붙습니다. 화자 분리가 실패해도 전사는 화자 표시 없이 그대로 저장됩니다. 실측(합성 음성 4명, 5분 회의): 화자 수를 알려 주지 않아도 4명을 찾았고 문장 구간 86%에 맞는 화자를 붙였습니다(틀린 것은 대부분 같은 합성 목소리를 높낮이만 바꾼 두 사람). CPU에서 5분 녹음에 약 35초가 걸립니다.
+
+| 환경변수 | 설명 |
+|---|---|
+| `LOCAL_DIARIZATION` | `1`이면 로컬 화자 분리를 켬. CLOVA로 전사된 녹음에는 적용하지 않음(CLOVA는 `CLOVA_SPEECH_DIARIZATION`) |
+| `DIARIZATION_NUM_SPEAKERS` | (선택) 참석 인원을 알면 지정. 비우면 자동 판단 |
+| `DIARIZATION_THRESHOLD` | (선택) 자동 판단 기준, 기본 `0.8`. 화자가 실제보다 많이 나뉘면 올리고, 다른 사람이 한 명으로 합쳐지면 내림 |
+| `DIARIZATION_MODEL_DIR` | (선택) 모델 저장 위치, 기본 `~/.cache/meetalign/diarization` |
 
 > 새 마이그레이션(0019, CLOVA 사용량 기록 테이블)이 추가되었으니 `git pull` 후 서버를 켜기 전에 `python manage.py migrate`를 먼저 실행하세요.
 

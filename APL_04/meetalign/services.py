@@ -29,18 +29,31 @@ logger = logging.getLogger(__name__)
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434/api/generate")
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent"
 # 무료 등급은 응답 대기가 길어서 Ollama보다 넉넉하게 기다린다 (GEMINI_TIMEOUT으로 조정).
-GEMINI_DEFAULT_TIMEOUT_SECONDS = 300
-# 바로 실패하는 일시적 오류(요청 과다, 서버 바쁨)만 잠시 쉬었다가 다시 보낸다. 타임아웃은 재시도하지 않는다.
+GEMINI_DEFAULT_TIMEOUT_SECONDS = 60
+# 일시적 오류(요청 과다, 서버 바쁨)와 타임아웃만 잠깐 쉬었다가 한 번 더 보낸다. 두 번째도 실패하면 다음 Gemini 모델(없으면
+# Ollama)로 넘어간다 — 무료 등급이 몰릴 때 몇 분씩 붙잡고 기다리는 것보다 빨리 넘어가는 편이 낫다.
 GEMINI_RETRY_STATUS = (429, 500, 503)
-GEMINI_RETRIES = 3
-GEMINI_RETRY_DELAY_SECONDS = 5
-TIMEOUT_SECONDS = 120
+GEMINI_RETRIES = 1
+GEMINI_RETRY_DELAY_SECONDS = 2
+# GEMINI_MODEL에 쉼표로 여러 모델을 적으면 앞에서부터 시도한다(무료 한도는 모델마다 따로라서, 한 모델의 하루 한도를
+# 다 써도 다음 모델은 쓸 수 있다). 재시도까지 실패한 모델은 이 시간 동안 건너뛴다 — 결정 컴파일처럼 한 번에 여러 번
+# 부르는 작업이 호출마다 같은 실패를 기다리지 않게 하기 위함. 모두 건너뛰는 중이면 Ollama로 바로 간다(Ollama가 없으면
+# 건너뛰기를 무시하고 다시 시도한다). GEMINI_COOLDOWN(초)으로 조정, 0이면 끈다.
+GEMINI_DEFAULT_COOLDOWN_SECONDS = 600
+_gemini_skip_until = {}
+# Ollama 응답 대기(초). 4GB GPU에서 gemma3:4b가 결정 컴파일에 2~3분 걸려서 120초로는 잘렸다. OLLAMA_TIMEOUT으로 조정.
+TIMEOUT_SECONDS = 300
 # 한국어/영어 외 문자(일본어 가나, 중국어 한자 등)가 섞여나오는 LLM 출력을 걸러낸다.
 _FOREIGN_SCRIPT = re.compile(r"[぀-ヿ一-鿿]")
 
 
+def _gemini_models():
+    """GEMINI_MODEL의 모델 목록(쉼표로 구분, 적힌 순서대로 시도)."""
+    return [model.strip() for model in os.environ.get("GEMINI_MODEL", "").split(",") if model.strip()]
+
+
 def _gemini_enabled():
-    return bool(os.environ.get("GEMINI_API_KEY") and os.environ.get("GEMINI_MODEL"))
+    return bool(os.environ.get("GEMINI_API_KEY") and _gemini_models())
 
 
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -72,10 +85,24 @@ def _clova_enabled():
 
 GROQ_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 GROQ_DEFAULT_MODEL = "whisper-large-v3-turbo"
+# Groq 앞단의 Cloudflare가 urllib 기본 User-Agent(Python-urllib/x.y)를 403(error code: 1010)으로 막아서 직접 지정한다.
+GROQ_USER_AGENT = "MeetAlign/1.0"
 
 
 def _groq_enabled():
     return bool(os.environ.get("GROQ_API_KEY"))
+
+
+_DIARIZE_WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "diarize_worker.py")
+DIARIZATION_DEFAULT_MODEL_DIR = os.path.join(os.path.expanduser("~"), ".cache", "meetalign", "diarization")
+DIARIZATION_TIMEOUT_SECONDS = 1800
+SPEAKER_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _diarization_enabled():
+    """LOCAL_DIARIZATION=1이면 Groq·로컬 Whisper 전사 결과에 로컬 화자 분리(sherpa-onnx)를 붙인다. CLOVA는 자체 화자
+    분리(CLOVA_SPEECH_DIARIZATION)가 있어서 대상이 아니다."""
+    return os.environ.get("LOCAL_DIARIZATION") == "1"
 
 
 def _local_stt_engine():
@@ -196,16 +223,21 @@ def _transcribe_clova(path):
     return _clova_text(data, segments, diarize), end_seconds
 
 
-def _groq_multipart(path, model):
+def _groq_multipart(path, model, response_format="text", granularities=()):
     """urllib에는 multipart 인코더가 없어서 직접 만든다. 녹음 파일(최대 500MB)을 통째로 메모리에 올리지 않도록 본문을
     머리말 → 파일 조각들 → 꼬리말 순서로 내보내는 제너레이터와, 미리 계산한 Content-Length, Content-Type을 돌려준다."""
     boundary = uuid.uuid4().hex
     head = (
         '--%s\r\nContent-Disposition: form-data; name="model"\r\n\r\n%s\r\n'
         '--%s\r\nContent-Disposition: form-data; name="language"\r\n\r\nko\r\n'
-        '--%s\r\nContent-Disposition: form-data; name="response_format"\r\n\r\ntext\r\n'
-        '--%s\r\nContent-Disposition: form-data; name="file"; filename="%s"\r\nContent-Type: application/octet-stream\r\n\r\n'
-        % (boundary, model, boundary, boundary, boundary, os.path.basename(path))
+        '--%s\r\nContent-Disposition: form-data; name="response_format"\r\n\r\n%s\r\n'
+        % (boundary, model, boundary, boundary, response_format)
+        + "".join(
+            '--%s\r\nContent-Disposition: form-data; name="timestamp_granularities[]"\r\n\r\n%s\r\n' % (boundary, granularity)
+            for granularity in granularities
+        )
+        + '--%s\r\nContent-Disposition: form-data; name="file"; filename="%s"\r\nContent-Type: application/octet-stream\r\n\r\n'
+        % (boundary, os.path.basename(path))
     ).encode("utf-8")
     tail = ("\r\n--%s--\r\n" % boundary).encode("utf-8")
 
@@ -219,35 +251,56 @@ def _groq_multipart(path, model):
     return body(), len(head) + os.path.getsize(path) + len(tail), "multipart/form-data; boundary=%s" % boundary
 
 
-def _transcribe_groq(path):
+def _transcribe_groq(path, with_segments=False):
     """Groq의 OpenAI 호환 Whisper 엔드포인트 호출(로컬 파일 업로드). response_format=text로 받아 전사 텍스트를
     그대로 돌려준다(JSON 파싱 불필요). CLOVA와 달리 무료 사용량을 앱에서 추적하지 않는다(Groq 콘솔에서 확인).
+    with_segments=True(화자 분리용)면 verbose_json으로 받아 [{"start","end","text"}, ...] 목록을 돌려준다. 문장 구간은
+    화자가 바뀌는 지점을 넘어 이어지는 일이 잦아서 단어 단위 시각(문장부호 포함)을 받아 쓰고, 단어가 없으면 구간을 쓴다.
     HTTP/네트워크 오류는 이유를 담은 RuntimeError로 올린다."""
     model = os.environ.get("GROQ_MODEL", GROQ_DEFAULT_MODEL)
-    body, length, content_type = _groq_multipart(path, model)
+    if with_segments:
+        body, length, content_type = _groq_multipart(path, model, "verbose_json", ("word", "segment"))
+    else:
+        body, length, content_type = _groq_multipart(path, model)
     request = urllib.request.Request(
         GROQ_URL, data=body, method="POST",
         headers={
             "Content-Type": content_type, "Content-Length": str(length),
             "Authorization": "Bearer %s" % os.environ["GROQ_API_KEY"],
+            "User-Agent": GROQ_USER_AGENT,
         },
     )
     try:
         with urllib.request.urlopen(request, timeout=TRANSCRIBE_TIMEOUT_SECONDS) as response:
-            return response.read().decode("utf-8").strip()
+            raw = response.read().decode("utf-8").strip()
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", "replace").strip()[:200] if error.fp is not None else ""
         raise RuntimeError("Groq Whisper 오류 %d: %s" % (error.code, detail or error.reason)) from error
     except OSError as error:
         raise RuntimeError("Groq Whisper 연결 실패: %s" % error) from error
+    if not with_segments:
+        return raw
+    try:
+        data = json.loads(raw)
+        if data.get("words"):
+            return [
+                {"start": float(w["start"]), "end": float(w["end"]), "text": str(w["word"]).strip()}
+                for w in data["words"] if str(w.get("word", "")).strip()
+            ]
+        return [
+            {"start": float(s["start"]), "end": float(s["end"]), "text": str(s["text"]).strip()}
+            for s in data.get("segments") or [] if str(s.get("text", "")).strip()
+        ]
+    except (ValueError, AttributeError, KeyError, TypeError) as error:
+        raise RuntimeError("Groq Whisper 응답 해석 실패: %s" % error) from error
 
 
-def _transcribe_local(recording_path, engine):
+def _transcribe_local(recording_path, engine, with_segments=False):
     """로컬 Whisper(mlx-whisper 또는 faster-whisper)는 별도 프로세스(whisper_worker.py)로 띄워서 실행한다. Django 개발 서버는
     요청마다 새 스레드를 쓰는데, mlx의 GPU 스트림이 스레드에 묶여 있어서 같은 프로세스 안에서 다른 스레드가 연달아 호출하면
     간헐적으로 'no Stream(gpu, 1) in current thread' 에러가 난다. 매번 새 프로세스에서 실행하면 항상 그 프로세스의 메인
     스레드에서 처음 쓰는 상태가 되어 이 문제를 피할 수 있다. faster-whisper도 같은 방식으로 돌려서 수 GB짜리 모델이 서버
-    프로세스 메모리에 계속 남지 않게 한다."""
+    프로세스 메모리에 계속 남지 않게 한다. with_segments=True(화자 분리용)면 텍스트 대신 구간 목록을 돌려준다."""
     if engine is None:
         return None
     if engine == "mlx":
@@ -257,13 +310,74 @@ def _transcribe_local(recording_path, engine):
             "faster", recording_path, os.environ["FASTER_WHISPER_MODEL"],
             os.environ.get("FASTER_WHISPER_DEVICE", "auto"), os.environ.get("FASTER_WHISPER_COMPUTE_TYPE", "default"),
         ]
+    if with_segments:
+        args.append("--segments")
     result = subprocess.run(
         [sys.executable, _WHISPER_WORKER] + args, capture_output=True, text=True, encoding="utf-8", errors="replace",
         timeout=TRANSCRIBE_TIMEOUT_SECONDS, env={**os.environ, "PYTHONUTF8": "1"},
     )
     if result.returncode != 0:
         raise RuntimeError((result.stderr or "로컬 Whisper 전사 실패").strip()[-500:])
-    return json.loads(result.stdout.strip()).strip()
+    output = json.loads(result.stdout.strip())
+    return output if with_segments else output.strip()
+
+
+def _diarize(recording_path):
+    """diarize_worker.py를 별도 프로세스로 돌려 [[시작초, 끝초, 화자번호], ...]를 받는다."""
+    args = [
+        recording_path, os.environ.get("DIARIZATION_MODEL_DIR") or DIARIZATION_DEFAULT_MODEL_DIR,
+        os.environ.get("DIARIZATION_NUM_SPEAKERS", ""), os.environ.get("DIARIZATION_THRESHOLD", ""),
+    ]
+    result = subprocess.run(
+        [sys.executable, _DIARIZE_WORKER] + args, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=DIARIZATION_TIMEOUT_SECONDS, env={**os.environ, "PYTHONUTF8": "1"},
+    )
+    if result.returncode != 0:
+        raise RuntimeError((result.stderr or "화자 분리 실패").strip()[-500:])
+    return json.loads(result.stdout.strip())
+
+
+def _speaker_for(segment, turns):
+    """전사 구간과 가장 오래 겹치는 화자. 겹치는 화자가 없으면(화자 분리가 놓친 짧은 발화) 시간상 가장 가까운 화자."""
+    best, best_overlap = None, 0.0
+    for start, end, speaker in turns:
+        overlap = min(end, segment["end"]) - max(start, segment["start"])
+        if overlap > best_overlap:
+            best, best_overlap = speaker, overlap
+    if best is not None or not turns:
+        return best
+    middle = (segment["start"] + segment["end"]) / 2
+    return min(turns, key=lambda turn: min(abs(turn[0] - middle), abs(turn[1] - middle)))[2]
+
+
+def _label_speakers(segments, turns):
+    """전사 구간(보통 단어)마다 화자를 붙여 "화자 A: ..." 줄로 묶는다(CLOVA 화자 분리와 같은 형식). 화자 이름은 처음 말한
+    순서대로 A, B, C... 이고, 같은 화자가 이어 말한 구간은 한 줄로 합친다. 화자가 한 명뿐이면 표시 없이 텍스트만 돌려준다.
+    앞뒤가 같은 화자인데 가운데 한 구간만 다른 화자로 잡히면 경계 오차로 보고 앞뒤 화자로 붙인다(줄이 잘게 쪼개지지 않게)."""
+    speakers = [_speaker_for(segment, turns) for segment in segments]
+    for index in range(1, len(speakers) - 1):
+        if speakers[index - 1] == speakers[index + 1] != speakers[index]:
+            speakers[index] = speakers[index - 1]
+    letters, lines = {}, []
+    for segment, speaker in zip(segments, speakers):
+        if speaker not in letters:
+            letters[speaker] = SPEAKER_LETTERS[len(letters) % len(SPEAKER_LETTERS)]
+        if lines and lines[-1][0] == letters[speaker]:
+            lines[-1][1] += " " + segment["text"]
+        else:
+            lines.append([letters[speaker], segment["text"]])
+    if len(letters) < 2:
+        return " ".join(segment["text"] for segment in segments)
+    return "\n".join("화자 %s: %s" % (letter, text) for letter, text in lines)
+
+
+def _with_speakers(recording_path, segments):
+    """구간 목록에 로컬 화자 분리 결과를 붙인 전사 텍스트. 화자 분리가 실패해도 전사는 살린다(화자 표시 없이)."""
+    try:
+        return _label_speakers(segments, _diarize(recording_path))
+    except (RuntimeError, OSError, ValueError, subprocess.TimeoutExpired) as error:
+        logger.warning("화자 분리 실패(%s) — 화자 표시 없이 저장합니다", error)
+        return " ".join(segment["text"] for segment in segments)
 
 
 def transcribe(recording_path, recording_id=None):
@@ -291,14 +405,19 @@ def transcribe(recording_path, recording_id=None):
                 raise RuntimeError(message + ". Groq나 로컬 Whisper를 설정하면 그쪽으로 넘어갑니다")
             logger.info("%s — 다음 전사 엔진으로 전사합니다", message)
 
+    diarize = _diarization_enabled()
     if _groq_enabled():
         try:
+            if diarize:
+                return _with_speakers(recording_path, _transcribe_groq(recording_path, with_segments=True))
             return _transcribe_groq(recording_path)
         except RuntimeError as error:
             if local is None:
                 raise
             logger.warning("%s — %s로 전환합니다", error, LOCAL_STT_LABELS[local])
 
+    if diarize and local is not None:
+        return _with_speakers(recording_path, _transcribe_local(recording_path, local, with_segments=True))
     return _transcribe_local(recording_path, local)
 
 
@@ -317,6 +436,8 @@ def stt_status_text():
     """회의 상세 화면의 녹음 업로드 폼에 보여줄 전사 엔진 안내 한 줄. 어떤 STT도 설정돼 있지 않으면 None."""
     fallback = _fallback_stt_label()
     if not _clova_enabled():
+        if fallback and _diarization_enabled():
+            return "전사 엔진: %s · 화자 분리(로컬)" % fallback
         return "전사 엔진: %s" % fallback if fallback else None
     used, limit = clova_used_seconds(), _clova_limit_seconds()
     status = "전사 엔진: CLOVA Speech · 이번 달 무료 사용량 %s/%d분" % (_format_minutes(used), limit // 60)
@@ -326,20 +447,62 @@ def stt_status_text():
 
 
 def _generate(prompt, temperature=None):
-    if _gemini_enabled():
-        try:
-            return _generate_gemini(prompt, temperature=temperature)
-        except OSError:
-            # 재시도 후에도 Gemini가 안 되면(과부하, 타임아웃, 키 오류 등) Groq나 Ollama가
-            # 설정돼 있을 때만 그쪽으로 넘어간다.
-            if not (_groq_llm_enabled() or os.environ.get("OLLAMA_MODEL")):
-                raise
+    """Gemini 모델들(GEMINI_MODEL에 적힌 순서) → Groq(GROQ_LLM_MODEL) → 로컬 Ollama. 설정되지 않았거나 실패한 단계는
+    건너뛴다. 어느 모델이 답했고 몇 초 걸렸는지 서버 로그에 남긴다."""
+    ollama = os.environ.get("OLLAMA_MODEL")
+    # Gemini가 모두 실패했을 때 넘어갈 다음 단계의 이름(로그용). 없으면 Gemini 실패를 그대로 올린다.
     if _groq_llm_enabled():
+        fallback = "Groq(%s)" % os.environ["GROQ_LLM_MODEL"]
+    elif ollama:
+        fallback = "로컬 Ollama(%s)" % ollama
+    else:
+        fallback = None
+    if _gemini_enabled():
+        models = _gemini_models()
+        now = time.monotonic()
+        ready = [model for model in models if _gemini_skip_until.get(model, 0) <= now]
+        if not ready and not fallback:
+            ready = models
+        if not ready:
+            remaining = min(_gemini_skip_until[model] for model in models) - now
+            logger.info("Gemini 일시 중단 중(%d초 남음) → %s 사용", remaining, fallback)
+        cooldown = int(os.environ.get("GEMINI_COOLDOWN", GEMINI_DEFAULT_COOLDOWN_SECONDS))
+        error = None
+        for index, model in enumerate(ready):
+            is_last = index == len(ready) - 1
+            started = time.monotonic()
+            try:
+                # 응답이 늦은 모델을 한 번 더 기다리기보다 다음 모델로 넘어간다. 마지막 모델만 시간 초과도 다시 시도한다.
+                text = _generate_gemini(prompt, temperature=temperature, model=model, retry_timeout=is_last)
+            except OSError as failure:
+                error = failure
+                if cooldown:
+                    _gemini_skip_until[model] = time.monotonic() + cooldown
+                if not is_last:
+                    logger.warning("Gemini(%s) 실패(%s) → 다음 모델 %s 시도", model, failure, ready[index + 1])
+                continue
+            logger.info("LLM 응답: Gemini(%s) %.1f초", model, time.monotonic() - started)
+            return text
+        if error is not None:
+            # Gemini 모델이 모두 안 되면(과부하, 타임아웃, 한도 초과, 키 오류 등) Groq나 Ollama가 설정돼 있을 때만
+            # 그쪽으로 넘어간다.
+            if not fallback:
+                raise error
+            logger.warning(
+                "Gemini 실패(%s) → %s로 전환. 실패한 Gemini 모델은 %d분 동안 건너뜁니다", error, fallback, cooldown // 60,
+            )
+    if _groq_llm_enabled():
+        started = time.monotonic()
         try:
-            return _generate_groq_llm(prompt, temperature=temperature)
-        except OSError:
-            if not os.environ.get("OLLAMA_MODEL"):
+            text = _generate_groq_llm(prompt, temperature=temperature)
+        except OSError as error:
+            if not ollama:
                 raise
+            logger.warning("Groq(%s) 실패(%s) → 로컬 Ollama(%s)로 전환", os.environ["GROQ_LLM_MODEL"], error, ollama)
+        else:
+            logger.info("LLM 응답: Groq(%s) %.1f초", os.environ["GROQ_LLM_MODEL"], time.monotonic() - started)
+            return text
+    started = time.monotonic()
     num_ctx = int(os.environ.get("OLLAMA_NUM_CTX", "16384"))
     options = {"num_ctx": num_ctx}
     if temperature is not None:
@@ -351,17 +514,30 @@ def _generate(prompt, temperature=None):
         "options": options,
     }).encode("utf-8")
     request = urllib.request.Request(OLLAMA_URL, data=body, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-        return json.loads(response.read().decode("utf-8"))["response"].strip()
+    with urllib.request.urlopen(request, timeout=int(os.environ.get("OLLAMA_TIMEOUT", TIMEOUT_SECONDS))) as response:
+        text = json.loads(response.read().decode("utf-8"))["response"].strip()
+    logger.info("LLM 응답: 로컬 Ollama(%s) %.1f초", ollama, time.monotonic() - started)
+    return text
 
 
-def _generate_gemini(prompt, temperature=None):
+def _daily_quota_exhausted(error):
+    """429 중에서도 하루 한도 초과(무료 등급 RPD)는 몇 초 쉬었다 다시 보내도 다음 날까지 풀리지 않으므로 재시도하지 않는다."""
+    if error.code != 429 or error.fp is None:
+        return False
+    try:
+        return "PerDay" in error.read().decode("utf-8", "replace")
+    except OSError:
+        return False
+
+
+def _generate_gemini(prompt, temperature=None, model=None, retry_timeout=True):
     """Gemini generateContent API 호출. HTTP/네트워크 오류(401 잘못된 키, 429 무료 한도 초과 등)는
     urllib이 OSError 하위 예외로 올리므로 호출자의 기존 대체 처리가 그대로 동작한다. 안전 필터 차단 등으로
     응답에 텍스트가 없을 때도 같은 경로로 처리되도록 OSError로 바꿔서 올린다.
-    429/500/503은 GEMINI_RETRIES번까지 점점 길게 쉬었다가 다시 보내고, 타임아웃은 다시 보내도 처음부터
-    다시 기다려야 해서 재시도 없이 바로 올린다."""
-    model = os.environ["GEMINI_MODEL"]
+    429/500/503과 타임아웃은 GEMINI_RETRIES번 잠깐 쉬었다가 다시 보낸다(총 두 번 시도). 키 오류 같은 다른 HTTP
+    오류와 하루 한도 초과는 다시 보내도 소용없으므로 바로 올린다. retry_timeout=False면 시간 초과는 다시 보내지
+    않는다(다음 Gemini 모델이 남아 있을 때). model을 주지 않으면 GEMINI_MODEL의 첫 모델을 쓴다."""
+    model = model or _gemini_models()[0]
     payload = {"contents": [{"parts": [{"text": prompt}]}]}
     if temperature is not None:
         payload["generationConfig"] = {"temperature": temperature}
@@ -377,9 +553,17 @@ def _generate_gemini(prompt, temperature=None):
                 data = json.loads(response.read().decode("utf-8"))
             break
         except urllib.error.HTTPError as error:
-            if error.code not in GEMINI_RETRY_STATUS or attempt == GEMINI_RETRIES:
+            if error.code not in GEMINI_RETRY_STATUS or attempt == GEMINI_RETRIES or _daily_quota_exhausted(error):
                 raise
-            time.sleep(GEMINI_RETRY_DELAY_SECONDS * (attempt + 1))
+            logger.warning("Gemini(%s) 호출 실패 (%d/%d): HTTP %d — 다시 시도합니다", model, attempt + 1, GEMINI_RETRIES + 1, error.code)
+            time.sleep(GEMINI_RETRY_DELAY_SECONDS)
+        except (TimeoutError, urllib.error.URLError) as error:
+            # 응답을 읽다가 시간이 다 되면 TimeoutError, 연결하다가 시간이 다 되면 URLError(reason=TimeoutError)로 온다.
+            timed_out = isinstance(error, TimeoutError) or isinstance(getattr(error, "reason", None), TimeoutError)
+            if not timed_out or not retry_timeout or attempt == GEMINI_RETRIES:
+                raise
+            logger.warning("Gemini(%s) 호출 실패 (%d/%d): %d초 안에 응답 없음 — 다시 시도합니다", model, attempt + 1, GEMINI_RETRIES + 1, timeout)
+            time.sleep(GEMINI_RETRY_DELAY_SECONDS)
     try:
         parts = data["candidates"][0]["content"]["parts"]
         text = "".join(part.get("text", "") for part in parts if not part.get("thought"))
@@ -399,7 +583,11 @@ def _generate_groq_llm(prompt, temperature=None):
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         GROQ_CHAT_URL, data=body,
-        headers={"Content-Type": "application/json", "Authorization": "Bearer %s" % os.environ["GROQ_API_KEY"]},
+        headers={
+            "Content-Type": "application/json", "Authorization": "Bearer %s" % os.environ["GROQ_API_KEY"],
+            # 전사(Whisper)와 같은 이유 — Groq 앞단의 Cloudflare가 urllib 기본 User-Agent를 403(1010)으로 막는다.
+            "User-Agent": GROQ_USER_AGENT,
+        },
     )
     with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
         data = json.loads(response.read().decode("utf-8"))

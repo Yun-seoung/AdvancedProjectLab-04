@@ -25,10 +25,11 @@ from .models import (
 # 셸에 실행용 LLM/STT 환경변수가 설정돼 있어도 테스트가 실제 모델/API를 호출하지 않고 항상 같은 결과가
 # 나오도록, 모듈 시작 시 잠시 치웠다가 끝나면 되돌린다. 필요한 테스트는 각자 patch.dict로 값을 넣는다.
 _MODEL_ENV_VARS = (
-    "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_TIMEOUT", "OLLAMA_MODEL", "MLX_WHISPER_MODEL",
+    "GEMINI_API_KEY", "GEMINI_MODEL", "GEMINI_TIMEOUT", "GEMINI_COOLDOWN", "OLLAMA_MODEL", "OLLAMA_TIMEOUT", "MLX_WHISPER_MODEL",
     "FASTER_WHISPER_MODEL", "FASTER_WHISPER_DEVICE", "FASTER_WHISPER_COMPUTE_TYPE",
     "CLOVA_SPEECH_INVOKE_URL", "CLOVA_SPEECH_SECRET_KEY", "CLOVA_SPEECH_FREE_MINUTES", "CLOVA_SPEECH_DIARIZATION",
-    "GROQ_API_KEY", "GROQ_MODEL",
+    "GROQ_API_KEY", "GROQ_MODEL", "GROQ_LLM_MODEL",
+    "LOCAL_DIARIZATION", "DIARIZATION_NUM_SPEAKERS", "DIARIZATION_THRESHOLD", "DIARIZATION_MODEL_DIR",
 )
 _saved_model_env = {}
 
@@ -757,6 +758,7 @@ class GroqSTTTests(TestCase):
             self.assertEqual(services.transcribe(self.audio), "안녕하세요, 회의 시작합니다.")
         self.assertEqual(captured["url"], services.GROQ_URL)
         self.assertEqual(captured["headers"].get("Authorization"), "Bearer groq-key-1")
+        self.assertEqual(captured["headers"].get("User-agent"), services.GROQ_USER_AGENT)
         self.assertTrue(captured["headers"]["Content-type"].startswith("multipart/form-data; boundary="))
         self.assertEqual(int(captured["headers"]["Content-length"]), len(captured["body"]))
         self.assertEqual(captured["timeout"], services.TRANSCRIBE_TIMEOUT_SECONDS)
@@ -825,6 +827,117 @@ class GroqSTTTests(TestCase):
             self.assertEqual(services.stt_status_text(), "전사 엔진: Groq Whisper")
 
 
+class LocalDiarizationTests(TestCase):
+    """LOCAL_DIARIZATION=1일 때 Groq·로컬 Whisper 구간에 로컬 화자 분리 결과를 붙이는 흐름. 실제 모델은 돌리지 않는다."""
+
+    GROQ_ENV = {"GROQ_API_KEY": "groq-key-1", "LOCAL_DIARIZATION": "1"}
+    SEGMENTS = [
+        {"start": 0.0, "end": 2.0, "text": "안녕하세요, 시작할게요."},
+        {"start": 2.5, "end": 4.0, "text": "네, 잘 들려요."},
+        {"start": 4.2, "end": 6.0, "text": "저는 백엔드를 맡을게요."},
+        {"start": 6.5, "end": 8.0, "text": "그럼 다음 주에 봬요."},
+    ]
+    TURNS = [[0.0, 2.1, 3], [2.4, 6.1, 1], [6.4, 8.0, 3]]
+
+    def setUp(self):
+        self.audio = os.path.join(tempfile.mkdtemp(), "회의.wav")
+        with open(self.audio, "wb") as f:
+            f.write(b"RIFF-fake-audio-bytes")
+
+    def test_segments_are_grouped_into_speaker_lines_in_order_of_first_appearance(self):
+        text = services._label_speakers(self.SEGMENTS, self.TURNS)
+        self.assertEqual(text, "화자 A: 안녕하세요, 시작할게요.\n화자 B: 네, 잘 들려요. 저는 백엔드를 맡을게요.\n화자 A: 그럼 다음 주에 봬요.")
+
+    def test_a_single_speaker_gets_no_labels(self):
+        self.assertEqual(services._label_speakers(self.SEGMENTS[:2], [[0.0, 8.0, 0]]), "안녕하세요, 시작할게요. 네, 잘 들려요.")
+
+    def test_segment_without_overlap_goes_to_the_nearest_speaker(self):
+        self.assertEqual(services._speaker_for({"start": 9.0, "end": 9.5, "text": "네"}, self.TURNS), 3)
+
+    def test_groq_is_asked_for_segments_and_labeled(self):
+        with patch.dict(os.environ, self.GROQ_ENV, clear=True), \
+                patch.object(services, "_transcribe_groq", return_value=self.SEGMENTS) as groq, \
+                patch.object(services, "_diarize", return_value=self.TURNS) as diarize:
+            text = services.transcribe(self.audio)
+        groq.assert_called_once_with(self.audio, with_segments=True)
+        diarize.assert_called_once_with(self.audio)
+        self.assertTrue(text.startswith("화자 A: 안녕하세요"))
+
+    def test_diarization_failure_keeps_the_transcript_without_labels(self):
+        with patch.dict(os.environ, self.GROQ_ENV, clear=True), \
+                patch.object(services, "_transcribe_groq", return_value=self.SEGMENTS), \
+                patch.object(services, "_diarize", side_effect=RuntimeError("sherpa_onnx 없음")), \
+                self.assertLogs(services.logger, "WARNING"):
+            text = services.transcribe(self.audio)
+        self.assertEqual(text, " ".join(segment["text"] for segment in self.SEGMENTS))
+
+    def test_isolated_word_between_the_same_speaker_is_smoothed(self):
+        words = [{"start": float(i), "end": i + 0.9, "text": text} for i, text in enumerate(["그럼", "다음", "주에", "봬요."])]
+        # 1~2초 구간만 다른 화자로 잡혀도 앞뒤가 같은 화자면 한 줄로 이어진다.
+        turns = [[0.0, 1.0, 0], [1.0, 2.0, 1], [2.0, 4.0, 0], [4.0, 6.0, 1]]
+        self.assertEqual(services._label_speakers(words, turns), "그럼 다음 주에 봬요.")
+
+    def test_groq_word_timestamps_are_preferred_over_segments(self):
+        captured = {}
+        payload = json.dumps({
+            "text": "전체", "segments": [{"start": 0, "end": 2, "text": " 안녕하세요. 네."}],
+            "words": [{"word": "안녕하세요.", "start": 0, "end": 1.2}, {"word": "네.", "start": 1.4, "end": 2}],
+        })
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return payload.encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["body"] = b"".join(request.data)
+            return FakeResponse()
+
+        with patch.dict(os.environ, self.GROQ_ENV, clear=True), patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            words = services._transcribe_groq(self.audio, with_segments=True)
+        self.assertEqual([w["text"] for w in words], ["안녕하세요.", "네."])
+        self.assertIn(b'name="timestamp_granularities[]"\r\n\r\nword\r\n', captured["body"])
+        self.assertIn(b'name="timestamp_granularities[]"\r\n\r\nsegment\r\n', captured["body"])
+
+    def test_groq_verbose_json_segments_are_parsed(self):
+        captured = {}
+        payload = json.dumps({"text": "전체", "segments": [{"start": 0, "end": 1.5, "text": " 안녕하세요 "}, {"start": 1.5, "end": 2, "text": " "}]})
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return payload.encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            captured["body"] = b"".join(request.data)
+            return FakeResponse()
+
+        with patch.dict(os.environ, self.GROQ_ENV, clear=True), patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            segments = services._transcribe_groq(self.audio, with_segments=True)
+        self.assertEqual(segments, [{"start": 0.0, "end": 1.5, "text": "안녕하세요"}])
+        self.assertIn(b'name="response_format"\r\n\r\nverbose_json\r\n', captured["body"])
+
+    def test_local_whisper_is_asked_for_segments(self):
+        result = MagicMock(returncode=0, stdout=json.dumps(self.SEGMENTS), stderr="")
+        env = {"FASTER_WHISPER_MODEL": "large-v3-turbo", "LOCAL_DIARIZATION": "1"}
+        with patch.dict(os.environ, env, clear=True), \
+                patch.object(services.subprocess, "run", return_value=result) as run, \
+                patch.object(services, "_diarize", return_value=self.TURNS):
+            text = services.transcribe(self.audio)
+        self.assertEqual(run.call_args[0][0][-1], "--segments")
+        self.assertIn("화자 B: 네, 잘 들려요.", text)
+
+    def test_stt_status_mentions_local_diarization(self):
+        with patch.dict(os.environ, self.GROQ_ENV, clear=True):
+            self.assertEqual(services.stt_status_text(), "전사 엔진: Groq Whisper · 화자 분리(로컬)")
+
+
 class WhisperWorkerTests(TestCase):
     def _fake_faster_whisper(self, segment_texts, calls):
         class FakeSegment:
@@ -864,6 +977,30 @@ class WhisperWorkerTests(TestCase):
             whisper_worker.main(["whisper_worker.py", "mlx", "/x.wav", "mlx-community/whisper-large-v3-turbo"])
         mlx.assert_called_once_with("/x.wav", "mlx-community/whisper-large-v3-turbo")
         self.assertEqual(json.loads(out.getvalue()), "맥 전사")
+
+    def test_segments_flag_returns_timed_segments(self):
+        class FakeModel:
+            def __init__(self, model, device, compute_type):
+                pass
+
+            def transcribe(self, path, **kwargs):
+                assert kwargs["word_timestamps"]
+                word = lambda start, text: types.SimpleNamespace(start=start, end=start + 0.4, word=text)
+                return iter([
+                    types.SimpleNamespace(words=[word(0.0, " 안녕하세요."), word(0.5, " ")]),
+                    types.SimpleNamespace(words=[word(1.0, " 회의를"), word(1.5, " 시작합니다.")]),
+                ]), object()
+
+        module = types.ModuleType("faster_whisper")
+        module.WhisperModel = FakeModel
+        with patch.dict(sys.modules, {"faster_whisper": module}), patch.object(whisper_worker, "_add_windows_cuda_dlls"), \
+                patch("sys.stdout", new_callable=io.StringIO) as out:
+            whisper_worker.main(["whisper_worker.py", "faster", "/x.wav", "turbo", "cpu", "int8", "--segments"])
+        self.assertEqual(json.loads(out.getvalue()), [
+            {"start": 0.0, "end": 0.4, "text": "안녕하세요."},
+            {"start": 1.0, "end": 1.4, "text": "회의를"},
+            {"start": 1.5, "end": 1.9, "text": "시작합니다."},
+        ])
 
     def test_windows_adds_pip_installed_nvidia_dll_dirs(self):
         root = tempfile.mkdtemp()
@@ -1019,6 +1156,8 @@ class MeetingSummaryTests(TestCase):
 
 class BackgroundProcessingTests(TestCase):
     def setUp(self):
+        # Gemini 실패 후 건너뛰기 상태는 모듈 전역이라, 앞 테스트에서 걸린 것이 다음 테스트로 넘어가지 않게 매번 푼다.
+        services._gemini_skip_until.clear()
         self.user = User.objects.create_user("a", password="pw12345!")
         self.client.force_login(self.user)
         self.team = Team.objects.create(name="t")
@@ -1156,25 +1295,105 @@ class BackgroundProcessingTests(TestCase):
 
         def flaky_urlopen(request, timeout):
             calls.append(timeout)
-            if len(calls) < 3:
+            if len(calls) < 2:
                 raise urllib.error.HTTPError("u", 503, "Service Unavailable", {}, None)
             return success(request, timeout)
 
         with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
                 patch("urllib.request.urlopen", side_effect=flaky_urlopen), patch.object(services.time, "sleep") as sleep:
             self.assertEqual(services._generate("hi"), "ok")
-        self.assertEqual(len(calls), 3)
-        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleep.call_count, 1)
         self.assertEqual(calls[0], services.GEMINI_DEFAULT_TIMEOUT_SECONDS)
 
-    def test_gemini_does_not_retry_auth_error_or_timeout(self):
+    def test_gemini_is_tried_at_most_twice(self):
         import urllib.error
-        for error in (urllib.error.HTTPError("u", 401, "Unauthorized", {}, None), TimeoutError("timed out")):
+        error = urllib.error.HTTPError("u", 503, "Service Unavailable", {}, None)
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=error) as urlopen, patch.object(services.time, "sleep"):
+            self.assertRaises(OSError, services._generate, "hi")
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_gemini_daily_quota_429_is_not_retried(self):
+        import urllib.error
+        body = b'{"error": {"details": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}}'
+        calls = []
+
+        def quota_urlopen(request, timeout):
+            calls.append(timeout)
+            raise urllib.error.HTTPError("u", 429, "Too Many Requests", {}, io.BytesIO(body))
+
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=quota_urlopen), patch.object(services.time, "sleep") as sleep:
+            with self.assertRaises(OSError):
+                services._generate("hi")
+        self.assertEqual(len(calls), 1)
+        sleep.assert_not_called()
+
+    def test_gemini_does_not_retry_auth_error(self):
+        import urllib.error
+        error = urllib.error.HTTPError("u", 401, "Unauthorized", {}, None)
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=error) as urlopen, patch.object(services.time, "sleep") as sleep:
+            self.assertRaises(OSError, services._generate, "hi")
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
+
+    def test_gemini_timeout_is_retried_once(self):
+        import urllib.error
+        for error in (TimeoutError("timed out"), urllib.error.URLError(TimeoutError("connect timed out"))):
             with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
                     patch("urllib.request.urlopen", side_effect=error) as urlopen, patch.object(services.time, "sleep") as sleep:
                 self.assertRaises(OSError, services._generate, "hi")
-            self.assertEqual(urlopen.call_count, 1)
-            sleep.assert_not_called()
+            self.assertEqual(urlopen.call_count, 2)
+            self.assertEqual(sleep.call_count, 1)
+
+    def _gemini_down_ollama_up(self, urls):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return '{"response": "올라마 답"}'.encode("utf-8")
+
+        def fake_urlopen(request, timeout):
+            urls.append(request.full_url)
+            if "generativelanguage" in request.full_url:
+                raise TimeoutError("timed out")
+            return FakeResponse()
+        return fake_urlopen
+
+    def test_gemini_is_skipped_for_a_while_after_failing(self):
+        urls = []
+        env = {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x", "OLLAMA_MODEL": "m1"}
+        with patch.dict(os.environ, env, clear=True), patch("urllib.request.urlopen", side_effect=self._gemini_down_ollama_up(urls)), \
+                patch.object(services.time, "sleep"), self.assertLogs(services.logger, "INFO") as logs:
+            self.assertEqual(services._generate("첫 호출"), "올라마 답")
+            self.assertEqual(services._generate("두 번째 호출"), "올라마 답")
+        # 첫 호출: Gemini 2번 실패 → Ollama. 두 번째 호출: Gemini를 건너뛰고 바로 Ollama.
+        self.assertEqual([("generativelanguage" in url) for url in urls], [True, True, False, False])
+        output = "\n".join(logs.output)
+        self.assertIn("로컬 Ollama(m1)로 전환", output)
+        self.assertIn("Gemini 일시 중단 중", output)
+        self.assertIn("LLM 응답: 로컬 Ollama(m1)", output)
+
+    def test_cooldown_zero_tries_gemini_every_time(self):
+        urls = []
+        env = {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x", "OLLAMA_MODEL": "m1", "GEMINI_COOLDOWN": "0"}
+        with patch.dict(os.environ, env, clear=True), patch("urllib.request.urlopen", side_effect=self._gemini_down_ollama_up(urls)), \
+                patch.object(services.time, "sleep"):
+            services._generate("첫 호출")
+            services._generate("두 번째 호출")
+        self.assertEqual(sum("generativelanguage" in url for url in urls), 4)
+
+    def test_gemini_success_is_logged_with_model_name(self):
+        payload = {"candidates": [{"content": {"parts": [{"text": "ok"}]}}]}
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=self._fake_gemini_urlopen({}, payload)), \
+                self.assertLogs(services.logger, "INFO") as logs:
+            services._generate("hi")
+        self.assertIn("LLM 응답: Gemini(gemini-x)", logs.output[0])
 
     def test_gemini_failure_falls_back_to_ollama_when_configured(self):
         import urllib.error
@@ -1203,9 +1422,69 @@ class BackgroundProcessingTests(TestCase):
 
     def test_gemini_failure_without_ollama_raises(self):
         with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
-                patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")) as urlopen:
+                patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")) as urlopen, patch.object(services.time, "sleep"):
             self.assertRaises(OSError, services._generate, "hi")
-        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual(urlopen.call_count, services.GEMINI_RETRIES + 1)
+        # Ollama가 없으면 넘어갈 곳이 없으므로 건너뛰는 중이어도 다음 호출은 Gemini를 다시 시도한다.
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
+                patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")) as urlopen, patch.object(services.time, "sleep"):
+            self.assertRaises(OSError, services._generate, "hi")
+        self.assertEqual(urlopen.call_count, services.GEMINI_RETRIES + 1)
+
+    def test_multiple_gemini_models_are_tried_in_order_then_ollama(self):
+        import urllib.error
+        urls = []
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return False
+            def read(self):
+                return '{"response": "올라마 답"}'.encode("utf-8")
+
+        quota = b'{"error": {"details": [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]}}'
+
+        def fake_urlopen(request, timeout):
+            urls.append(request.full_url)
+            if "gemini-a" in request.full_url:
+                raise urllib.error.HTTPError("u", 429, "Too Many Requests", {}, io.BytesIO(quota))
+            if "gemini-b" in request.full_url:
+                raise TimeoutError("timed out")
+            return FakeResponse()
+
+        env = {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-a, gemini-b", "OLLAMA_MODEL": "m1"}
+        with patch.dict(os.environ, env, clear=True), patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+                patch.object(services.time, "sleep"), self.assertLogs(services.logger, "INFO") as logs:
+            self.assertEqual(services._generate("첫 호출"), "올라마 답")
+            self.assertEqual(services._generate("두 번째 호출"), "올라마 답")
+        # 첫 호출: a는 하루 한도라 한 번, b는 마지막 모델이라 시간 초과를 한 번 더 기다린 뒤 Ollama.
+        # 두 번째 호출: 두 모델 모두 건너뛰는 중이라 바로 Ollama.
+        called = ["a" if "gemini-a" in url else "b" if "gemini-b" in url else "ollama" for url in urls]
+        self.assertEqual(called, ["a", "b", "b", "ollama", "ollama"])
+        self.assertIn("Gemini(gemini-a) 실패", "\n".join(logs.output))
+        self.assertIn("다음 모델 gemini-b 시도", "\n".join(logs.output))
+
+    def test_next_gemini_model_answers_when_the_first_one_fails(self):
+        import urllib.error
+        payload = {"candidates": [{"content": {"parts": [{"text": "두 번째 모델 답"}]}}]}
+        success = self._fake_gemini_urlopen({}, payload)
+        urls = []
+
+        def fake_urlopen(request, timeout):
+            urls.append(request.full_url)
+            if "gemini-a" in request.full_url:
+                raise TimeoutError("timed out")
+            return success(request, timeout)
+
+        env = {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-a,gemini-b"}
+        with patch.dict(os.environ, env, clear=True), patch("urllib.request.urlopen", side_effect=fake_urlopen), \
+                patch.object(services.time, "sleep") as sleep, self.assertLogs(services.logger, "INFO") as logs:
+            self.assertEqual(services._generate("hi"), "두 번째 모델 답")
+        # 앞 모델은 시간 초과를 다시 기다리지 않고 바로 다음 모델로 넘어간다.
+        self.assertEqual(len(urls), 2)
+        sleep.assert_not_called()
+        self.assertIn("LLM 응답: Gemini(gemini-b)", "\n".join(logs.output))
 
     def test_gemini_timeout_env_overrides_default(self):
         captured = {}
