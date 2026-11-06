@@ -1637,6 +1637,22 @@ class DecisionWarningTests(TestCase):
             ["확정 문장에 다른 숫자가 섞여 있어요: 3개, 5개"],
         )
 
+    # ---- 확정 문장에 남은 지시어(REFERENT_PHRASES) ----
+
+    def test_safety_catches_a_referent_left_in_the_final_text(self):
+        """담당자는 … 해당 분에게 넘긴다"처럼, 확정 문장이 실제로 이름을 못 정한 경우."""
+        self.assertEqual(
+            decision_compiler.safety_warnings("담당자는 그쪽에서 받은 파일을 넘긴다", "어제 그쪽에서 보내준 파일"),
+            ["확정 문장에 모호한 표현이 있어요: '그쪽'"],
+        )
+
+    def test_safety_ignores_a_referent_that_only_appears_in_the_transcript(self):
+        """원문(자연스러운 대화체)에 지시어가 있어도, 확정 문장이 깔끔하면 걸리지 않는다."""
+        self.assertEqual(
+            decision_compiler.safety_warnings("민수가 금요일까지 배포한다", "그쪽에서 얘기한 대로 민수가 금요일까지 배포하기로 했어요"),
+            [],
+        )
+
 
 class DecisionParseTests(TestCase):
     """통합 응답 파서(parse_items)의 스키마 검증과 근거 검증."""

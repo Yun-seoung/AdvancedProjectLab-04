@@ -10,7 +10,8 @@ AI를 한 번 부른다. 전사 원문을 보내고 결정마다
   진행자가 읽고 직접 골라야 모호함이 실제로 정리되기 때문이다.
 - 명확한 결정: AI가 확정 문장 하나를 쓰고, 진행자 탭 없이 공개 목록에 들어간다.
 - 규칙 안전망(safety_warnings): AI가 '명확'이라 한 항목만 되짚는다. 확정 문장이나 원문 근거에
-  모호어·날짜·숫자 충돌이 있으면 확인 필요로 올리고, AI가 쓴 문장을 후보 하나로 보여준다.
+  모호어·날짜·숫자 충돌이 있거나 확정 문장에 "그쪽/그분" 같은 지시어가 남아 있으면 확인
+  필요로 올리고, AI가 쓴 문장을 후보 하나로 보여준다.
   빈칸만으로는 묻지 않는다 — 빈칸 경고가 거의 모든 결정에 붙어 표시가 의미를 잃었기 때문이다.
 
 공개되는 것은 어떤 상태에서나 Decision.final_text 문장 하나다. '다음 회의로 넘김'을 고른
@@ -55,10 +56,12 @@ PARSE_RETRIES = 1
 # 확정 문장에 섞이면 사람마다 다르게 읽는 표현. 팀에서 합의한 목록이라 자동 추출이 아니라 고정 목록이다.
 AMBIGUOUS_PHRASES = ("쯤", "시간 되면", "각자", "나중에", "아까 정한 대로", "적당히", "대충")
 
-# 지시어·대명사. 전사본을 훑어 "이 문장은 결정으로 다룰지 반드시 검토하라"고 LLM에 미리 짚어주는
-# 용도로만 쓴다(아래 _review_hints) — AMBIGUOUS_PHRASES와 달리 이것만으로 바로 확인 필요를
-# 만들지는 않는다. 일상 대화에 워낙 흔히 섞여서, safety_warnings처럼 바로 확인 필요로 만드는
-# 용도로 쓰면 '명확' 판정을 과도하게 뒤집어 버린다.
+# 지시어·대명사. 두 곳에서 쓰지만 대상이 다르다.
+# - _review_hints: 전사본 원문(자연스러운 대화체)을 훑어 "이 문장은 결정으로 다룰지 검토
+#   하라"고 LLM에 짚어주기만 한다 — 대화체엔 이 표현이 워낙 흔해서, 바로 확인 필요로 만들면
+#   '명확' 판정을 과도하게 뒤집어 버린다.
+# - safety_warnings: AI가 직접 쓴 확정 문장(원문이 아니다)에서만 검사한다. 그대로 공개될
+#   문장에 지시어가 남아 있으면 실제로 담당자·대상을 못 정한 것이라 과탐 위험이 훨씬 낮다.
 REFERENT_PHRASES = ("그쪽", "그분", "그 사람", "그거", "저쪽")
 
 # 결론을 다음으로 미루는 표현. 후보 근거 문장에 있으면 AI가 뭐라고 판단했든 '다음 회의로 넘김'을
@@ -144,17 +147,19 @@ def _quantity_tokens(text):
     return {re.sub(r"\s+", "", m.group(0)) for m in _QUANTITY_EXPR.finditer(text)}
 
 
-def _text_warnings(text, where):
+def _text_warnings(text, where, phrases=AMBIGUOUS_PHRASES):
     """한 텍스트에서 모호어와 날짜·시각·숫자 충돌을 찾아 사유 문자열로 만든다.
 
     where는 사유 앞에 붙는 말("확정 문장" 또는 "원문")이다. 조사 변화를 피하려고 표현을
     문장 끝에 콜론으로 붙인다 — '나중에'·'쯤'처럼 끝 음절이 다른 표현을 같은 틀에 담기 위함.
+    phrases는 검사할 고정 표현 목록으로, 기본은 AMBIGUOUS_PHRASES다(아래 safety_warnings
+    참고 — 확정 문장에는 REFERENT_PHRASES도 더해 검사한다).
 
     날짜·시각·숫자는 각각 따로 센다. 같은 묶음 안에 서로 다른 값이 둘 이상일 때만 충돌이다
     — "금요일 18시까지"는 기한 하나이지 충돌이 아니다.
     """
     found = ["%s에 모호한 표현이 있어요: '%s'" % (where, phrase)
-             for phrase in AMBIGUOUS_PHRASES if phrase in text]
+             for phrase in phrases if phrase in text]
     # 라벨마다 조사가 달라서(날짜'가' / 시각'이' / 숫자'가') 문구를 따로 적어 둔다.
     for label, tokens in (("다른 날짜가", _date_tokens(text)), ("다른 시각이", _time_tokens(text)),
                           ("다른 숫자가", _quantity_tokens(text))):
@@ -168,14 +173,22 @@ def safety_warnings(final_text, evidence):
     """AI가 '명확'이라고 한 항목을 되짚는 규칙 안전망. 사유 목록을 돌려준다.
 
     두 가지를 본다.
-    - 확정 문장: AI가 쓴 문장 자체에 모호함이 남아 있다.
+    - 확정 문장: AI가 쓴 문장 자체에 모호함이 남아 있다. "그쪽/그분/그거" 같은 지시어
+      (REFERENT_PHRASES)도 여기서만 같이 본다 — AI가 직접 쓴, 그대로 공개될 문장에 누구·
+      무엇인지 안 정해진 표현이 남아 있으면 실제로 못 고친 것이다("담당자는 … 해당 분에게
+      넘긴다" 처럼).
     - 원문 근거: 원문은 모호한데 AI가 그것을 혼자 해소해 버렸다. 그 해소가 맞을 수도 있지만
-      회의에서 정해지지 않은 것을 AI가 정한 셈이므로 진행자가 확인해야 한다.
+      회의에서 정해지지 않은 것을 AI가 정한 셈이므로 진행자가 확인해야 한다. 원문은
+      REFERENT_PHRASES를 보지 않는다 — 자연스러운 대화체엔 지시어가 흔히 섞여서, 거기까지
+      걸면 멀쩡한 '명확' 판정을 과도하게 뒤집는다.
 
     모호 항목은 이미 진행자에게 묻고 있으므로 이 함수를 부르지 않는다. 같은 사유가 양쪽에서
     나오면 확정 문장 쪽만 남긴다 — 진행자가 고쳐야 할 대상이 그 문장이기 때문이다.
     """
-    found = _text_warnings(final_text, "확정 문장") + _text_warnings(evidence, "원문")
+    found = (
+        _text_warnings(final_text, "확정 문장", AMBIGUOUS_PHRASES + REFERENT_PHRASES)
+        + _text_warnings(evidence, "원문")
+    )
     seen = []
     phrases_taken = set()
     for warning in found:
