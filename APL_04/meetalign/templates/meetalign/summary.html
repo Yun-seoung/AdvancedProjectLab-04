@@ -1,5 +1,4 @@
 {% extends "meetalign/base.html" %}
-{% block note %}<li>회의록(record)은 로컬 LLM이 전사본을 정리한 요약이다. LLM이 꺼져 있으면 전사 원문이 그대로 들어간다.</li>{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
@@ -15,7 +14,7 @@
     <div class="empty">아직 생성된 회의록이 없습니다.</div>
   {% endif %}
   {% if meeting.transcript %}
-    <details><summary>전사 원문 보기</summary><div class="record" style="margin-top:8px">{{ meeting.transcript }}</div></details>
+    <details><summary>녹취 원문 보기</summary><div class="record" style="margin-top:8px">{{ meeting.transcript }}</div></details>
   {% endif %}
 </div>
 {% endblock %}

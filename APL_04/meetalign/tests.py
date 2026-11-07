@@ -215,7 +215,7 @@ class PrototypeFlowTests(TestCase):
 
     def test_llm_chat_does_not_touch_anon_questions(self):
         r = self.client.post(reverse("chat", args=[self.meeting.id]), {"mode": "llm", "text": "hi"}, follow=True)
-        self.assertContains(r, "가짜 LLM")
+        self.assertContains(r, "테스트용 가짜 AI")
         self.assertEqual(Question.objects.count(), 0)
 
     def test_llm_chat_stores_conversation_per_user(self):
@@ -356,7 +356,7 @@ class LocalLLMTests(TestCase):
 
     def test_disabled_without_model_env_keeps_fake_behavior(self):
         with patch.dict(os.environ, {}, clear=True):
-            self.assertIn("(가짜 LLM 응답)", services.chat_reply(self.meeting, "q"))
+            self.assertIn("(테스트용 가짜 AI 응답)", services.chat_reply(self.meeting, "q"))
 
     def test_chat_reply_sends_record_as_context(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="A안입니다") as gen:
@@ -380,7 +380,7 @@ class LocalLLMTests(TestCase):
 
     def test_llm_failure_falls_back(self):
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", side_effect=OSError("down")):
-            self.assertIn("LLM 연결 실패", services.chat_reply(self.meeting, "q"))
+            self.assertIn("AI 연결 실패", services.chat_reply(self.meeting, "q"))
 
 
 class LanguageFilterTests(TestCase):
@@ -694,27 +694,27 @@ class ClovaSTTTests(TestCase):
         with patch.dict(os.environ, {}, clear=True):
             self.assertIsNone(services.stt_status_text())
         with patch.dict(os.environ, self.LOCAL_ENV, clear=True):
-            self.assertEqual(services.stt_status_text(), "전사 엔진: 로컬 모델(faster-whisper)")
+            self.assertEqual(services.stt_status_text(), "음성 인식: 로컬 모델(faster-whisper)")
         SttUsage.objects.create(audio_seconds=750)
         with patch.dict(os.environ, {**self.CLOVA_ENV, **self.LOCAL_ENV}, clear=True):
             self.assertEqual(
                 services.stt_status_text(),
-                "전사 엔진: CLOVA Speech · 이번 달 무료 사용량 12.5/20분 (소진 시 로컬 모델(faster-whisper)로 전환)",
+                "음성 인식: CLOVA Speech · 이번 달 무료 사용량 12.5/20분 (소진 시 로컬 모델(faster-whisper)로 전환)",
             )
         with patch.dict(os.environ, {**self.CLOVA_ENV, "CLOVA_SPEECH_FREE_MINUTES": "60"}, clear=True):
-            self.assertEqual(services.stt_status_text(), "전사 엔진: CLOVA Speech · 이번 달 무료 사용량 12.5/60분")
+            self.assertEqual(services.stt_status_text(), "음성 인식: CLOVA Speech · 이번 달 무료 사용량 12.5/60분")
         SttUsage.objects.create(audio_seconds=450)
         with patch.dict(os.environ, self.CLOVA_ENV, clear=True):
-            self.assertIn("20/20분 (소진 — 로컬 모델이 없어 전사가 실패합니다)", services.stt_status_text())
+            self.assertIn("20/20분 (소진 — 내 컴퓨터용 음성 인식 모델이 없어 글로 옮기지 못합니다)", services.stt_status_text())
         with patch.dict(os.environ, {**self.CLOVA_ENV, **self.LOCAL_ENV}, clear=True):
-            self.assertIn("(소진 → 로컬 모델(faster-whisper)로 전사)", services.stt_status_text())
+            self.assertIn("(소진 → 로컬 모델(faster-whisper)로 전환)", services.stt_status_text())
 
     def test_meeting_detail_shows_stt_status_only_when_configured(self):
         url = reverse("meeting_detail", args=[self.meeting.id])
         with patch.dict(os.environ, {}, clear=True):
             self.assertNotContains(self.client.get(url), "전사 엔진")
         with patch.dict(os.environ, self.CLOVA_ENV, clear=True):
-            self.assertContains(self.client.get(url), "전사 엔진: CLOVA Speech · 이번 달 무료 사용량 0/20분")
+            self.assertContains(self.client.get(url), "음성 인식: CLOVA Speech · 이번 달 무료 사용량 0/20분")
 
 
 class GroqSTTTests(TestCase):
@@ -824,7 +824,7 @@ class GroqSTTTests(TestCase):
         with patch.dict(os.environ, {**self.CLOVA_ENV, **self.GROQ_ENV, **self.LOCAL_ENV}, clear=True):
             self.assertIn("(소진 시 Groq Whisper로 전환)", services.stt_status_text())
         with patch.dict(os.environ, self.GROQ_ENV, clear=True):
-            self.assertEqual(services.stt_status_text(), "전사 엔진: Groq Whisper")
+            self.assertEqual(services.stt_status_text(), "음성 인식: Groq Whisper")
 
 
 class LocalDiarizationTests(TestCase):
@@ -935,7 +935,7 @@ class LocalDiarizationTests(TestCase):
 
     def test_stt_status_mentions_local_diarization(self):
         with patch.dict(os.environ, self.GROQ_ENV, clear=True):
-            self.assertEqual(services.stt_status_text(), "전사 엔진: Groq Whisper · 화자 분리(로컬)")
+            self.assertEqual(services.stt_status_text(), "음성 인식: Groq Whisper · 말한 사람 구분(내 컴퓨터)")
 
 
 class WhisperWorkerTests(TestCase):
@@ -1144,11 +1144,11 @@ class MeetingSummaryTests(TestCase):
         self.assertEqual(self.meeting.record, "요약본")
 
     def test_summary_page_shows_transcript_details(self):
-        self.meeting.transcript = "전사 원문 내용"
+        self.meeting.transcript = "녹취 원문 내용"
         self.meeting.save()
         r = self.client.get(reverse("summary", args=[self.meeting.id]))
-        self.assertContains(r, "전사 원문 보기")
-        self.assertContains(r, "전사 원문 내용")
+        self.assertContains(r, "녹취 원문 보기")
+        self.assertContains(r, "녹취 원문 내용")
 
 
 @override_settings(MEDIA_ROOT=tempfile.mkdtemp(), BACKGROUND_RECORDING=False)
@@ -1206,7 +1206,7 @@ class BackgroundProcessingTests(TestCase):
         self.addCleanup(tasks._active.discard, self.meeting.id)
         r = self.client.get(reverse("meeting_result", args=[self.meeting.id]))
         self.assertContains(r, "http-equiv=\"refresh\"")
-        self.assertContains(r, "녹음을 전사하고")
+        self.assertContains(r, "녹음을 글로 옮기고")
 
     def test_background_mode_starts_a_thread_instead_of_running_inline(self):
         rec = Recording.objects.create(meeting=self.meeting, file=SimpleUploadedFile("a.wav", b"RIFF"), status=Recording.STATUS_PROCESSING)
@@ -1285,7 +1285,7 @@ class BackgroundProcessingTests(TestCase):
         self.meeting.transcript = "A안으로 진행합니다."
         with patch.dict(os.environ, {"GEMINI_API_KEY": "k1", "GEMINI_MODEL": "gemini-x"}, clear=True), \
                 patch("urllib.request.urlopen", side_effect=error), patch.object(services.time, "sleep"):
-            self.assertIn("LLM 연결 실패", services.chat_reply(self.meeting, "q"))
+            self.assertIn("AI 연결 실패", services.chat_reply(self.meeting, "q"))
 
     def test_gemini_retries_transient_error_then_succeeds(self):
         import urllib.error
@@ -2067,7 +2067,7 @@ class DecisionParseTests(TestCase):
     def test_parse_items_requires_evidence_for_a_clear_item(self):
         """근거가 아예 없는 확정 문장은 검증을 건너뛰지 않고 비운다.
 
-        후보 쪽의 빈 근거는 가짜 응답 모드 통로로 남기지만(바로 아래 테스트), 전사 원문을
+        후보 쪽의 빈 근거는 가짜 응답 모드 통로로 남기지만(바로 아래 테스트), 녹취 원문을
         들고 검증하는 중이라면 근거 없는 문장은 "원문에 있다"고 볼 수 없다.
         """
         raw = json.dumps([{"topic": self.TOPIC, "ambiguous": False,
@@ -2159,7 +2159,7 @@ class DecisionCompileTests(TestCase):
         return patch.object(services, "_generate", side_effect=list(responses))
 
     def _compiled(self, *items):
-        """한 응답으로 컴파일하고 (요약, {안건: Decision}, 호출 mock)을 돌려준다."""
+        """한 응답으로 추출하고 (요약, {안건: Decision}, 호출 mock)을 돌려준다."""
         raw = json.dumps(list(items), ensure_ascii=False)
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), \
              patch.object(services, "_generate", return_value=raw) as gen:
@@ -2245,9 +2245,9 @@ class DecisionCompileTests(TestCase):
         self.assertEqual(decision.interpretations.count(), 1)
 
     def test_compiling_twice_at_once_is_refused_not_crashed(self):
-        """두 요청이 동시에 컴파일하면 사유를 보여준다 — 500이 아니라.
+        """두 요청이 동시에 추출하면 사유를 보여준다 — 500이 아니라.
 
-        이미 컴파일됐는지 보는 검사가 LLM 호출 앞에 있으므로, 버튼을 두 번 누르면 두 요청이
+        이미 추출됐는지 보는 검사가 LLM 호출 앞에 있으므로, 버튼을 두 번 누르면 두 요청이
         모두 빈 상태를 보고 통과해 같은 order를 쓰려 한다.
         """
         def create_then_answer(*args, **kwargs):
@@ -2556,7 +2556,7 @@ class DecisionReviewTests(TestCase):
 
     def test_first_visit_offers_the_compile_button_only(self):
         r = self.client.get(self.url)
-        self.assertContains(r, "결정 컴파일 실행")
+        self.assertContains(r, "결정 사항 추출")
         self.assertNotContains(r, "투표 시작")
         self.assertFalse(r.context["compiled"])
 
@@ -2998,7 +2998,7 @@ class DecisionCarryoverTests(TestCase):
 
 
 class DecisionModelTests(TestCase):
-    """결정 컴파일러 모델 테스트.
+    """결정 사항 추출 기능 모델 테스트.
 
     확인 기록이 (항목, 사용자)로 유일하면서 나중에 수정 가능하다는 것, 회의를 지우면
     결정 트리 전체가 함께 사라진다는 것을 고정한다.
@@ -3274,7 +3274,7 @@ class DecisionConfirmTests(TestCase):
         # 모호 판정은 AI가 하므로 divergence_reason만 있고 warnings는 빈 항목이 정상이다.
         self.warned = [d for d in decisions if d.has_warning]
         self.plain = [d for d in decisions if not d.has_warning]
-        # 가짜 명세 3개 중 2개에 경고가 붙고 1개는 완전히 채워져 있다.
+        # 가짜 결정 사항 3개 중 2개에 경고가 붙고 1개는 완전히 채워져 있다.
         self.assertEqual(len(self.warned), 2)
         self.assertEqual(len(self.plain), 1)
 
@@ -3482,7 +3482,7 @@ class DecisionConfirmTests(TestCase):
     def test_a_failed_choice_holds_back_the_irreversible_drop(self):
         """제출이 실패하면 '이 결정 빼기'는 보류한다 — 되돌릴 수 없는 동작이기 때문이다.
 
-        같은 제출이 거부됐는데 삭제만 커밋되면 진행자는 복구할 방법이 없다(다시 컴파일하면
+        같은 제출이 거부됐는데 삭제만 커밋되면 진행자는 복구할 방법이 없다(다시 추출하면
         다른 선택도 전부 사라진다). 반면 나머지 선택은 그대로 저장해, 고른 것이 화면에서
         사라지지 않게 한다.
         """
@@ -3964,9 +3964,9 @@ class DecisionUnpublishTests(TestCase):
         self.assertContains(r, "공개된 항목이 없습니다")
 
     def test_reset_message_points_at_unpublishing(self):
-        # 공개된 뒤 "명세 지우고 다시 컴파일"을 시도하면 다음에 뭘 눌러야 하는지 알려줘야 한다.
+        # 공개된 뒤 "결정 지우고 다시 추출"을 시도하면 다음에 뭘 눌러야 하는지 알려줘야 한다.
         r = self.client.post(self.url, {"action": "reset"})
-        self.assertContains(r, "이미 공개된 항목이 있어 명세를 지울 수 없습니다")
+        self.assertContains(r, "이미 공개된 항목이 있어 결정 사항을 지울 수 없습니다")
         self.assertContains(r, "공개 취소")
         self.assertEqual(self.meeting.decisions.count(), 1)
 

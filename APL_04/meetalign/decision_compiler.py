@@ -1,12 +1,12 @@
-"""결정 컴파일러(실험 기능) — 확정 문장 후보를 만들고 진행자가 고르게 한다.
+"""결정 사항 추출 기능(실험 기능) — 확정 문장 후보를 만들고 진행자가 고르게 한다.
 
-AI를 한 번 부른다. 전사 원문을 보내고 결정마다
+AI를 한 번 부른다. 녹취 원문을 보내고 결정마다
   [안건 한 줄 · 모호 여부 · 왜 갈리나 · 원문 근거 · AI가 가장 추천하는 확정 문장 하나]
 을 한 응답으로 받는다(parse_items).
 
 - 모호한 결정: AI가 "왜 다르게 이해할 수 있나" 한 줄과 그대로 공개될 확정 문장을 가장 추천하는
   것 하나만 만든다(MAX_INTERPRETATIONS = 1). 생성한 문장에는 원문 근거를 따로 붙이지 않는다 —
-  원문 근거는 결정 하나에 하나(Decision.evidence)이고 전사 원본 창의 하이라이트에만 쓴다.
+  원문 근거는 결정 하나에 하나(Decision.evidence)이고 녹취 원문 창의 하이라이트에만 쓴다.
   추천 문장을 미리 선택해 두지는 않는다 — 진행자가 읽고 직접 골라야 모호함이 실제로 정리되기
   때문이다. 진행자가 아무것도 고르지 않고 공개하면 그 결정은 빠진다(views._save_decision_edits).
 - 명확한 결정: AI가 확정 문장 하나를 쓰고, 진행자 탭 없이 공개 목록에 들어간다.
@@ -33,7 +33,7 @@ AI를 한 번 부른다. 전사 원문을 보내고 결정마다
        프롬프트를 Gemini → Groq → Ollama 순으로 보내고 응답 문자열을 돌려준다. 한국어/영어 외
        언어가 섞이면 재시도 후 None을 주고, 연결 자체가 실패하면 OSError를 올린다.
    - services._normalize_for_match(text)
-       공백을 모두 지운 비교용 문자열. 근거 문장이 전사 원문에 있는지 볼 때 쓴다.
+       공백을 모두 지운 비교용 문자열. 근거 문장이 녹취 원문에 있는지 볼 때 쓴다.
 """
 
 import json
@@ -92,7 +92,7 @@ _QUANTITY_EXPR = re.compile(r"\d+\s*(?:개(?!월)|명|건|퍼센트|%)")
 
 # LLM 키가 없을 때 쓰는 고정 응답. 새 스키마 그대로여서 가짜 모드에서도 진행자 화면이
 # 실제와 같은 모습으로 돈다(모호 2건 + 명확 1건). 근거 문장도 담아 화면에 "근거: …"가
-# 보이게 한다 — 가짜 모드는 전사 원문 없이 파싱하므로(compile_specs) 근거 검증은 건너뛴다.
+# 보이게 한다 — 가짜 모드는 녹취 원문 없이 파싱하므로(compile_specs) 근거 검증은 건너뛴다.
 FAKE_DECISIONS = [
     {
         "topic": "로그 보관 기간",
@@ -120,7 +120,7 @@ FAKE_DECISIONS = [
 
 class DecisionCompileError(Exception):
     """LLM 응답을 재시도까지 하고도 결정으로 못 읽었을 때, 또는 저장 중에 같은 회의를 두 번
-    컴파일한 것이 드러났을 때. 진행자 화면에 사유를 그대로 띄운다."""
+    추출한 것이 드러났을 때. 진행자 화면에 사유를 그대로 띄운다."""
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +195,7 @@ def safety_warnings(final_text, evidence):
 
 
 # ---------------------------------------------------------------------------
-# ① 컴파일
+# ① 추출
 # ---------------------------------------------------------------------------
 
 
@@ -241,7 +241,7 @@ def _compile_prompt(source):
         "된다):\n" + "\n".join("- %s" % s for s in hints) + "\n"
     ) if hints else ""
     return (
-        "다음은 회의 녹음의 전사 원문이다. 회의가 끝난 뒤 팀원들이 각자 움직이려면 무엇을 알아야 하는지 기준으로 "
+        "다음은 회의 녹음의 녹취 원문이다. 회의가 끝난 뒤 팀원들이 각자 움직이려면 무엇을 알아야 하는지 기준으로 "
         "이 회의의 '실행 항목'을 빠짐없이 뽑고, 항목마다 팀원들이 다르게 이해하거나 다르게 행동할 수 있는지 "
         "판단하라.\n"
         + hint_block +
@@ -315,7 +315,7 @@ def _generate_parsed(prompt, parser, what_failed):
 
 
 def compile_specs(source):
-    """전사 원문 → [응답 항목, ...]. LLM이 없거나 연결이 안 되면 가짜 응답을 돌려준다."""
+    """녹취 원문 → [응답 항목, ...]. LLM이 없거나 연결이 안 되면 가짜 응답을 돌려준다."""
     if not (services._enabled() and source):
         return parse_items(json.dumps(FAKE_DECISIONS))
     items = _generate_parsed(
@@ -390,7 +390,7 @@ def _legacy_candidate_evidence(raw_candidates, normalized_source):
     """예전 형식(후보마다 evidence)으로 답했을 때 결정의 근거로 쓸 첫 후보 근거.
 
     결정 단위 evidence가 비어 있을 때만 쓴다. 원문을 들고 있으면 원문에서 찾은 것만 쓴다 —
-    근거는 전사 원본 창 하이라이트와 '보류' 자동 감지(_looks_deferred)에 쓰이기 때문이다.
+    근거는 녹취 원문 창 하이라이트와 '보류' 자동 감지(_looks_deferred)에 쓰이기 때문이다.
     """
     for item in raw_candidates if isinstance(raw_candidates, list) else []:
         if not isinstance(item, dict):
@@ -480,12 +480,12 @@ def _dedupe_items(items):
 
 
 # ---------------------------------------------------------------------------
-# ①+② 한 번에 — 진행자가 "결정 컴파일 실행"을 눌렀을 때 들어오는 입구
+# ①+② 한 번에 — 진행자가 "결정 사항 추출"을 눌렀을 때 들어오는 입구
 # ---------------------------------------------------------------------------
 
 
 def compile_meeting(meeting):
-    """회의 전사 원문을 컴파일해 Decision/Interpretation을 저장하고 요약을 돌려준다.
+    """회의 녹취 원문을 추출해 Decision/Interpretation을 저장하고 요약을 돌려준다.
 
     {"decisions": n, "ambiguous": n, "few_candidates": n}
     - ambiguous: 진행자가 확인해야 하는 항목 수(AI가 갈린다고 봤거나 규칙이 걸린 것)
@@ -493,24 +493,24 @@ def compile_meeting(meeting):
       모호어가 남아 버려진 경우다 — 진행자는 직접 쓰기나 '다음 회의로 넘김'으로만 처리할 수 있다.
 
     이미 Decision이 있는 회의는 건드리지 않는다(공개 뒤에 결정이 바뀌면 팀원이 확인한 내용과
-    달라진다). 다시 컴파일하려면 호출 전에 draft 상태인 Decision을 지워야 한다.
+    달라진다). 다시 추출하려면 호출 전에 draft 상태인 Decision을 지워야 한다.
     """
     if meeting.decisions.exists():
-        raise DecisionCompileError("이미 컴파일된 회의입니다. 다시 하려면 기존 결정을 먼저 지워 주세요.")
+        raise DecisionCompileError("이미 결정 사항을 추출한 회의입니다. 다시 하려면 기존 결정을 먼저 지워 주세요.")
     source = meeting.transcript
     items = compile_specs(source)
     if not items:
-        raise DecisionCompileError("전사 원문에서 공개할 결정을 찾지 못했습니다.")
+        raise DecisionCompileError("녹취 원문에서 공개할 결정을 찾지 못했습니다.")
 
     ambiguous_count = 0
     few_candidates = 0
     try:
         ambiguous_count, few_candidates = _save_items(meeting, items)
     except IntegrityError:
-        # 진행자가 컴파일 버튼을 두 번 눌렀을 때. 위의 exists() 검사는 LLM 호출(수 초) 앞에
+        # 진행자가 추출 버튼을 두 번 눌렀을 때. 위의 exists() 검사는 LLM 호출(수 초) 앞에
         # 있으므로 두 요청이 모두 빈 상태를 보고 통과해 같은 order를 쓰려 한다. 먼저 저장한
         # 쪽의 결과를 그대로 두고, 늦게 온 쪽에는 사유를 보여준다(500 대신).
-        raise DecisionCompileError("이미 컴파일된 회의입니다. 화면을 새로 고쳐 주세요.")
+        raise DecisionCompileError("이미 결정 사항을 추출한 회의입니다. 화면을 새로 고쳐 주세요.")
     return {
         "decisions": len(items),
         "ambiguous": ambiguous_count,
@@ -521,7 +521,7 @@ def compile_meeting(meeting):
 def _looks_deferred(item):
     """결론을 다음으로 미루기로 한 근거 문장인가(DEFERRAL_PHRASES).
 
-    그 결정이 나온 원문 구절을 본다 — 전사 원문에서 가져온 텍스트라 AI가 쓴 topic/why보다 믿을 수
+    그 결정이 나온 원문 구절을 본다 — 녹취 원문에서 가져온 텍스트라 AI가 쓴 topic/why보다 믿을 수
     있다.
     """
     return any(phrase in item["evidence"] for phrase in DEFERRAL_PHRASES)
@@ -543,7 +543,7 @@ def _save_items(meeting, items):
                 warnings=warnings, divergence_reason=divergence_reason,
                 final_text=undecided_sentence(item["topic"]) if deferred else final_text,
                 marked_undecided=deferred, draft_hint=draft_hint,
-                # 그 결정이 나온 원문 구절 — 전사 원본 창에서 하이라이트한다. AI 추천 문장에는
+                # 그 결정이 나온 원문 구절 — 녹취 원문 창에서 하이라이트한다. AI 추천 문장에는
                 # 근거를 따로 붙이지 않으므로 결정마다 이 하나뿐이다.
                 evidence=item["evidence"],
             )
@@ -722,7 +722,7 @@ def revise_final_text(decision, text):
 def published_decisions(meeting):
     """팀원에게 보여줄 항목 — 공개된 것과 미결정으로 넘어간 것.
 
-    draft는 절대 포함되지 않는다. 공개 전에는 팀원 화면에 확정 명세가 아예 담기지 않아야
+    draft는 절대 포함되지 않는다. 공개 전에는 팀원 화면에 확정된 결정이 아예 담기지 않아야
     하므로, 팀원 쪽 조회는 반드시 이 함수를 거친다.
     """
     return list(
@@ -733,7 +733,7 @@ def published_decisions(meeting):
 
 
 # ---------------------------------------------------------------------------
-# 전사 원본 창 — 근거 문장의 위치
+# 녹취 원문 창 — 근거 문장의 위치
 # ---------------------------------------------------------------------------
 
 

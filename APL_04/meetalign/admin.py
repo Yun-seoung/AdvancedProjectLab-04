@@ -2,7 +2,7 @@ from django.contrib import admin
 
 from .models import Checkpoint, Decision, DecisionAgreement, Interpretation, Notification
 
-# 결정 컴파일러(실험 기능)만 관리자에 등록한다. 기존 모델은 지금까지와 같이 등록하지 않는다.
+# 결정 사항 추출 기능(실험 기능)만 관리자에 등록한다. 기존 모델은 지금까지와 같이 등록하지 않는다.
 
 
 class InterpretationInline(admin.TabularInline):

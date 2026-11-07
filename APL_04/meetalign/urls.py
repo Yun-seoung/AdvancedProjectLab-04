@@ -20,7 +20,7 @@ urlpatterns = [
     path("meetings/<int:meeting_id>/summary/", views.summary, name="summary"),
     path("meetings/<int:meeting_id>/answers/", views.answers, name="answers"),
     path("meetings/<int:meeting_id>/record.txt", views.record_file, name="record_file"),
-    # 결정 컴파일러 (실험 기능)
+    # 결정 사항 추출 기능 (실험 기능)
     path("meetings/<int:meeting_id>/decisions/", views.decision_ack, name="decision_ack"),
     path("meetings/<int:meeting_id>/decisions/review/", views.decision_review, name="decision_review"),
     path(

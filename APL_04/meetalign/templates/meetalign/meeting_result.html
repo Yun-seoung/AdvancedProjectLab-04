@@ -1,5 +1,4 @@
 {% extends "meetalign/base.html" %}
-{% block note %}<li>녹음 전사와 회의록 생성은 백그라운드에서 진행된다. 진행 중이면 5초마다 자동으로 새로고침한다.</li>{% endblock %}
 {% block head %}{% if meeting.processing_status == "processing" %}<meta http-equiv="refresh" content="5">{% endif %}{% endblock %}
 {% block content %}
 <div class="page-head">
@@ -10,7 +9,7 @@
 <div class="card elevated">
   <div class="item-icon" style="margin-bottom:16px"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2"/></svg></div>
   {% if meeting.processing_status == "processing" %}
-    <div class="notice"><span class="spinner"></span> &nbsp;녹음을 전사하고 회의록을 만드는 중입니다. 길이에 따라 몇 분 걸릴 수 있습니다. 이 화면은 자동으로 갱신됩니다.</div>
+    <div class="notice"><span class="spinner"></span> &nbsp;녹음을 글로 옮기고 회의록을 만드는 중입니다. 길이에 따라 몇 분 걸릴 수 있습니다. 이 화면은 자동으로 갱신됩니다.</div>
   {% elif meeting.processing_status == "done" %}
     <div class="success">회의록 생성이 완료되었습니다.</div>
     <div class="row">
@@ -25,7 +24,7 @@
     </div>
   {% elif meeting.processing_status == "failed" %}
     <div class="error">녹음 처리에 실패했습니다. 파일을 다시 올려 주세요.</div>
-    <a class="btn secondary" href="{% url 'meeting_detail' meeting.id %}">회의로 돌아가기</a>
+    <a class="btn secondary" href="{% url 'meeting_detail' meeting.id %}">← 회의로 돌아가기</a>
   {% else %}
     <div class="empty"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11V6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v5"/><path d="M4 11h4.5a1 1 0 0 1 .9.55L10.5 14h3l1.1-2.45a1 1 0 0 1 .9-.55H20"/><path d="M4 11v6a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6"/></svg>아직 처리할 녹음이 없습니다. 회의 화면에서 녹음을 올려 주세요.</div>
   {% endif %}

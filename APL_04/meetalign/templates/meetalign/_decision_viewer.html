@@ -1,12 +1,12 @@
 {% comment %}
-  결정 확인 화면(진행자·팀원) 공용 부품: 한 문항씩 넘겨 보기 + 전사 원본 창.
+  결정 확인 화면(진행자·팀원) 공용 부품: 한 문항씩 넘겨 보기 + 녹취 원문 창.
 
   쓰는 쪽 템플릿이 지켜야 할 약속:
   - 문항마다 <section class="decision-step" data-decision-id="결정 id">로 감싼다. 이 부품이 한 번에 하나만 보여준다.
     자바스크립트가 꺼져 있으면 모든 문항이 그대로 다 보인다(숨김은 스크립트가 켤 때만 건다).
-  - 문항 안에서 전사 원본 창을 여는 곳에 data-open-transcript를 붙인다. 특정 후보의 근거로 바로 가려면
+  - 문항 안에서 녹취 원문 창을 여는 곳에 data-open-transcript를 붙인다. 특정 후보의 근거로 바로 가려면
     data-evidence-label="후보 A"처럼 하이라이트 꼬리표를 함께 준다.
-  - 컨텍스트: meeting(전사 원문 meeting.transcript), evidence_data({결정 id: [{start, end, label, primary}, ...]}),
+  - 컨텍스트: meeting(녹취 원문 meeting.transcript), evidence_data({결정 id: [{start, end, label, primary}, ...]}),
     step_key(문항 위치를 기억할 저장 키 앞부분 — 진행자·팀원 화면이 서로 덮어쓰지 않게).
 {% endcomment %}
 <style>
@@ -83,13 +83,13 @@
   }
 </style>
 
-<aside class="transcript-panel" id="transcript-panel" hidden aria-label="전사 원본">
+<aside class="transcript-panel" id="transcript-panel" hidden aria-label="녹취 원문">
   <div class="transcript-head">
     <div>
-      <h2>전사 원본</h2>
+      <h2>녹취 원문</h2>
       <div class="sub" id="transcript-title">근거가 된 문장을 표시했어요. 끌어서 위아래 맥락을 볼 수 있어요.</div>
     </div>
-    <button type="button" class="transcript-close" id="transcript-close" aria-label="전사 원본 닫기">&times;</button>
+    <button type="button" class="transcript-close" id="transcript-close" aria-label="녹취 원문 닫기">&times;</button>
   </div>
   <div class="transcript-note" id="transcript-note" hidden>이 결정의 근거 문장을 원문에서 찾지 못했어요. 원문 전체를 보여줍니다.</div>
   <div class="transcript-note" id="transcript-repeat-note" hidden>같은 문장이 원문에 여러 번 나와요. 진하게 칠한 곳이 이 결정과 가장 관련 있어 보이는 자리이고, 점선은 같은 문장이 또 나온 자리예요.</div>
@@ -131,7 +131,7 @@
     if (!panel.hidden) openFor(steps[current].getAttribute("data-decision-id"), null);
   }
 
-  // ---- 전사 원본 창 ----
+  // ---- 녹취 원문 창 ----
   var panel = document.getElementById("transcript-panel");
   var body = document.getElementById("transcript-body");
   var note = document.getElementById("transcript-note");
