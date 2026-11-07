@@ -12,6 +12,7 @@
       <input id="title" name="title" placeholder="예: 로그인 화면 시안 회의"></div>
     <div class="field"><label for="deadline">마감일 (선택)</label>
       <input id="deadline" type="date" name="deadline"></div>
+    {% include "meetalign/_participant_picker.html" %}
     <button type="submit" class="block" style="margin-top:6px">회의 만들기</button>
   </form>
 </div>

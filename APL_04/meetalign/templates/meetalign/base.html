@@ -136,6 +136,12 @@
     line-height:1; letter-spacing:-.01em; cursor:default;
   }
   .pending-clear { flex:0 0 auto; font-size:.8rem; font-weight:600; color:var(--muted); white-space:nowrap; }
+  /* 상단 메뉴 알림 아이콘 — 읽지 않은 결정 알림 개수를 붙인다. */
+  header.topbar nav a.notify-bell { position:relative; display:inline-flex; align-items:center; color:var(--ink-soft); }
+  .notify-count {
+    position:absolute; top:-7px; right:-10px; min-width:18px; height:18px; padding:0 5px; border-radius:999px;
+    background:var(--pending); color:#fff; font-size:.7rem; font-weight:800; line-height:18px; text-align:center;
+  }
 
   .notice, .error {
     padding:13px 16px; border-radius:var(--radius-sm); margin:14px 0; font-size:.92rem;
@@ -213,7 +219,9 @@
 
   /* ---- Motion ---- */
   @keyframes fadeInUp { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
-  .card.elevated, .hero, .auth-shell { animation:fadeInUp .5s cubic-bezier(.16,1,.3,1) both; }
+  /* fill-mode는 backwards — 'both'로 두면 끝난 뒤에도 transform이 남아, 카드 안의 position:fixed
+     요소(결정 화면의 이전·다음 버튼 줄)가 화면이 아니라 카드를 기준으로 붙어 버린다. */
+  .card.elevated, .hero, .auth-shell { animation:fadeInUp .5s cubic-bezier(.16,1,.3,1) backwards; }
   @media (prefers-reduced-motion: reduce) {
     .card.elevated, .hero, .auth-shell { animation:none; }
   }
@@ -286,6 +294,10 @@
   </a>
   <nav>
     {% if user.is_authenticated %}
+      <a href="{% url 'notification_list' %}" class="notify-bell" aria-label="알림{% if unread_notifications %} {{ unread_notifications }}개{% endif %}" title="알림">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+        {% if unread_notifications %}<span class="notify-count">{% if unread_notifications > 99 %}99+{% else %}{{ unread_notifications }}{% endif %}</span>{% endif %}
+      </a>
       <span class="user-chip"><span class="dot">{{ user.username|slice:":1"|upper }}</span>{{ user.username }}</span>
       <a href="{% url 'logout' %}">로그아웃</a>
     {% else %}

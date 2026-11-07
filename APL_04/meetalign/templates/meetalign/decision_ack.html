@@ -3,56 +3,43 @@
 <div class="page-head">
   <div>
     <h1><a href="{% url 'meeting_detail' meeting.id %}" class="crumb-link">{{ meeting.title }}</a> <span class="crumb-sep">/</span> 결정 확인</h1>
-    <div class="sub">진행자가 확정한 내용이 내가 이해한 것과 같은지 항목마다 한 번씩 눌러 주세요.</div>
+    <div class="sub">진행자가 확정해 공개한 결정입니다. 문항을 누르면 근거가 된 회의 원문을 볼 수 있어요.</div>
   </div>
 </div>
 
 <div class="card elevated">
   {% if rows %}
-  {% if published_count %}
-  <div class="progress-row">
-    <span>{{ published_count }}개 중 {{ acked_count }}개 확인</span>
-  </div>
-  {% endif %}
-  <ul class="plain">
+  <h2 class="section-title" style="margin-top:0">공개된 결정 {{ rows|length }}개</h2>
+  <div id="decision-steps" style="margin-top:14px">
     {% for row in rows %}
-    <li class="item" style="flex-direction:column;align-items:stretch;gap:10px">
-      <div class="item-text">
-        <span class="title">{{ forloop.counter }}. {{ row.decision.published_text }}</span>
-        {% if row.decision.status == status_published %}
-          {% if row.mine %}
-            <div class="meta">내 선택: <b>{{ row.mine.get_kind_display }}</b>{% if row.mine.comment %} · "{{ row.mine.comment }}"{% endif %}</div>
-          {% else %}
-            <div class="meta"><span class="badge ended">아직 확인 안 함</span></div>
-          {% endif %}
-        {% endif %}
+    <section class="decision-step item" data-decision-id="{{ row.decision.id }}" style="flex-direction:column;align-items:stretch;gap:10px">
+      <div class="row" style="justify-content:space-between;align-items:flex-start" data-open-transcript>
+        <div class="item-main">
+          <span class="item-icon">{{ forloop.counter }}</span>
+          <div class="item-text">
+            {% if row.decision.what %}<div class="meta" style="margin:0 0 2px">{{ row.decision.what }}</div>{% endif %}
+            <span class="title">{{ row.decision.published_text }}</span>
+            <div class="open-transcript-hint" style="margin-top:4px">눌러서 녹취 원문 보기 ›</div>
+          </div>
+        </div>
+        {% if row.decision.revised %}<span class="badge due">수정됨</span>{% endif %}
       </div>
-
-      {% if row.revised_notice %}
-      <div class="notice" style="margin:0">내용이 수정되었어요. 바뀐 문장을 보고 다시 확인해 주세요.</div>
+      {% if row.decision.status != status_published %}
+      <div class="notice" style="margin:0"><span><b>미결정</b> — 다음 회의로 넘어간 안건이에요.</span></div>
       {% endif %}
-
-      {% if row.decision.status == status_published %}
-      <form method="post" style="margin:0">{% csrf_token %}
-        <input type="hidden" name="decision_id" value="{{ row.decision.id }}">
-        <div class="field" style="margin:0 0 8px">
-          <label for="comment_{{ row.decision.id }}">한 줄 의견 (선택, "달랐어요"에만 붙어요)</label>
-          <input type="text" id="comment_{{ row.decision.id }}" name="comment" maxlength="{{ comment_max }}"
-            value="{% if row.mine.comment %}{{ row.mine.comment }}{% endif %}" placeholder="예: 저는 다음 주 월요일로 들었어요">
-        </div>
-        <div class="row">
-          <button name="kind" value="{{ kind_ack }}" class="btn sm{% if row.mine.kind != kind_ack %} secondary{% endif %}">확인했어요</button>
-          <button name="kind" value="{{ kind_differ }}" class="btn sm{% if row.mine.kind != kind_differ %} secondary{% endif %}">제 이해와 달랐어요</button>
-        </div>
-      </form>
-      {% else %}
-      <div class="notice" style="margin:0"><span><b>미결정</b> — 다음 회의로 넘어간 안건이라 확인하지 않아도 돼요.</span></div>
-      {% endif %}
-    </li>
+    </section>
     {% endfor %}
-  </ul>
+  </div>
+  <div class="step-nav" id="step-nav" hidden>
+    <div class="step-move">
+      <button type="button" class="btn sm secondary" id="step-prev">‹ 이전</button>
+      <span class="step-counter" id="step-counter"></span>
+      <button type="button" class="btn sm secondary" id="step-next">다음 ›</button>
+    </div>
+  </div>
   {% else %}
-  <div class="empty">아직 공개된 결정이 없습니다. 진행자가 확정해서 공개하면 여기에 보여요.</div>
+  <div class="empty">아직 공개된 결정이 없습니다. 진행자가 확정해서 공개하면 여기에 보이고 알림이 가요.</div>
   {% endif %}
 </div>
+{% if rows %}{% include "meetalign/_decision_viewer.html" %}{% endif %}
 {% endblock %}

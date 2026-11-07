@@ -16,10 +16,10 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import NoReverseMatch, reverse
 from django.utils import timezone
 
-from . import decision_compiler, decision_status, services, tasks, views, whisper_worker
+from . import decision_compiler, services, tasks, views, whisper_worker
 from .models import (
     ChatMessage, Checkpoint, Decision, DecisionAgreement,
-    Interpretation, Meeting, Question, Recording, SttUsage, Team,
+    Interpretation, Meeting, Notification, Question, Recording, SttUsage, Team,
 )
 
 # 셸에 실행용 LLM/STT 환경변수가 설정돼 있어도 테스트가 실제 모델/API를 호출하지 않고 항상 같은 결과가
@@ -1947,32 +1947,39 @@ class DecisionParseTests(TestCase):
     def test_parse_items_reads_the_new_schema(self):
         raw = json.dumps([
             {"topic": self.TOPIC, "ambiguous": True, "why": "30일인지 90일인지 갈립니다",
-             "final": "무시되어야 한다", "candidates": self.CANDIDATES},
-            {"topic": "후보가 문자열", "ambiguous": True, "why": "x",
-             "candidates": ["문장만 왔다", "이것도"]},
+             "final": "무시되어야 한다", "evidence": "한 달 정도면 충분해요", "candidate": "민수가 30일로 바꾼다"},
             {"topic": "배포", "ambiguous": False, "final": "민수가 금요일까지 배포한다",
-             "evidence": "민수가 금요일까지 배포를 맡기로 했습니다."},
+             "evidence": "민수가 금요일까지 배포를 맡기로 했습니다.", "candidate": "무시되어야 한다"},
         ], ensure_ascii=False)
         items = decision_compiler.parse_items(raw)
         self.assertEqual(items[0]["why"], "30일인지 90일인지 갈립니다")
-        self.assertEqual([c["text"] for c in items[0]["candidates"]],
-                         ["민수가 30일로 바꾼다", "민수가 90일로 바꾼다"])
-        # 모호 항목에 final이 함께 와도 후보만 쓴다 — 기준이 둘이 되지 않게.
+        # AI 추천 문장은 하나이고, 생성 문장에는 근거를 붙이지 않는다.
+        self.assertEqual(items[0]["candidates"], [{"text": "민수가 30일로 바꾼다", "evidence": "", "recommended": True}])
+        # 근거는 결정 하나에 하나다.
+        self.assertEqual(items[0]["evidence"], "한 달 정도면 충분해요")
+        # 모호 항목에 final이 함께 와도 추천 문장만 쓴다 — 기준이 둘이 되지 않게.
         self.assertEqual(items[0]["final"], "")
-        # 후보가 객체가 아니라 문자열로 오면 조용히 버린다(예외를 올리지 않는다).
         self.assertEqual(items[1]["candidates"], [])
-        self.assertEqual(items[2]["candidates"], [])
-        self.assertEqual(items[2]["final"], "민수가 금요일까지 배포한다")
-        self.assertEqual(items[2]["why"], "")
+        self.assertEqual(items[1]["final"], "민수가 금요일까지 배포한다")
+        self.assertEqual(items[1]["why"], "")
 
-    def test_parse_items_keeps_only_one_recommendation(self):
+    def test_parse_items_keeps_only_one_sentence_from_an_old_style_list(self):
+        """모델이 지시를 어기고 후보 여러 개를 보내도 하나만 남긴다 — 추천이 붙은 것이 먼저다."""
         raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
-            {"text": "첫째", "recommended": "true"},
-            {"text": "둘째", "recommended": True},
+            {"text": "첫째"}, {"text": "둘째", "recommended": True}, "셋째",
         ]}], ensure_ascii=False)
-        candidates = decision_compiler.parse_items(raw)[0]["candidates"]
-        # "true"·1 같은 비불리언도 참으로 보고, 추천은 처음 하나만 남긴다.
-        self.assertEqual([c["recommended"] for c in candidates], [True, False])
+        self.assertEqual([c["text"] for c in decision_compiler.parse_items(raw)[0]["candidates"]], ["둘째"])
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": ["문장만 왔다", "이것도"]}],
+                         ensure_ascii=False)
+        self.assertEqual([c["text"] for c in decision_compiler.parse_items(raw)[0]["candidates"]], ["문장만 왔다"])
+
+    def test_old_style_candidate_evidence_becomes_the_decisions_evidence(self):
+        source = "로그는 한 달 정도면 충분해요."
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
+            {"text": "첫째", "evidence": "회의에 없던 문장"},
+            {"text": "둘째", "evidence": "로그는 한 달 정도면 충분해요"},
+        ]}], ensure_ascii=False)
+        self.assertEqual(decision_compiler.parse_items(raw, source_text=source)[0]["evidence"], "로그는 한 달 정도면 충분해요")
 
     def test_parse_items_drops_items_without_a_topic(self):
         raw = json.dumps([{"topic": "", "ambiguous": False, "final": "문장"},
@@ -1996,7 +2003,7 @@ class DecisionParseTests(TestCase):
                           for i in range(30)], ensure_ascii=False)
         self.assertEqual(len(decision_compiler.parse_items(raw)), decision_compiler.MAX_DECISIONS)
 
-    def test_parse_items_drops_duplicate_candidates(self):
+    def test_parse_items_skips_blank_sentences(self):
         raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
             {"text": ""}, {"text": "같은 후보"}, {"text": "같은 후보"},
         ]}], ensure_ascii=False)
@@ -2041,23 +2048,21 @@ class DecisionParseTests(TestCase):
         self.assertEqual(len(decision_compiler.parse_items(raw)[0]["candidates"]),
                          decision_compiler.MAX_INTERPRETATIONS)
 
-    def test_parse_items_drops_a_candidate_whose_evidence_is_not_in_the_transcript(self):
+    def test_the_suggested_sentence_is_kept_even_if_the_evidence_is_not_in_the_transcript(self):
+        """생성한 문장은 근거 검증으로 버리지 않는다 — 원문에 없는 근거는 하이라이트만 못 할 뿐이다."""
         source = "민수가 금요일까지 배포를 맡기로 했습니다."
-        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
-            {"text": "남는다", "evidence": "민수가 금요일까지 배포를 맡기로 했습니다."},
-            {"text": "버려진다", "evidence": "회의에 없던 문장입니다."},
-        ]}], ensure_ascii=False)
-        items = decision_compiler.parse_items(raw, source_text=source)
-        self.assertEqual([c["text"] for c in items[0]["candidates"]], ["남는다"])
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x",
+                           "evidence": "회의에 없던 문장입니다.", "candidate": "남는다"}], ensure_ascii=False)
+        item = decision_compiler.parse_items(raw, source_text=source)[0]
+        self.assertEqual([c["text"] for c in item["candidates"]], ["남는다"])
+        self.assertEqual(item["evidence"], "")
 
-    def test_parse_items_matches_evidence_loosely_and_skips_blanks(self):
+    def test_parse_items_matches_evidence_loosely(self):
         source = "민수가 금요일까지 배포를 맡기로 했습니다."
-        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x", "candidates": [
-            {"text": "공백 무시", "evidence": "민수가  금요일까지\n배포를 맡기로"},
-            {"text": "근거 없음", "evidence": ""},
-        ]}], ensure_ascii=False)
-        items = decision_compiler.parse_items(raw, source_text=source)
-        self.assertEqual(len(items[0]["candidates"]), 2)
+        raw = json.dumps([{"topic": self.TOPIC, "ambiguous": True, "why": "x",
+                           "evidence": "민수가  금요일까지\n배포를 맡기로", "candidate": "공백 무시"}], ensure_ascii=False)
+        item = decision_compiler.parse_items(raw, source_text=source)[0]
+        self.assertEqual(item["evidence"], "민수가  금요일까지\n배포를 맡기로")
 
     def test_parse_items_requires_evidence_for_a_clear_item(self):
         """근거가 아예 없는 확정 문장은 검증을 건너뛰지 않고 비운다.
@@ -2084,10 +2089,8 @@ class DecisionParseTests(TestCase):
         """실제로 겪은 버그: 같은 안건을 문구만 살짝 바꿔 두 번 만들어내는 경우."""
         source = "새 기능은 적당히 빠르면 됩니다."
         raw = json.dumps([
-            {"topic": "새로 추가하는 기능", "ambiguous": True, "why": "x",
-             "candidates": [{"text": "이번 주 안에 완료", "evidence": source}]},
-            {"topic": "새로 추가하는 기능", "ambiguous": True, "why": "y",
-             "candidates": [{"text": "다음 주 안에 완료", "evidence": source}]},
+            {"topic": "새로 추가하는 기능", "ambiguous": True, "why": "x", "evidence": source, "candidate": "이번 주 안에 완료"},
+            {"topic": "새로 추가하는 기능", "ambiguous": True, "why": "y", "evidence": source, "candidate": "다음 주 안에 완료"},
         ], ensure_ascii=False)
         items = decision_compiler.parse_items(raw, source_text=source)
         self.assertEqual(len(items), 1)
@@ -2140,11 +2143,8 @@ class DecisionCompileTests(TestCase):
              "evidence": "배포 스크립트는 제가 금요일까지 정리할게요."}
     AMBIGUOUS = {"topic": "로그 보관 기간", "ambiguous": True,
                  "why": "30일인지 90일인지 갈립니다",
-                 "candidates": [{"text": "민수가 30일로 바꾼다",
-                                 "evidence": "로그는 일단 한 달 정도면 충분할 것 같은데요.",
-                                 "recommended": True},
-                                {"text": "민수가 90일로 바꾼다",
-                                 "evidence": "로그는 일단 한 달 정도면 충분할 것 같은데요."}]}
+                 "evidence": "로그는 일단 한 달 정도면 충분할 것 같은데요.",
+                 "candidate": "민수가 30일로 바꾼다"}
 
     def setUp(self):
         self.host = User.objects.create_user("host", password="pw12345!")
@@ -2203,9 +2203,10 @@ class DecisionCompileTests(TestCase):
         self.assertEqual(decision.divergence_reason, "30일인지 90일인지 갈립니다")
         self.assertEqual(decision.final_text, "")
         self.assertTrue(decision.blocks_publish)
-        self.assertEqual([i.text for i in decision.interpretations.all()],
-                         ["민수가 30일로 바꾼다", "민수가 90일로 바꾼다"])
-        self.assertEqual([i.recommended for i in decision.interpretations.all()], [True, False])
+        # AI가 가장 추천하는 문장 하나만, 근거 없이 저장된다. 근거는 결정에 붙는다.
+        self.assertEqual([(i.text, i.evidence, i.recommended) for i in decision.interpretations.all()],
+                         [("민수가 30일로 바꾼다", "", True)])
+        self.assertEqual(decision.evidence, "로그는 일단 한 달 정도면 충분할 것 같은데요.")
 
     # ---- 규칙 안전망의 승격 ----
 
@@ -2235,14 +2236,13 @@ class DecisionCompileTests(TestCase):
         이유와 규칙 사유가 모두 비면 has_warning이 False가 되어, AI가 갈린다고 본 항목이
         진행자 확인 없이 '그대로 공개될 결정'으로 분류된다.
         """
-        item = {"topic": "로그 보관 기간", "ambiguous": True,
-                "candidates": self.AMBIGUOUS["candidates"]}
+        item = {"topic": "로그 보관 기간", "ambiguous": True, "candidate": "민수가 30일로 바꾼다"}
         _, by_topic, _ = self._compiled(item)
         decision = by_topic["로그 보관 기간"]
         self.assertTrue(decision.divergence_reason)
         self.assertTrue(decision.has_warning)
         self.assertTrue(decision.blocks_publish)
-        self.assertEqual(decision.interpretations.count(), 2)
+        self.assertEqual(decision.interpretations.count(), 1)
 
     def test_compiling_twice_at_once_is_refused_not_crashed(self):
         """두 요청이 동시에 추출하면 사유를 보여준다 — 500이 아니라.
@@ -2263,9 +2263,7 @@ class DecisionCompileTests(TestCase):
         self.assertEqual([d.what for d in self.meeting.decisions.all()], ["먼저 저장된 결정"])
 
     def test_the_rules_do_not_scan_candidates_of_an_ambiguous_item(self):
-        item = dict(self.AMBIGUOUS, candidates=[
-            dict(self.AMBIGUOUS["candidates"][0], text="나중에 30일로 바꾼다"),
-            self.AMBIGUOUS["candidates"][1]])
+        item = dict(self.AMBIGUOUS, candidate="민수가 30일까지 50개로 바꾼다")
         _, by_topic, _ = self._compiled(item)
         decision = by_topic["로그 보관 기간"]
         self.assertEqual(decision.warnings, [])
@@ -2281,25 +2279,26 @@ class DecisionCompileTests(TestCase):
         self.assertTrue(decision.has_warning)
         self.assertTrue(decision.blocks_publish)
 
-    def test_an_ambiguous_item_loses_candidates_with_fabricated_evidence(self):
-        item = dict(self.AMBIGUOUS, candidates=[
-            {"text": "해석 1", "evidence": "회의에 없던 문장입니다."},
-            {"text": "해석 2", "evidence": "이것도 없습니다."}])
+    def test_an_ambiguous_item_keeps_its_sentence_even_with_fabricated_evidence(self):
+        item = dict(self.AMBIGUOUS, evidence="회의에 없던 문장입니다.")
         summary, by_topic, _ = self._compiled(item)
         self.assertEqual(summary["ambiguous"], 1)
+        self.assertEqual(summary["few_candidates"], 0)
+        decision = by_topic["로그 보관 기간"]
+        self.assertEqual(decision.interpretations.count(), 1)
+        self.assertEqual(decision.evidence, "")
+
+    def test_an_ambiguous_item_whose_only_sentence_is_vague_has_no_suggestion(self):
+        summary, by_topic, _ = self._compiled(dict(self.AMBIGUOUS, candidate="민수가 적당히 바꾼다"))
         self.assertEqual(summary["few_candidates"], 1)
         self.assertEqual(by_topic["로그 보관 기간"].interpretations.count(), 0)
 
     def test_one_broken_item_does_not_take_the_others_down(self):
-        broken = {"topic": "회의록 공유", "ambiguous": True, "why": "범위가 갈립니다",
-                  "candidates": [{"text": "A", "evidence": "회의에 없던 문장입니다."},
-                                 {"text": "B", "evidence": "이것도 없습니다."}]}
+        broken = {"topic": "회의록 공유", "ambiguous": True, "why": "범위가 갈립니다", "candidate": {"엉뚱한": "형식"}}
         summary, by_topic, _ = self._compiled(self.CLEAR, self.AMBIGUOUS, broken)
         self.assertEqual(summary["decisions"], 3)
         self.assertEqual(summary["few_candidates"], 1)
         self.assertEqual(by_topic["회의록 공유"].interpretations.count(), 0)
-        self.assertTrue(by_topic["배포 스크립트 정리"].final_text)
-        self.assertEqual(by_topic["로그 보관 기간"].interpretations.count(), 2)
 
     # ---- 상한 없음 ----
 
@@ -2351,19 +2350,18 @@ class DecisionCompileTests(TestCase):
         self.assertEqual(summary["decisions"], 3)
         self.assertEqual(summary["ambiguous"], 2)
         self.assertEqual(summary["few_candidates"], 0)
-        self.assertEqual(Interpretation.objects.filter(decision__meeting=self.meeting).count(), 4)
-        # 모호 항목마다 'AI 추천' 배지가 정확히 하나씩 붙는다.
+        # 모호 항목마다 AI 추천 문장이 정확히 하나씩 붙는다.
+        self.assertEqual(Interpretation.objects.filter(decision__meeting=self.meeting).count(), 2)
         self.assertEqual(
             Interpretation.objects.filter(decision__meeting=self.meeting, recommended=True).count(), 2)
 
-    def test_fake_mode_candidates_carry_evidence(self):
-        """가짜 모드도 '근거: …'가 보이도록 원문 인용을 담는다 — 시연에서 가장 중요한 칸이다."""
+    def test_fake_mode_decisions_carry_evidence(self):
+        """가짜 모드도 '원문: …'이 보이도록 결정마다 원문 인용을 담는다 — 시연에서 가장 중요한 칸이다."""
         with patch.dict(os.environ, {}, clear=True):
             decision_compiler.compile_meeting(self.meeting)
-        candidates = Interpretation.objects.filter(decision__meeting=self.meeting)
-        self.assertEqual(candidates.count(), 4)
-        for candidate in candidates:
-            self.assertTrue(candidate.evidence, candidate.text)
+        for decision in self.meeting.decisions.all():
+            self.assertTrue(decision.evidence, decision.what)
+        self.assertFalse(Interpretation.objects.filter(decision__meeting=self.meeting).exclude(evidence="").exists())
 
     def test_fake_mode_leaves_the_clear_item_ready_to_publish(self):
         with patch.dict(os.environ, {}, clear=True):
@@ -2382,25 +2380,31 @@ class DecisionCompileTests(TestCase):
         _, by_topic, _ = self._compiled(self.AMBIGUOUS)
         self.assertFalse(by_topic["로그 보관 기간"].marked_undecided)
 
-    def test_deferred_candidate_sets_undecided_by_default(self):
+    def test_deferred_evidence_sets_undecided_by_default(self):
         """'내일 다시 얘기' 같은 근거가 있으면 AI가 뭐라고 했든 '다음 회의로 넘김'을 기본값으로 건다."""
         source = "A안과 B안을 놓고 일단 둘 다 준비해보면서 내일 다시 얘기해보기로 했다."
         self.meeting.transcript = source
         self.meeting.save(update_fields=["transcript"])
         item = {
             "topic": "디자인 선택", "ambiguous": True, "why": "A안/B안 중 무엇을 고를지 아직 안 정해짐",
-            "candidates": [
-                {"text": "A안으로 진행한다", "evidence": source, "recommended": True},
-                {"text": "B안으로 진행한다", "evidence": source},
-            ],
+            "evidence": source, "candidate": "A안으로 진행한다",
         }
         _, by_topic, _ = self._compiled(item)
         decision = by_topic["디자인 선택"]
         self.assertTrue(decision.marked_undecided)
         self.assertEqual(decision.final_text, decision_compiler.undecided_sentence("디자인 선택"))
         self.assertEqual(decision.published_text, decision.final_text)
-        # 후보는 그대로 남겨 둬서 진행자가 보고 다시 고를 수 있다.
-        self.assertEqual(decision.interpretations.count(), 2)
+        # 추천 문장은 그대로 남겨 둬서 진행자가 보고 다시 고를 수 있다.
+        self.assertEqual(decision.interpretations.count(), 1)
+
+    def test_deferred_evidence_in_an_old_style_response_is_still_caught(self):
+        source = "A안과 B안을 놓고 일단 둘 다 준비해보면서 내일 다시 얘기해보기로 했다."
+        self.meeting.transcript = source
+        self.meeting.save(update_fields=["transcript"])
+        item = {"topic": "디자인 선택", "ambiguous": True, "why": "x",
+                "candidates": [{"text": "A안으로 진행한다", "evidence": source, "recommended": True}]}
+        _, by_topic, _ = self._compiled(item)
+        self.assertTrue(by_topic["디자인 선택"].marked_undecided)
 
     def test_clear_item_with_deferral_evidence_is_also_marked_undecided(self):
         source = "예산 건은 보류하고 다음에 다시 얘기하기로 했다."
@@ -2453,16 +2457,12 @@ class DecisionAmbiguityHintTests(TestCase):
         prompt = decision_compiler._compile_prompt("오늘 회의를 마칩니다.")
         self.assertNotIn("반드시 검토하라", prompt)
 
-    def test_looks_deferred_true_for_ambiguous_candidate_evidence(self):
-        item = {"ambiguous": True, "candidates": [
-            {"evidence": "일단 둘 다 준비해보고 내일 다시 얘기하자", "text": "x", "recommended": False},
-        ]}
+    def test_looks_deferred_true_for_ambiguous_item_evidence(self):
+        item = {"ambiguous": True, "evidence": "일단 둘 다 준비해보고 내일 다시 얘기하자", "candidates": []}
         self.assertTrue(decision_compiler._looks_deferred(item))
 
     def test_looks_deferred_false_without_deferral_phrase(self):
-        item = {"ambiguous": True, "candidates": [
-            {"evidence": "50개로 확정한다", "text": "x", "recommended": False},
-        ]}
+        item = {"ambiguous": True, "evidence": "50개로 확정한다", "candidates": []}
         self.assertFalse(decision_compiler._looks_deferred(item))
 
     def test_looks_deferred_checks_evidence_for_clear_items_too(self):
@@ -2722,19 +2722,20 @@ class DecisionReviewTests(TestCase):
             badge = 'data-unsettled-for="choice_%d"' % decision.id
             if decision.blocks_publish:
                 self.assertIn(badge, html, decision.what)
-        self.assertIn("disabled", html)
+        # 고르지 않은 항목이 있어도 공개 버튼은 눌린다 — 공개하면 그 항목이 빠진다.
+        self.assertNotIn('id="publish-btn" disabled', html)
 
     def test_the_publish_confirmation_says_how_to_undo(self):
         """공개 후에도 되돌릴 길이 있다 — 확인창이 그렇게 말해야 한다.
 
-        팀원이 확인하기 전에는 '공개 취소'로 draft로 내릴 수 있고, 그 뒤에는 항목별로
-        '확정 문장 수정'을 쓸 수 있다.
+        공개하면 참석자에게 알림이 가고, '공개 취소'로 draft로 내릴 수 있다. 고르지 않아 빠지는
+        항목은 되돌릴 수 없으니 확인창이 그 수를 함께 말한다.
         """
         self._compile()
         html = self.client.get(self.url).content.decode()
-        self.assertIn("팀원이 확인하기 전에는", html)
-        self.assertIn("되돌릴 수 있고, 그 뒤에는 항목별로 문장을 고칠 수 있어요", html)
-        self.assertNotIn("공개 후에는 선택을 되돌릴 수 없습니다", html)
+        self.assertIn("참석자에게 알림이 가고", html)
+        self.assertIn("'공개 취소'로 공개는 되돌릴 수 있어요", html)
+        self.assertIn("고르지 않은", html)
 
     def test_the_screen_marks_rows_and_the_header_for_live_updates(self):
         """'미확정' 배지와 상단 '처리 안 한 항목' 수도 저장 전에 갱신할 수 있게 표시를 남긴다."""
@@ -2782,17 +2783,31 @@ class DecisionReviewTests(TestCase):
         for number in ("1", "2", "3"):
             self.assertIn('<span class="item-icon">%s</span>' % number, html)
 
+    def test_save_and_publish_live_in_the_fixed_button_bar(self):
+        """저장·공개 버튼은 화면 아래 고정 줄 안에 있고 form 속성으로 폼에 묶인다(스크립트가 줄을 body로 옮긴다)."""
+        self._compile()
+        html = self.client.get(self.url).content.decode()
+        bar = html[html.index('id="step-nav"'):html.index('id="blocker-help"')]
+        self.assertIn('value="save" form="decision-form"', bar)
+        self.assertIn('value="publish" form="decision-form"', bar)
+        self.assertIn('id="decision-form"', html)
+
+    def test_card_animation_does_not_leave_a_transform_behind(self):
+        """fill-mode가 both면 끝난 뒤에도 transform이 남아 카드 안의 position:fixed가 카드 기준이 된다."""
+        html = self.client.get(self.url).content.decode()
+        self.assertNotIn("fadeInUp .5s cubic-bezier(.16,1,.3,1) both", html)
+
     def test_the_intro_line_describes_the_new_flow(self):
         self.assertContains(
             self.client.get(self.url),
-            "회의에서 다르게 이해할 수 있는 결정을 AI가 찾아 문장 후보를 보여줍니다.",
+            "회의에서 다르게 이해할 수 있는 결정을 AI가 찾아 추천 문장을 보여줍니다.",
         )
 
     def test_an_old_draft_without_a_sentence_is_shown_as_needing_the_host(self):
-        """0022 이전에 만들어진 무경고 draft(문장 없음)는 공개를 막고 '확인 필요'로 보인다.
+        """0022 이전에 만들어진 무경고 draft(문장 없음)는 '확인 필요'로 보이고, 고르지 않으면 공개 때 빠진다.
 
-        화면의 판정과 서버의 거부가 어긋나면, 진행자는 "처리 안 한 항목 0개"를 보면서 공개가
-        막히는 이유를 찾을 수 없다.
+        화면의 판정과 서버의 처리가 어긋나면, 진행자는 "고르지 않은 항목 0개"를 보면서 항목이
+        사라지는 이유를 찾을 수 없다.
         """
         self._compile()
         old = Decision.objects.create(
@@ -2804,7 +2819,7 @@ class DecisionReviewTests(TestCase):
         self.assertTrue(next(row for row in r.context["rows"]
                              if row["decision"].id == old.id)["blocking"])
         self.assertGreaterEqual(r.context["blocker_count"], 1)
-        self.assertFalse(r.context["can_publish"])
+        self.assertTrue(r.context["can_publish"])
 
     def test_the_server_ignores_posted_spec_edits(self):
         """화면에서 칸을 없앴으니 서버도 그 값을 받지 않는다."""
@@ -2974,8 +2989,12 @@ class DecisionCarryoverTests(TestCase):
         self.assertEqual(self._login(self.host).post(url).status_code, 404)
 
     def test_carryover_banner_never_shows_who_voted(self):
-        r = self._login(self.host).get(self.detail_url)
-        self.assertNotContains(r, self.member.username)
+        # 진행자 화면에는 참석자 칸이 있어 팀원 이름이 나온다 — 이월 안건 배너 안만 본다.
+        html = self._login(self.host).get(self.detail_url).content.decode()
+        start = html.index("지난 회의 미결정 안건")
+        banner = html[start:html.index("</ul>", start)]
+        self.assertIn("처리됨", banner)
+        self.assertNotIn(self.member.username, banner)
 
 
 class DecisionModelTests(TestCase):
@@ -3274,7 +3293,7 @@ class DecisionConfirmTests(TestCase):
 
     def test_choosing_a_candidate_copies_its_text_into_final_text(self):
         decision = self.warned[0]
-        candidate = decision.interpretations.all()[1]
+        candidate = decision.interpretations.get()
         self.client.post(self.url, {
             "action": "save", "choice_%d" % decision.id: self._candidate_value(candidate),
         })
@@ -3282,6 +3301,15 @@ class DecisionConfirmTests(TestCase):
         self.assertEqual(decision.final_text, candidate.text)
         self.assertFalse(decision.marked_undecided)
         self.assertFalse(decision.blocks_publish)
+
+    def test_each_warned_item_offers_exactly_one_ai_sentence(self):
+        html = self.client.get(self.url).content.decode()
+        for decision in self.warned:
+            self.assertEqual(decision.interpretations.count(), 1, decision.what)
+            radios = re.findall(r'name="choice_%d" value="%s\d+"' % (decision.id, decision_compiler.CHOICE_CANDIDATE_PREFIX), html)
+            self.assertEqual(len(radios), 1, decision.what)
+        # 생성 문장에는 근거를 붙이지 않는다 — 후보마다 '근거:' 줄이 없다.
+        self.assertNotIn("근거: &quot;", html)
 
     def test_the_chosen_text_is_a_snapshot_not_a_live_link(self):
         """고른 시점의 문장을 복사해 둔다 — 후보가 나중에 바뀌어도 확정 내용은 그대로다."""
@@ -3299,7 +3327,7 @@ class DecisionConfirmTests(TestCase):
 
     def test_the_review_screen_shows_which_option_is_chosen(self):
         decision = self.warned[0]
-        candidate = decision.interpretations.all()[1]
+        candidate = decision.interpretations.get()
         self.client.post(self.url, {
             "action": "save", "choice_%d" % decision.id: self._candidate_value(candidate),
         })
@@ -3518,9 +3546,36 @@ class DecisionConfirmTests(TestCase):
     def test_items_without_warnings_are_ready_with_no_choice(self):
         plain = self.plain[0]
         self.assertFalse(plain.blocks_publish)
-        row = next(r for r in self.client.get(self.url).context["rows"] if r["decision"].id == plain.id)
+        r = self.client.get(self.url)
+        row = next(r for r in r.context["rows"] if r["decision"].id == plain.id)
         self.assertFalse(row["blocking"])
-        self.assertContains(self.client.get(self.url), "기본값으로 그대로 공개돼요")
+        # '직접 쓰기' 칸이 접히지 않고 보이며, AI가 쓴 문장이 미리 들어 있다.
+        self.assertContains(r, "이 칸의 문장이 그대로 공개돼요")
+        self.assertContains(r, 'name="custom_text_%d" value="%s"' % (plain.id, plain.final_text))
+
+    def test_editing_the_box_of_a_clear_item_changes_what_is_published(self):
+        """그대로 공개 항목은 라디오를 누르지 않아도 '직접 쓰기' 칸의 문장으로 공개된다."""
+        plain = self.plain[0]
+        self.client.post(self.url, {"action": "save", "custom_text_%d" % plain.id: "  고친 문장으로 공개한다 "})
+        plain.refresh_from_db()
+        self.assertEqual(plain.final_text, "고친 문장으로 공개한다")
+        self.assertFalse(plain.has_warning)
+
+    def test_an_emptied_box_keeps_the_ai_sentence(self):
+        plain = self.plain[0]
+        original = plain.final_text
+        self.client.post(self.url, {"action": "save", "custom_text_%d" % plain.id: "   "})
+        plain.refresh_from_db()
+        self.assertEqual(plain.final_text, original)
+
+    def test_a_clear_item_can_still_be_carried_or_dropped(self):
+        plain = self.plain[0]
+        self.client.post(self.url, {
+            "action": "save", "choice_%d" % plain.id: decision_compiler.CHOICE_UNDECIDED,
+            "custom_text_%d" % plain.id: "무시된다",
+        })
+        plain.refresh_from_db()
+        self.assertTrue(plain.marked_undecided)
 
     def test_non_host_cannot_confirm(self):
         client = Client()
@@ -3534,7 +3589,7 @@ class DecisionConfirmTests(TestCase):
 
 
 class DecisionPublishTests(TestCase):
-    """④ 확정된 결정 공개 — 경고 항목을 전부 확정해야 공개할 수 있다."""
+    """④ 확정 문장 공개 — 모든 항목을 고르지 않아도 공개할 수 있고, 고르지 않은 확인 필요 항목은 빠진다."""
 
     def setUp(self):
         self.host = User.objects.create_user("hostuser", password="pw12345!")
@@ -3566,32 +3621,52 @@ class DecisionPublishTests(TestCase):
         for decision in self.warned:
             self._confirm(decision)
 
-    # ---- 공개 차단 ----
+    # ---- 고르지 않은 항목 ----
 
-    def test_publish_button_is_disabled_until_every_warned_item_is_confirmed(self):
-        r = self.client.get(self.url)
-        self.assertFalse(r.context["can_publish"])
-        self.assertEqual(r.context["blocker_count"], 2)
-        self.assertContains(r, "disabled")
-        self._confirm(self.warned[0])
-        r = self.client.get(self.url)
-        self.assertFalse(r.context["can_publish"])
-        self.assertEqual(r.context["blocker_count"], 1)
-        self._confirm(self.warned[1])
+    def test_publish_button_works_before_every_warned_item_is_confirmed(self):
         r = self.client.get(self.url)
         self.assertTrue(r.context["can_publish"])
-        self.assertEqual(r.context["blocker_count"], 0)
+        self.assertEqual(r.context["blocker_count"], 2)
+        self.assertContains(r, "공개하면 빠져요")
+        self._confirm(self.warned[0])
+        self.assertEqual(self.client.get(self.url).context["blocker_count"], 1)
 
-    def test_the_server_refuses_publishing_too(self):
-        r = self.client.post(self.url, {"action": "publish"})
-        self.assertContains(r, "아직 확정하지 않은 항목이 2개 있습니다")
-        self.assertFalse(self.meeting.decisions.exclude(status=Decision.STATUS_DRAFT).exists())
-
-    def test_one_unconfirmed_item_blocks_the_whole_publish(self):
+    def test_unchosen_warned_items_are_dropped_when_publishing(self):
         self._confirm(self.warned[0])
         r = self.client.post(self.url, {"action": "publish"})
-        self.assertContains(r, "아직 확정하지 않은 항목이 1개 있습니다")
+        self.assertRedirects(r, self.url)
+        self.assertFalse(Decision.objects.filter(pk=self.warned[1].pk).exists())
+        self.assertEqual(
+            set(self.meeting.decisions.values_list("pk", flat=True)), {self.warned[0].pk, self.plain[0].pk})
+        self.assertFalse(self.meeting.decisions.filter(status=Decision.STATUS_DRAFT).exists())
+
+    def test_saving_does_not_drop_unchosen_items(self):
+        self.client.post(self.url, {"action": "save"})
+        self.assertEqual(self.meeting.decisions.count(), 3)
+
+    def test_a_carried_item_is_not_dropped(self):
+        self._confirm(self.warned[0], decision_compiler.CHOICE_UNDECIDED)
+        self.client.post(self.url, {"action": "publish"})
+        self.assertEqual(Decision.objects.get(pk=self.warned[0].pk).status, Decision.STATUS_UNDECIDED)
+        self.assertFalse(Decision.objects.filter(pk=self.warned[1].pk).exists())
+
+    def test_publishing_refuses_when_nothing_would_be_left(self):
+        """고르지 않아 빠지는 것까지 합쳐 공개할 항목이 하나도 남지 않으면 빼지 않고 사유를 보여준다."""
+        self.plain[0].delete()
+        r = self.client.post(self.url, {"action": "publish"})
+        self.assertContains(r, "고른 결정이 하나도 없어")
+        self.assertEqual(self.meeting.decisions.count(), 2)
         self.assertFalse(self.meeting.decisions.exclude(status=Decision.STATUS_DRAFT).exists())
+
+    def test_an_invalid_choice_keeps_unchosen_items(self):
+        """다른 항목의 선택이 잘못돼 공개가 실패하면, 고르지 않은 항목도 빼지 않는다(삭제는 되돌릴 수 없다)."""
+        r = self.client.post(self.url, {
+            "action": "publish",
+            "choice_%d" % self.warned[0].id: decision_compiler.CHOICE_CUSTOM,
+            "custom_text_%d" % self.warned[0].id: "",
+        })
+        self.assertContains(r, "한 줄 적어 주세요")
+        self.assertEqual(self.meeting.decisions.count(), 3)
 
     def test_publishing_with_nothing_in_draft_is_refused(self):
         self._confirm_all()
@@ -3599,12 +3674,10 @@ class DecisionPublishTests(TestCase):
         r = self.client.post(self.url, {"action": "publish"})
         self.assertContains(r, "공개할 항목이 없습니다")
 
-    def test_an_item_without_a_sentence_cannot_be_published(self):
-        """문장이 빈 항목은 어떤 경로로 들어왔든 공개를 막는다.
+    def test_an_item_without_a_sentence_is_never_published(self):
+        """문장이 빈 항목은 어떤 경로로 들어왔든 공개되지 않는다 — 고르지 않았으면 공개 때 빠진다.
 
         팀원 화면은 final_text 하나만 보여주므로, 문장이 없으면 번호만 있는 빈 줄이 공개된다.
-        AI가 모호 판정을 하면서 이유를 비워 보내거나, 이번 재설계 전에 만들어진 무경고
-        draft가 그대로 공개로 넘어가면 그 상태가 된다.
         """
         self._confirm_all()
         blank = Decision.objects.create(
@@ -3613,10 +3686,9 @@ class DecisionPublishTests(TestCase):
         )
         self.assertIn(blank, decision_compiler.publish_blockers(
             list(self.meeting.decisions.filter(status=Decision.STATUS_DRAFT))))
-        r = self.client.post(self.url, {"action": "publish"})
-        self.assertContains(r, "아직 확정하지 않은 항목")
-        blank.refresh_from_db()
-        self.assertEqual(blank.status, Decision.STATUS_DRAFT)
+        self.client.post(self.url, {"action": "publish"})
+        self.assertFalse(Decision.objects.filter(pk=blank.pk).exists())
+        self.assertFalse(self.meeting.decisions.filter(final_text="").exists())
 
     # ---- 공개 ----
 
@@ -3697,7 +3769,7 @@ class DecisionPublishTests(TestCase):
 
 
 class DecisionReviseTests(TestCase):
-    """공개 뒤 확정 문장을 고치면 그 항목의 팀원 확인 기록을 전부 지우고 다시 받는다."""
+    """공개 뒤 확정 문장을 고치면 '수정됨'으로 표시하고 팀원에게 수정 알림을 보낸다."""
 
     def setUp(self):
         self.host = User.objects.create_user("hostuser", password="pw12345!")
@@ -3721,70 +3793,58 @@ class DecisionReviseTests(TestCase):
         self.url = reverse("decision_review", args=[self.meeting.id])
         self.client.force_login(self.host)
 
-    def _ack(self, decision, user, kind=DecisionAgreement.KIND_ACK, comment=""):
-        return DecisionAgreement.objects.create(
-            decision=decision, user=user, kind=kind, comment=comment,
-        )
+    def _revise(self, decision, text):
+        return self.client.post(self.url, {"action": "revise", "decision_id": decision.id, "final_text": text})
 
-    def test_revising_clears_every_agreement_and_sets_the_revised_flag(self):
-        self._ack(self.decision, self.alice)
-        self._ack(self.decision, self.bob, DecisionAgreement.KIND_DIFFER, "저는 다음 주로 들었어요")
-        self.client.post(self.url, {
-            "action": "revise", "decision_id": self.decision.id, "final_text": "월요일 10시까지",
-        })
+    def test_revising_changes_the_sentence_and_sets_the_revised_flag(self):
+        self._revise(self.decision, "월요일 10시까지")
         self.decision.refresh_from_db()
         self.assertEqual(self.decision.final_text, "월요일 10시까지")
         self.assertTrue(self.decision.revised)
+
+    def test_revising_notifies_every_member_except_the_host(self):
+        self._revise(self.decision, "월요일 10시까지")
+        notes = Notification.objects.filter(meeting=self.meeting, kind=Notification.KIND_REVISED)
+        self.assertEqual(sorted(n.user.username for n in notes), ["aliceuser", "bobuser"])
+        self.assertTrue(all(n.is_unread for n in notes))
+
+    def test_revising_clears_leftover_agreements(self):
+        # 예전 '확인했어요' 기록은 바뀐 문장과 맞지 않으므로 함께 지운다.
+        DecisionAgreement.objects.create(decision=self.decision, user=self.alice)
+        self._revise(self.decision, "월요일 10시까지")
         self.assertEqual(self.decision.agreements.count(), 0)
 
     def test_revising_one_item_leaves_other_items_alone(self):
-        self._ack(self.decision, self.alice)
-        self._ack(self.other, self.alice)
-        self.client.post(self.url, {
-            "action": "revise", "decision_id": self.decision.id, "final_text": "월요일 10시까지",
-        })
+        self._revise(self.decision, "월요일 10시까지")
         self.other.refresh_from_db()
-        self.assertEqual(self.other.agreements.count(), 1)
         self.assertFalse(self.other.revised)
+        self.assertEqual(self.other.final_text, "다음 주 수요일까지")
 
-    def test_revising_with_the_same_sentence_keeps_the_agreements(self):
-        self._ack(self.decision, self.alice)
-        self.client.post(self.url, {
-            "action": "revise", "decision_id": self.decision.id,
-            "final_text": self.decision.final_text,
-        })
+    def test_revising_with_the_same_sentence_changes_nothing(self):
+        self._revise(self.decision, self.decision.final_text)
         self.decision.refresh_from_db()
-        self.assertEqual(self.decision.agreements.count(), 1)
         self.assertFalse(self.decision.revised)
+        self.assertFalse(Notification.objects.exists())
 
     def test_revising_requires_a_sentence(self):
-        self._ack(self.decision, self.alice)
-        r = self.client.post(self.url, {
-            "action": "revise", "decision_id": self.decision.id, "final_text": "   ",
-        })
+        r = self._revise(self.decision, "   ")
         self.assertContains(r, "한 줄 적어 주세요")
         self.decision.refresh_from_db()
         self.assertEqual(self.decision.final_text, "금요일 18시까지 스테이징 배포")
-        self.assertEqual(self.decision.agreements.count(), 1)
+        self.assertFalse(Notification.objects.exists())
 
     def test_revising_a_draft_item_is_refused(self):
         draft = Decision.objects.create(
             meeting=self.meeting, order=2, what="검토 중", warnings=["담당자 빈칸"],
             status=Decision.STATUS_DRAFT, final_text="초안 문장",
         )
-        r = self.client.post(self.url, {
-            "action": "revise", "decision_id": draft.id, "final_text": "바꾼 문장",
-        })
-        self.assertEqual(r.status_code, 404)
+        self.assertEqual(self._revise(draft, "바꾼 문장").status_code, 404)
         draft.refresh_from_db()
         self.assertEqual(draft.final_text, "초안 문장")
 
     def test_revising_an_undecided_item_is_refused(self):
         Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_UNDECIDED)
-        r = self.client.post(self.url, {
-            "action": "revise", "decision_id": self.decision.id, "final_text": "바꾼 문장",
-        })
-        self.assertEqual(r.status_code, 404)
+        self.assertEqual(self._revise(self.decision, "바꾼 문장").status_code, 404)
 
     def test_revising_an_item_from_another_meeting_is_refused(self):
         other_meeting = Meeting.objects.create(
@@ -3794,10 +3854,7 @@ class DecisionReviseTests(TestCase):
             meeting=other_meeting, order=0, what="남의 회의",
             status=Decision.STATUS_PUBLISHED, final_text="남의 문장",
         )
-        r = self.client.post(self.url, {
-            "action": "revise", "decision_id": stranger.id, "final_text": "바꾼 문장",
-        })
-        self.assertEqual(r.status_code, 404)
+        self.assertEqual(self._revise(stranger, "바꾼 문장").status_code, 404)
 
     def test_non_host_cannot_revise(self):
         client = Client()
@@ -3810,45 +3867,25 @@ class DecisionReviseTests(TestCase):
         self.assertEqual(self.decision.final_text, "금요일 18시까지 스테이징 배포")
 
     def test_the_review_screen_offers_the_revise_form_only_after_publishing(self):
-        r = self.client.get(self.url)
-        self.assertContains(r, "확정 문장 수정")
+        self.assertContains(self.client.get(self.url), "확정 문장 수정")
         Decision.objects.filter(meeting=self.meeting).update(status=Decision.STATUS_DRAFT)
         self.assertNotContains(self.client.get(self.url), "확정 문장 수정")
 
     def test_the_review_screen_marks_a_revised_item(self):
-        self.client.post(self.url, {
-            "action": "revise", "decision_id": self.decision.id, "final_text": "월요일 10시까지",
-        })
-        self.assertContains(self.client.get(self.url), "팀원에게 다시 확인 요청 중")
+        self._revise(self.decision, "월요일 10시까지")
+        self.assertContains(self.client.get(self.url), "팀원에게 알림을 보냈어요")
 
-    def test_the_review_screen_never_prints_who_acknowledged(self):
-        # 공개 항목 전부를 확인한 사람은 미확인 명단에서 빠지므로 이름이 아예 나오지 않는다.
-        # bob의 의견은 화면에 남지만 작성자와 연결되지 않는다.
-        for decision in (self.decision, self.other):
-            self._ack(decision, self.alice)
-            self._ack(decision, self.bob, DecisionAgreement.KIND_DIFFER, "저는 달랐어요")
+    def test_the_review_screen_shows_no_member_tally(self):
+        # 팀원 확인을 받지 않으므로 미확인 명단·응답 집계가 화면에 없다.
         r = self.client.get(self.url)
-        self.assertContains(r, "저는 달랐어요")
+        self.assertNotContains(r, "아직 확인하지 않은 팀원")
+        self.assertNotContains(r, "명 응답")
         for name in (self.alice.username, self.bob.username):
             self.assertNotContains(r, name)
 
-    def test_the_review_screen_names_partly_finished_members_without_their_choice(self):
-        # 부분 응답 — alice만 '달랐어요'를 골랐다. 명단에서 alice가 유일한 응답자(1/2)로
-        # 드러나지만, 그 선택이 무엇인지는 어디에도 없어야 한다.
-        self._ack(self.decision, self.alice, DecisionAgreement.KIND_DIFFER, "저는 다음 주로 들었어요")
-        r = self.client.get(self.url)
-        self.assertEqual(
-            [(row["name"], row["acked"]) for row in r.context["pending_rows"]],
-            [("aliceuser", 1), ("bobuser", 0)],
-        )
-        # 두 항목 모두 아직 전원이 응답하지 않았으므로 숫자와 의견이 담기지 않는다.
-        self.assertEqual([row["ack"] for row in r.context["rows"]], [None, None])
-        self.assertNotContains(r, "/ 달랐어요")
-        self.assertNotContains(r, "저는 다음 주로 들었어요")
-
 
 class DecisionUnpublishTests(TestCase):
-    """공개 취소 — 잘못 누른 공개를 수습하는 통로. 팀원 확인이 하나라도 있으면 막는다."""
+    """공개 취소 — 잘못 누른 공개를 수습하는 통로. 팀원 확인을 받지 않으므로 언제든 된다."""
 
     def setUp(self):
         self.host = User.objects.create_user("hostuser", password="pw12345!")
@@ -3897,13 +3934,23 @@ class DecisionUnpublishTests(TestCase):
         self.decision.refresh_from_db()
         self.assertFalse(self.decision.revised)
 
-    def test_unpublishing_is_refused_once_a_member_has_confirmed(self):
-        DecisionAgreement.objects.create(decision=self.decision, user=self.member)
-        r = self.client.post(self.url, {"action": "unpublish"})
-        self.assertContains(r, "공개를 취소할 수 없습니다")
+    def test_unpublishing_works_even_after_members_have_looked(self):
+        Notification.objects.create(
+            user=self.member, meeting=self.meeting, kind=Notification.KIND_PUBLISHED,
+            message="공개됨", read_at=timezone.now(),
+        )
+        self.client.post(self.url, {"action": "unpublish"})
         self.decision.refresh_from_db()
-        self.assertEqual(self.decision.status, Decision.STATUS_PUBLISHED)
-        self.assertFalse(self.client.get(self.url).context["can_unpublish"])
+        self.assertEqual(self.decision.status, Decision.STATUS_DRAFT)
+
+    def test_unpublishing_withdraws_unread_notifications(self):
+        Notification.objects.create(user=self.member, meeting=self.meeting, kind=Notification.KIND_PUBLISHED, message="공개됨")
+        read = Notification.objects.create(
+            user=self.member, meeting=self.meeting, kind=Notification.KIND_PUBLISHED,
+            message="예전 공개", read_at=timezone.now(),
+        )
+        self.client.post(self.url, {"action": "unpublish"})
+        self.assertEqual(list(Notification.objects.all()), [read])
 
     def test_the_button_is_hidden_while_still_in_draft(self):
         Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)
@@ -3932,7 +3979,9 @@ class DecisionUnpublishTests(TestCase):
 
 
 class DecisionAckTests(TestCase):
-    """팀원 확인 화면(decision_ack)과 진행자 화면의 확인 집계."""
+    """팀원 화면(decision_ack) — 공개된 결정을 읽기만 하고, 근거가 된 전사 원문 위치를 받는다."""
+
+    TRANSCRIPT = "회의 시작할게요. 민수가 금요일까지 배포를 맡기로 했습니다. 문서는 다음 주에 보기로 해요."
 
     def setUp(self):
         self.host = User.objects.create_user("hostuser", password="pw12345!")
@@ -3942,7 +3991,7 @@ class DecisionAckTests(TestCase):
         self.team.members.add(self.host, self.alice, self.bob)
         self.meeting = Meeting.objects.create(
             team=self.team, title="m", host=self.host,
-            processing_status=Meeting.STATUS_DONE, record="결정", transcript="전사",
+            processing_status=Meeting.STATUS_DONE, record="결정", transcript=self.TRANSCRIPT,
         )
         self.decision = Decision.objects.create(
             meeting=self.meeting, order=0, who="민수", what="배포",
@@ -3956,11 +4005,19 @@ class DecisionAckTests(TestCase):
         client.force_login(user)
         return client
 
-    def _post(self, user, decision, kind, comment=""):
-        return self._as(user).post(self.url, {"decision_id": decision.id, "kind": kind, "comment": comment})
-
     def test_member_sees_the_published_text(self):
         self.assertContains(self._as(self.alice).get(self.url), "금요일 18시까지 스테이징 배포")
+
+    def test_the_screen_is_read_only(self):
+        r = self._as(self.alice).get(self.url)
+        self.assertNotContains(r, "확인했어요")
+        self.assertNotContains(r, "제 이해와 달랐어요")
+        self.assertNotContains(r, '<form method="post"')
+
+    def test_posting_changes_nothing(self):
+        r = self._as(self.alice).post(self.url, {"decision_id": self.decision.id, "kind": "ack"})
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(DecisionAgreement.objects.exists())
 
     def test_draft_items_are_not_in_the_member_response_before_publishing(self):
         Decision.objects.create(
@@ -3978,53 +4035,48 @@ class DecisionAckTests(TestCase):
         self.assertNotContains(r, "금요일 18시까지 스테이징 배포")
         self.assertContains(r, "아직 공개된 결정이 없습니다")
 
-    def test_ack_is_saved_and_can_be_changed_to_differ(self):
-        self._post(self.alice, self.decision, DecisionAgreement.KIND_ACK)
-        self._post(self.alice, self.decision, DecisionAgreement.KIND_DIFFER, "저는 다음 주로 들었어요")
-        agreement = DecisionAgreement.objects.get(decision=self.decision, user=self.alice)
-        self.assertEqual(agreement.kind, DecisionAgreement.KIND_DIFFER)
-        self.assertEqual(agreement.comment, "저는 다음 주로 들었어요")
-
-    def test_switching_back_to_ack_drops_the_comment(self):
-        self._post(self.alice, self.decision, DecisionAgreement.KIND_DIFFER, "저는 다음 주로 들었어요")
-        self._post(self.alice, self.decision, DecisionAgreement.KIND_ACK, "남은 의견")
-        agreement = DecisionAgreement.objects.get(decision=self.decision, user=self.alice)
-        self.assertEqual(agreement.kind, DecisionAgreement.KIND_ACK)
-        self.assertEqual(agreement.comment, "")
-
-    def test_comment_is_one_line_and_capped(self):
-        self._post(self.alice, self.decision, DecisionAgreement.KIND_DIFFER, "첫 줄\n둘째 줄  " + "가" * 500)
-        comment = DecisionAgreement.objects.get(decision=self.decision, user=self.alice).comment
-        self.assertNotIn("\n", comment)
-        self.assertEqual(len(comment), 200)
-
-    def test_unknown_kind_is_ignored(self):
-        self._post(self.alice, self.decision, "maybe")
-        self.assertFalse(DecisionAgreement.objects.exists())
-
-    def test_undecided_items_are_read_only(self):
-        undecided = Decision.objects.create(
-            meeting=self.meeting, order=1, what="미정 안건", status=Decision.STATUS_UNDECIDED, marked_undecided=True,
+    def test_undecided_items_are_shown_as_carried_over(self):
+        Decision.objects.create(
+            meeting=self.meeting, order=1, what="미정 안건", status=Decision.STATUS_UNDECIDED,
+            marked_undecided=True, final_text="미정 안건은 다음 회의에서 다시 정한다",
         )
-        r = self._post(self.alice, undecided, DecisionAgreement.KIND_ACK)
-        self.assertEqual(r.status_code, 404)
-        self.assertFalse(DecisionAgreement.objects.filter(decision=undecided).exists())
-        page = self._as(self.alice).get(self.url)
-        self.assertContains(page, "미결정")
-        self.assertNotContains(page, 'value="%d"' % undecided.id)
+        self.assertContains(self._as(self.alice).get(self.url), "미결정")
 
-    def test_draft_items_cannot_be_acked(self):
-        Decision.objects.filter(pk=self.decision.pk).update(status=Decision.STATUS_DRAFT)
-        self.assertEqual(self._post(self.alice, self.decision, DecisionAgreement.KIND_ACK).status_code, 404)
-
-    def test_revised_notice_shows_until_the_member_acks_again(self):
+    def test_revised_items_are_marked(self):
+        self.assertNotContains(self._as(self.alice).get(self.url), "수정됨")
         Decision.objects.filter(pk=self.decision.pk).update(revised=True)
-        self.assertContains(self._as(self.alice).get(self.url), "내용이 수정되었어요")
-        self._post(self.alice, self.decision, DecisionAgreement.KIND_ACK)
-        self.assertNotContains(self._as(self.alice).get(self.url), "내용이 수정되었어요")
+        self.assertContains(self._as(self.alice).get(self.url), "수정됨")
 
-    def test_unrevised_item_shows_no_notice(self):
-        self.assertNotContains(self._as(self.alice).get(self.url), "내용이 수정되었어요")
+    def test_items_are_shown_one_at_a_time_with_prev_next(self):
+        r = self._as(self.alice).get(self.url)
+        self.assertContains(r, 'class="decision-step item" data-decision-id="%d"' % self.decision.id)
+        self.assertContains(r, 'id="step-prev"')
+        self.assertContains(r, 'id="step-next"')
+        self.assertContains(r, 'id="transcript-panel"')
+
+    def test_the_chosen_candidates_evidence_is_highlighted(self):
+        evidence = "민수가 금요일까지 배포를 맡기로 했습니다."
+        Interpretation.objects.create(decision=self.decision, order=0, text="다른 후보", evidence="문서는 다음 주에 보기로 해요.")
+        Interpretation.objects.create(decision=self.decision, order=1, text=self.decision.final_text, evidence=evidence)
+        spans = self._as(self.alice).get(self.url).context["evidence_data"][str(self.decision.id)]
+        self.assertEqual(len(spans), 1)
+        # 하이라이트는 근거의 마지막 글자에서 끝난다(문장부호는 대조에서 빠진다).
+        self.assertEqual(self.TRANSCRIPT[spans[0]["start"]:spans[0]["end"]], evidence.rstrip("."))
+
+    def test_a_clear_decisions_stored_evidence_is_highlighted(self):
+        Decision.objects.filter(pk=self.decision.pk).update(evidence="문서는 다음 주에 보기로 해요")
+        spans = self._as(self.alice).get(self.url).context["evidence_data"][str(self.decision.id)]
+        self.assertEqual(self.TRANSCRIPT[spans[0]["start"]:spans[0]["end"]], "문서는 다음 주에 보기로 해요")
+
+    def test_opening_the_screen_deletes_this_meetings_notifications(self):
+        other_meeting = Meeting.objects.create(team=self.team, title="m2", host=self.host, processing_status=Meeting.STATUS_DONE)
+        mine = Notification.objects.create(user=self.alice, meeting=self.meeting, kind=Notification.KIND_PUBLISHED, message="공개")
+        elsewhere = Notification.objects.create(user=self.alice, meeting=other_meeting, kind=Notification.KIND_PUBLISHED, message="공개")
+        bobs = Notification.objects.create(user=self.bob, meeting=self.meeting, kind=Notification.KIND_PUBLISHED, message="공개")
+        self._as(self.alice).get(self.url)
+        self.assertFalse(Notification.objects.filter(pk=mine.pk).exists())
+        self.assertTrue(Notification.objects.filter(pk=elsewhere.pk).exists())
+        self.assertTrue(Notification.objects.filter(pk=bobs.pk).exists())
 
     def test_host_is_sent_to_the_review_screen(self):
         self.assertRedirects(self._as(self.host).get(self.url), self.review_url)
@@ -4037,348 +4089,316 @@ class DecisionAckTests(TestCase):
         Meeting.objects.filter(pk=self.meeting.pk).update(processing_status=Meeting.STATUS_PROCESSING)
         self.assertEqual(self._as(self.alice).get(self.url).status_code, 404)
 
-    def test_host_sees_counts_and_comments_per_item(self):
-        self._post(self.alice, self.decision, DecisionAgreement.KIND_DIFFER, "저는 다음 주로 들었어요")
-        self._post(self.bob, self.decision, DecisionAgreement.KIND_ACK)
-        r = self._as(self.host).get(self.review_url)
-        self.assertContains(r, "확인 1명 / 달랐어요 1명")
-        self.assertContains(r, "저는 다음 주로 들었어요")
-
-    def test_no_screen_names_who_chose_differ(self):
-        self._post(self.alice, self.decision, DecisionAgreement.KIND_DIFFER, "저는 다음 주로 들었어요")
-        self._post(self.bob, self.decision, DecisionAgreement.KIND_ACK)
-        host_page = self._as(self.host).get(self.review_url)
-        bob_page = self._as(self.bob).get(self.url)
-        for page in (host_page, bob_page):
-            self.assertNotContains(page, self.alice.username)
-        # 다른 팀원의 의견이 팀원 화면에 새어 나가지도 않는다.
-        self.assertNotContains(bob_page, "저는 다음 주로 들었어요")
-
     def test_member_cannot_open_the_review_screen(self):
         self.assertEqual(self._as(self.alice).get(self.review_url).status_code, 403)
 
 
-class DecisionPendingTests(TestCase):
-    """결정 확인 미확인 명단(진행자 전용)과 팀 홈 배지(숫자만)."""
+class DecisionNotificationTests(TestCase):
+    """공개·수정 알림과 그 알림을 보여주는 세 곳 — 상단 메뉴 아이콘·알림 목록, 회의 목록 배지, 회의 화면 안내."""
 
     def setUp(self):
         self.host = User.objects.create_user("dechost", password="pw12345!")
         self.alpha = User.objects.create_user("dec-alpha", password="pw12345!")
         self.beta = User.objects.create_user("dec-beta", password="pw12345!")
-        self.gamma = User.objects.create_user("dec-gamma", password="pw12345!")
+        self.outsider = User.objects.create_user("outsider", password="pw12345!")
         self.team = Team.objects.create(name="t", created_by=self.host)
-        self.team.members.add(self.host, self.alpha, self.beta, self.gamma)
+        self.team.members.add(self.host, self.alpha, self.beta)
         self.meeting = Meeting.objects.create(
-            team=self.team, title="m", host=self.host,
+            team=self.team, title="첫 회의", host=self.host,
             processing_status=Meeting.STATUS_DONE, record="회의록", transcript="전사본",
         )
-        self.d1 = self._decision(order=0, status=Decision.STATUS_PUBLISHED)
-        self.d2 = self._decision(order=1, status=Decision.STATUS_PUBLISHED)
-        self.d3 = self._decision(order=2, status=Decision.STATUS_UNDECIDED)
+        self.decision = Decision.objects.create(
+            meeting=self.meeting, order=0, what="배포", final_text="금요일까지 배포한다",
+        )
+        self.review_url = reverse("decision_review", args=[self.meeting.id])
+
+    def _as(self, user):
+        client = Client()
+        client.force_login(user)
+        return client
+
+    def _publish(self):
+        return self._as(self.host).post(self.review_url, {"action": "publish"})
+
+    def test_publishing_notifies_members_but_not_the_host(self):
+        self._publish()
+        notes = Notification.objects.filter(meeting=self.meeting)
+        self.assertEqual(sorted(n.user.username for n in notes), ["dec-alpha", "dec-beta"])
+        self.assertTrue(all(n.kind == Notification.KIND_PUBLISHED for n in notes))
+        self.assertIn("첫 회의", notes[0].message)
+
+    def test_a_refused_publish_sends_nothing(self):
+        Decision.objects.filter(pk=self.decision.pk).update(final_text="", warnings=["모호"])
+        self._publish()
+        self.assertFalse(Notification.objects.exists())
+
+    def test_the_bell_counts_unread_notifications(self):
+        self._publish()
+        r = self._as(self.alpha).get(reverse("index"))
+        self.assertEqual(r.context["unread_notifications"], 1)
+        self.assertContains(r, 'class="notify-count">1<')
+        self.assertNotContains(self._as(self.host).get(reverse("index")), 'class="notify-count"')
+
+    def test_the_notification_list_links_to_the_decision_screen(self):
+        self._publish()
+        r = self._as(self.alpha).get(reverse("notification_list"))
+        self.assertContains(r, "첫 회의")
+        self.assertContains(r, reverse("decision_ack", args=[self.meeting.id]))
+        self.assertContains(r, "새 알림")
+
+    def test_read_all_clears_the_bell(self):
+        self._publish()
+        client = self._as(self.alpha)
+        client.post(reverse("notification_list"), {"action": "read_all"})
+        self.assertEqual(client.get(reverse("index")).context["unread_notifications"], 0)
+
+    def test_the_list_only_shows_my_own_notifications(self):
+        self._publish()
+        self.assertNotContains(self._as(self.outsider).get(reverse("notification_list")), "첫 회의")
+
+    def test_the_meeting_list_badges_meetings_with_unread_notifications(self):
+        self._publish()
+        r = self._as(self.alpha).get(reverse("meeting_list", args=[self.team.id]))
+        self.assertEqual([row["notice_label"] for row in r.context["rows"]], ["새 결정"])
+        self.assertContains(r, "새 결정")
+
+    def _revise(self, text):
+        return self._as(self.host).post(self.review_url, {
+            "action": "revise", "decision_id": self.decision.id, "final_text": text,
+        })
+
+    def test_a_revision_after_reading_shows_as_revised_in_the_meeting_list(self):
+        self._publish()
+        self._as(self.alpha).get(reverse("decision_ack", args=[self.meeting.id]))
+        self._revise("월요일까지 배포한다")
+        r = self._as(self.alpha).get(reverse("meeting_list", args=[self.team.id]))
+        self.assertEqual(r.context["rows"][0]["notice_label"], "수정됨")
+
+    def test_a_revision_before_reading_stays_a_new_decision(self):
+        # 아직 결정을 본 적이 없으면 바뀐 결정이 아니라 처음 보는 결정이다.
+        self._publish()
+        self._revise("월요일까지 배포한다")
+        r = self._as(self.alpha).get(reverse("meeting_list", args=[self.team.id]))
+        self.assertEqual(r.context["rows"][0]["notice_label"], "새 결정")
+
+    def test_repeated_revisions_keep_one_unread_notification_per_member(self):
+        self._publish()
+        first = Notification.objects.get(user=self.alpha)
+        Notification.objects.filter(pk=first.pk).update(created_at=timezone.now() - timedelta(hours=1))
+        self._revise("월요일까지 배포한다")
+        self._revise("화요일까지 배포한다")
+        notes = Notification.objects.filter(user=self.alpha, meeting=self.meeting)
+        self.assertEqual(notes.count(), 1)
+        self.assertGreater(notes.get().created_at, timezone.now() - timedelta(minutes=1))
+        self.assertEqual(self._as(self.alpha).get(reverse("index")).context["unread_notifications"], 1)
+
+    def test_revisions_after_reading_leave_one_new_notification(self):
+        self._publish()
+        self._as(self.alpha).get(reverse("decision_ack", args=[self.meeting.id]))
+        # 읽은 알림은 지워진다.
+        self.assertFalse(Notification.objects.filter(user=self.alpha).exists())
+        self._revise("월요일까지 배포한다")
+        self._revise("화요일까지 배포한다")
+        note = Notification.objects.get(user=self.alpha, meeting=self.meeting)
+        self.assertEqual(note.kind, Notification.KIND_REVISED)
+        self.assertTrue(note.is_unread)
+
+    def test_read_all_deletes_my_notifications_only(self):
+        self._publish()
+        self._as(self.alpha).post(reverse("notification_list"), {"action": "read_all"})
+        self.assertFalse(Notification.objects.filter(user=self.alpha).exists())
+        self.assertTrue(Notification.objects.filter(user=self.beta).exists())
+
+    def test_old_read_rows_are_not_listed(self):
+        Notification.objects.create(user=self.alpha, meeting=self.meeting, kind=Notification.KIND_PUBLISHED,
+                                    message="예전에 읽은 알림", read_at=timezone.now())
+        self.assertNotContains(self._as(self.alpha).get(reverse("notification_list")), "예전에 읽은 알림")
+
+    def test_republishing_after_reset_notifies_again(self):
+        """공개 → 공개 취소 → 결정 지우기 → 다시 컴파일 → 공개해도 참석자에게 알림이 간다."""
+        self._publish()
+        host = self._as(self.host)
+        host.post(self.review_url, {"action": "unpublish"})
+        self.assertFalse(Notification.objects.exists())
+        host.post(self.review_url, {"action": "reset"})
+        with patch.dict(os.environ, {}, clear=True):
+            host.post(self.review_url, {"action": "compile"})
+        host.post(self.review_url, {"action": "publish"})
+        self.assertEqual(sorted(n.user.username for n in Notification.objects.filter(kind=Notification.KIND_PUBLISHED)),
+                         ["dec-alpha", "dec-beta"])
+
+    def test_only_participants_are_notified(self):
+        self.meeting.participants.set([self.host, self.alpha])
+        self._publish()
+        self.assertEqual([n.user for n in Notification.objects.all()], [self.alpha])
+
+    def test_a_meeting_without_participants_notifies_the_whole_team(self):
+        self._publish()
+        self.assertEqual(Notification.objects.count(), 2)
+
+    def test_a_participant_who_left_the_team_is_not_notified(self):
+        self.meeting.participants.set([self.host, self.alpha, self.beta])
+        self.team.members.remove(self.beta)
+        self._publish()
+        self.assertEqual([n.user for n in Notification.objects.all()], [self.alpha])
+
+    def test_the_meeting_screen_shows_a_banner_until_the_decisions_are_opened(self):
+        self._publish()
+        client = self._as(self.alpha)
+        detail = reverse("meeting_detail", args=[self.meeting.id])
+        self.assertContains(client.get(detail), "이 회의의 결정이 공개됐어요")
+        client.get(reverse("decision_ack", args=[self.meeting.id]))
+        self.assertNotContains(client.get(detail), "이 회의의 결정이 공개됐어요")
+        self.assertEqual(client.get(reverse("meeting_list", args=[self.team.id])).context["rows"][0]["notice"], None)
+
+    def test_the_meeting_list_badges_take_a_fixed_number_of_queries(self):
+        for i in range(3):
+            Meeting.objects.create(team=self.team, title="m%d" % i, host=self.host)
+        self._publish()
+        client = self._as(self.alpha)
+        url = reverse("meeting_list", args=[self.team.id])
+        client.get(url)
+        with CaptureQueriesContext(connection) as few:
+            client.get(url)
+        for i in range(5):
+            Meeting.objects.create(team=self.team, title="n%d" % i, host=self.host)
+        with CaptureQueriesContext(connection) as many:
+            client.get(url)
+        self.assertEqual(len(few), len(many))
+
+
+class DecisionEvidenceTests(TestCase):
+    """전사 원본 창의 하이라이트 위치 — 근거 문장이 원문 어디에 있는지."""
+
+    SOURCE = "화자 A: 회의 시작할게요.\n화자 B: 민수가, 금요일까지 배포를 맡기로 했습니다!\n화자 A: 좋아요."
+
+    def test_the_span_covers_the_evidence_even_with_different_spacing_and_punctuation(self):
+        start, end = decision_compiler.evidence_span(self.SOURCE, "민수가 금요일까지 배포를 맡기로 했습니다")
+        self.assertEqual(self.SOURCE[start:end], "민수가, 금요일까지 배포를 맡기로 했습니다")
+
+    def test_missing_evidence_has_no_span(self):
+        self.assertIsNone(decision_compiler.evidence_span(self.SOURCE, "회의에 없던 문장"))
+        self.assertIsNone(decision_compiler.evidence_span(self.SOURCE, ""))
+        self.assertIsNone(decision_compiler.evidence_span("", "회의 시작"))
+
+    def test_the_same_sentence_for_two_candidates_is_highlighted_once_with_both_labels(self):
+        spans = decision_compiler.evidence_spans(self.SOURCE, [("후보 A", "좋아요"), ("후보 B", "좋아요"), ("후보 C", "없는 문장")])
+        self.assertEqual(len(spans), 1)
+        self.assertEqual(spans[0]["label"], "후보 A · 후보 B")
+
+    def test_spans_are_sorted_and_never_overlap(self):
+        spans = decision_compiler.evidence_spans(self.SOURCE, [
+            ("뒤", "좋아요"), ("앞", "회의 시작할게요"), ("겹침", "회의 시작"),
+        ])
+        self.assertEqual([span["label"] for span in spans], ["앞", "뒤"])
+
+    def test_compiling_stores_the_evidence_of_clear_decisions(self):
+        host = User.objects.create_user("host", password="pw12345!")
+        team = Team.objects.create(name="t")
+        team.members.add(host)
+        meeting = Meeting.objects.create(
+            team=team, title="m", host=host, processing_status=Meeting.STATUS_DONE,
+            transcript="민수가 금요일까지 배포를 맡기로 했습니다.",
+        )
+        raw = json.dumps([{
+            "topic": "배포", "ambiguous": False, "final": "민수가 금요일까지 배포한다",
+            "evidence": "민수가 금요일까지 배포를 맡기로 했습니다.",
+        }], ensure_ascii=False)
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value=raw):
+            decision_compiler.compile_meeting(meeting)
+        self.assertEqual(meeting.decisions.get().evidence, "민수가 금요일까지 배포를 맡기로 했습니다.")
+
+    def test_the_review_screen_sends_the_decisions_evidence_span(self):
+        host = User.objects.create_user("host2", password="pw12345!")
+        team = Team.objects.create(name="t2")
+        team.members.add(host)
+        meeting = Meeting.objects.create(
+            team=team, title="m", host=host, processing_status=Meeting.STATUS_DONE, transcript=self.SOURCE,
+        )
+        decision = Decision.objects.create(meeting=meeting, order=0, what="배포", divergence_reason="기한이 갈려요",
+                                           evidence="민수가 금요일까지 배포를 맡기로 했습니다")
+        Interpretation.objects.create(decision=decision, order=0, text="금요일까지 배포한다", recommended=True)
+        client = Client()
+        client.force_login(host)
+        r = client.get(reverse("decision_review", args=[meeting.id]))
+        spans = r.context["evidence_data"][str(decision.id)]
+        self.assertEqual([span["label"] for span in spans], ["근거"])
+        self.assertContains(r, 'id="transcript-panel"')
+        self.assertContains(r, 'data-evidence-label="근거"')
+        self.assertContains(r, 'id="step-next"')
+
+    def test_a_repeated_sentence_points_to_the_occurrence_near_the_decision(self):
+        filler = "화자 C: 다른 이야기를 이어서 합니다.\n" * 8  # 맥락 창(80글자)보다 멀리 떨어뜨린다.
+        source = (
+            "화자 A: 점심 메뉴는 김밥으로 하죠.\n화자 B: 좋아요.\n" + filler +
+            "화자 A: 배포는 민수가 금요일까지 맡아 주세요.\n화자 B: 좋아요.\n"
+        )
+        first, second = [m.start() for m in re.finditer("좋아요", source)]
+        start, _ = decision_compiler.evidence_span(source, "좋아요", context="민수 금요일까지 배포")
+        self.assertEqual(start, second)
+        # 맥락이 없으면 예전처럼 처음 나온 자리.
+        self.assertEqual(decision_compiler.evidence_span(source, "좋아요")[0], first)
+
+    def test_every_occurrence_is_highlighted_but_only_one_is_primary(self):
+        source = "가: 좋아요. 나: 배포는 금요일. 다: 좋아요."
+        spans = decision_compiler.evidence_spans(source, [("", "좋아요")], context="금요일 배포")
+        self.assertEqual(len(spans), 2)
+        self.assertEqual([span["primary"] for span in spans].count(True), 1)
+
+    def test_a_primary_span_wins_over_an_overlapping_repeat(self):
+        # "좋아요"의 첫 자리는 대표가 아니고(맥락과 먼 곳), 그 자리에 걸친 "아요 시작"은 대표다.
+        filler = " 음" * 120  # 맥락 창(80글자)보다 멀리 떨어뜨린다.
+        source = "좋아요 시작" + filler + " 금요일 배포 좋아요"
+        spans = decision_compiler.evidence_spans(
+            source, [("가", "좋아요"), ("나", "아요 시작")], context="금요일 배포",
+        )
+        self.assertEqual([(span["label"], span["primary"]) for span in spans], [("나", True), ("가", True)])
+
+
+class MeetingParticipantTests(TestCase):
+    """회의 참석자 고르기 — 결정 알림을 받는 범위."""
+
+    def setUp(self):
+        self.host = User.objects.create_user("phost", password="pw12345!")
+        self.alpha = User.objects.create_user("palpha", password="pw12345!")
+        self.beta = User.objects.create_user("pbeta", password="pw12345!")
+        self.outsider = User.objects.create_user("poutsider", password="pw12345!")
+        self.team = Team.objects.create(name="pt")
+        self.team.members.add(self.host, self.alpha, self.beta)
         self.client.force_login(self.host)
 
-    def _decision(self, order, status, meeting=None):
-        return Decision.objects.create(
-            meeting=meeting or self.meeting, order=order,
-            who="담당%d" % order, what="할 일 %d" % order,
-            final_text="확정 %d" % order, status=status,
-        )
+    def test_the_create_form_checks_every_member_by_default(self):
+        r = self.client.get(reverse("meeting_create", args=[self.team.id]))
+        self.assertEqual(r.context["participant_ids"], {self.host.id, self.alpha.id, self.beta.id})
+        self.assertContains(r, 'name="participants"')
 
-    def _ack(self, user, decisions, kind=DecisionAgreement.KIND_ACK):
-        for decision in decisions:
-            DecisionAgreement.objects.update_or_create(
-                decision=decision, user=user, defaults={"kind": kind, "comment": ""},
-            )
+    def test_creating_saves_the_chosen_participants_and_always_the_host(self):
+        self.client.post(reverse("meeting_create", args=[self.team.id]), {
+            "title": "회의", "participants": [str(self.alpha.id), str(self.outsider.id), "x"],
+        })
+        meeting = Meeting.objects.get(title="회의")
+        self.assertEqual(set(meeting.participants.all()), {self.host, self.alpha})
 
-    def _review(self):
-        return self.client.get(reverse("decision_review", args=[self.meeting.id]))
+    def test_the_host_can_change_participants(self):
+        meeting = Meeting.objects.create(team=self.team, title="m", host=self.host)
+        r = self.client.post(reverse("meeting_detail", args=[meeting.id]), {
+            "action": "set_participants", "participants": [str(self.beta.id)],
+        })
+        self.assertRedirects(r, reverse("meeting_detail", args=[meeting.id]))
+        self.assertEqual(set(meeting.participants.all()), {self.host, self.beta})
 
-    def test_participant_gets_403_on_host_screen(self):
-        client = Client()
-        client.force_login(self.alpha)
-        self.assertEqual(
-            client.get(reverse("decision_review", args=[self.meeting.id])).status_code, 403,
-        )
+    def test_a_member_cannot_change_participants(self):
+        meeting = Meeting.objects.create(team=self.team, title="m", host=self.host)
+        self.client.force_login(self.alpha)
+        r = self.client.post(reverse("meeting_detail", args=[meeting.id]), {
+            "action": "set_participants", "participants": [str(self.alpha.id)],
+        })
+        self.assertEqual(r.status_code, 403)
+        self.assertFalse(meeting.participants.exists())
 
-    def test_host_is_excluded_from_the_list(self):
-        self._ack(self.alpha, [self.d1, self.d2])
-        self._ack(self.beta, [self.d1, self.d2])
-        self._ack(self.gamma, [self.d1, self.d2])
-        # 진행자는 한 항목도 확인하지 않았지만 독려 대상이 아니라서 빠진다.
-        self.assertFalse(DecisionAgreement.objects.filter(user=self.host).exists())
-        self.assertEqual(decision_status.participant_count(self.meeting), 3)
-        review = self._review()
-        self.assertEqual(review.context["pending_rows"], [])
-        # base.html의 사용자 칩이 로그인한 본인 이름을 늘 렌더하므로, 응답 전체가 아니라
-        # 명단 자체에 진행자가 없는 것을 본다.
-        self.assertNotIn(
-            self.host, [user for user, _, _ in decision_status.pending_participants(self.meeting)],
-        )
-
-    def test_list_shows_name_and_progress_for_unfinished_members(self):
-        self._ack(self.alpha, [self.d1, self.d2])
-        self._ack(self.beta, [self.d1])
-        review = self._review()
-        self.assertEqual(review.context["participant_total"], 3)
-        self.assertEqual(review.context["participant_done"], 1)
-        self.assertEqual(review.context["pending_rows"], [
-            {"name": "dec-beta", "acked": 1, "total": 2},
-            {"name": "dec-gamma", "acked": 0, "total": 2},
-        ])
-        self.assertContains(review, "3명 중 1명 확인")
-        self.assertContains(review, "1/2개 확인")
-        self.assertNotContains(review, "dec-alpha")
-
-    def test_differ_chooser_is_counted_done_and_name_never_appears(self):
-        # '달랐어요'도 확인으로 집계된다 — 명단에서 빠지고, 누가 골랐는지는 응답에 없다.
-        self._ack(self.alpha, [self.d1, self.d2], kind=DecisionAgreement.KIND_DIFFER)
-        review = self._review()
-        self.assertNotContains(review, "dec-alpha")
-        self.assertEqual(
-            [row["name"] for row in review.context["pending_rows"]], ["dec-beta", "dec-gamma"],
-        )
-
-    def test_pending_member_row_does_not_reveal_which_kind_they_chose(self):
-        # 둘 다 2개 중 1개만 했다 — 한 명은 '확인했어요', 한 명은 '달랐어요'를 골랐지만
-        # 명단에서는 구별되지 않아야 한다. 명단은 '끝냈는지'만 말한다.
-        self._ack(self.beta, [self.d1])
-        self._ack(self.gamma, [self.d1], kind=DecisionAgreement.KIND_DIFFER)
-        rows = self._review().context["pending_rows"]
-        self.assertEqual(rows, [
-            {"name": "dec-alpha", "acked": 0, "total": 2},
-            {"name": "dec-beta", "acked": 1, "total": 2},
-            {"name": "dec-gamma", "acked": 1, "total": 2},
-        ])
-
-    def test_non_host_member_sees_no_names_when_the_meeting_has_no_host(self):
-        # host가 비면 _require_host는 팀원 누구나 통과시킨다(기존 정책). 그 통로로 이름 명단이
-        # 팀원 전원에게 나가면 안 된다 — 진행자 계정이 삭제되면(SET_NULL) 실제로 일어난다.
-        self.meeting.host = None
-        self.meeting.save(update_fields=["host"])
-        client = Client()
-        client.force_login(self.alpha)
-        review = client.get(reverse("decision_review", args=[self.meeting.id]))
-        self.assertEqual(review.status_code, 200)
-        self.assertEqual(review.context["pending_rows"], [])
-        for name in ("dec-beta", "dec-gamma"):
-            self.assertNotContains(review, name)
-
-    def test_host_cannot_attribute_differ_to_a_named_member(self):
-        # 공개 항목 1개 + 응답자 1명(달랐어요). 명단에서 빠진 사람이 곧 그 응답자이므로,
-        # 같은 화면에 항목별 '달랐어요 1명'이 함께 있으면 진행자가 특정할 수 있다.
-        Decision.objects.filter(pk=self.d2.pk).update(status=Decision.STATUS_DRAFT)
-        self._ack(self.beta, [self.d1], kind=DecisionAgreement.KIND_DIFFER)
-        review = self._review()
-        names = {row["name"] for row in review.context["pending_rows"]}
-        # 응답자가 한 명으로 특정된다.
-        self.assertEqual({"dec-alpha", "dec-beta", "dec-gamma"} - names, {"dec-beta"})
-        # 그 상태에서 differ 신호가 같은 화면에 있으면 '누가 달랐어요를 골랐는지'가 드러난다.
-        self.assertNotContains(review, "달랐어요 1명")
-
-    def test_item_counts_are_withheld_until_every_target_has_responded(self):
-        # 팀원 3명이 한 명씩 응답하는 동안에는 응답 HTML에 differ 숫자가 없어야 한다.
-        # 마지막 사람이 응답한 뒤에만 숫자가 나온다.
-        Decision.objects.filter(pk=self.d2.pk).update(status=Decision.STATUS_DRAFT)
-        for member in (self.alpha, self.beta):
-            self._ack(member, [self.d1], kind=DecisionAgreement.KIND_DIFFER)
-            review = self._review()
-            row = review.context["rows"][0]
-            self.assertIsNone(row["ack"])
-            self.assertEqual(row["comments"], [])
-            # 유출 신호는 항목별 "확인 N명 / 달랐어요 M명" 한 줄이다.
-            self.assertNotContains(review, "/ 달랐어요")
-            self.assertContains(review, "3명 중 %d명 응답" % row["responded"])
-        self._ack(self.gamma, [self.d1])
-        review = self._review()
-        row = review.context["rows"][0]
-        self.assertEqual(row["ack"], {"ack": 1, "differ": 2, "comments": []})
-        self.assertContains(review, "확인 1명 / 달랐어요 2명")
-        self.assertNotContains(review, "결과는 모두 응답하면 보여요")
-
-    def test_revise_hides_the_item_counts_again(self):
-        Decision.objects.filter(pk=self.d2.pk).update(status=Decision.STATUS_DRAFT)
-        for member in (self.alpha, self.beta, self.gamma):
-            self._ack(member, [self.d1])
-        self.assertContains(self._review(), "확인 3명")
-        decision_compiler.revise_final_text(self.d1, "고친 문장")
-        review = self._review()
-        self.assertIsNone(review.context["rows"][0]["ack"])
-        self.assertNotContains(review, "확인 3명")
-        self.assertContains(review, "3명 중 0명 응답")
-
-    def test_comments_are_ordered_by_text_not_by_when_they_were_written(self):
-        Decision.objects.filter(pk=self.d2.pk).update(status=Decision.STATUS_DRAFT)
-        written_in_order = ["힘든 일정이에요", "같은 뜻인가요", "다음 주로 들었어요"]
-        for member, comment in zip((self.alpha, self.beta, self.gamma), written_in_order):
-            DecisionAgreement.objects.create(
-                decision=self.d1, user=member,
-                kind=DecisionAgreement.KIND_DIFFER, comment=comment,
-            )
-        comments = self._review().context["rows"][0]["comments"]
-        self.assertEqual(comments, sorted(written_in_order))
-        self.assertNotEqual(comments, written_in_order)
-
-    def test_progress_numbers_stay_consistent_and_zero_target_says_so(self):
-        # 대상 인원은 명단과 같은 조회에서 나와야 한다 — 합이 어긋나면 진행바 너비가 음수가 된다.
-        self._ack(self.alpha, [self.d1, self.d2])
-        review = self._review()
-        self.assertEqual(
-            review.context["participant_total"],
-            review.context["participant_done"] + len(review.context["pending_rows"]),
-        )
-        self.team.members.remove(self.alpha, self.beta, self.gamma)
-        review = self._review()
-        self.assertEqual(review.context["participant_total"], 0)
-        self.assertContains(review, "확인할 팀원이 없어요")
-        self.assertNotContains(review, "명 중 0명 확인")
-
-    def test_pending_participants_ignores_other_meetings(self):
-        other = Meeting.objects.create(
-            team=self.team, title="other", host=self.host,
-            processing_status=Meeting.STATUS_DONE, transcript="전사본",
-        )
-        other_decision = self._decision(order=0, status=Decision.STATUS_PUBLISHED, meeting=other)
-        self._ack(self.alpha, [self.d1, self.d2])
-        # 이 회의를 전부 확인한 alpha도 other 회의에서는 여전히 미확인이다.
-        self.assertEqual(
-            [user.username for user, _, _ in decision_status.pending_participants(other)],
-            ["dec-alpha", "dec-beta", "dec-gamma"],
-        )
-        self.assertEqual(
-            [user.username for user, _, _ in decision_status.pending_participants(self.meeting)],
-            ["dec-beta", "dec-gamma"],
-        )
-        self.assertEqual(other_decision.agreements.count(), 0)
-
-    def test_undecided_items_are_not_counted(self):
-        # 공개 2개만 분모다. 미결정 d3을 확인하지 않아도 alpha는 완료로 잡힌다.
-        self._ack(self.alpha, [self.d1, self.d2])
-        self.assertEqual(decision_status.pending_participants(self.meeting), [
-            (self.beta, 0, 2), (self.gamma, 0, 2),
-        ])
-
-    def test_no_published_items_means_empty_list(self):
-        # 확인 기록이 남아 있어도 분모가 0이면 명단과 배지가 모두 비어야 한다(공개 취소 후).
-        self._ack(self.alpha, [self.d1, self.d2])
-        Decision.objects.filter(meeting=self.meeting).update(status=Decision.STATUS_DRAFT)
-        self.assertEqual(decision_status.pending_participants(self.meeting), [])
-        review = self._review()
-        self.assertFalse(review.context["decision_open"])
-        self.assertNotContains(review, "아직 확인하지 않은 팀원")
-
-    def test_revise_puts_that_member_back_to_pending(self):
-        self._ack(self.alpha, [self.d1, self.d2])
-        self.assertEqual(decision_status.pending_participants(self.meeting), [
-            (self.beta, 0, 2), (self.gamma, 0, 2),
-        ])
-        decision_compiler.revise_final_text(self.d1, "고친 문장")
-        pending = decision_status.pending_participants(self.meeting)
-        self.assertEqual([(user.username, acked) for user, acked, _ in pending], [
-            ("dec-alpha", 1), ("dec-beta", 0), ("dec-gamma", 0),
-        ])
-
-    def test_switching_ack_to_differ_keeps_member_done(self):
-        self._ack(self.alpha, [self.d1, self.d2])
-        self._ack(self.alpha, [self.d1], kind=DecisionAgreement.KIND_DIFFER)
-        self.assertNotIn(
-            self.alpha, [user for user, _, _ in decision_status.pending_participants(self.meeting)],
-        )
-
-    def test_meeting_without_host_counts_every_member(self):
-        self.meeting.host = None
-        self.meeting.save(update_fields=["host"])
-        self.assertEqual(decision_status.participant_count(self.meeting), 4)
-        self.assertEqual(len(decision_status.pending_participants(self.meeting)), 4)
-
-    def test_all_confirmed_shows_completion_marker(self):
-        for member in (self.alpha, self.beta, self.gamma):
-            self._ack(member, [self.d1, self.d2])
-        review = self._review()
-        self.assertEqual(review.context["participant_pct"], 100)
-        self.assertContains(review, "모든 팀원이 결정을 확인했어요")
-
-    def _home(self, user=None):
-        client = self.client
-        if user is not None:
-            client = Client()
-            client.force_login(user)
-        return client.get(reverse("meeting_list", args=[self.team.id]))
-
-    def test_badge_counts_members_who_have_not_confirmed(self):
-        self._ack(self.alpha, [self.d1, self.d2])
-        home = self._home()
-        self.assertEqual(home.context["rows"][0]["pending"], 2)
-        self.assertContains(home, 'class="pending-badge"')
-        self.assertContains(home, ">2</span>")
-        self.assertContains(home, "아직 2명이 결정을 확인하지 않았어요")
-
-    def test_unpublished_meeting_shows_no_badge(self):
-        Decision.objects.filter(meeting=self.meeting).update(status=Decision.STATUS_DRAFT)
-        home = self._home()
-        self.assertIsNone(home.context["rows"][0]["pending"])
-        self.assertNotContains(home, 'class="pending-badge"')
-        self.assertNotContains(home, "모두 확인")
-
-    def test_meeting_with_only_undecided_items_shows_no_badge(self):
-        Decision.objects.filter(meeting=self.meeting).update(status=Decision.STATUS_UNDECIDED)
-        self.assertIsNone(self._home().context["rows"][0]["pending"])
-
-    def test_all_confirmed_shows_clear_marker(self):
-        for member in (self.alpha, self.beta, self.gamma):
-            self._ack(member, [self.d1, self.d2])
-        home = self._home()
-        self.assertEqual(home.context["rows"][0]["pending"], 0)
-        self.assertNotContains(home, 'class="pending-badge"')
-        self.assertContains(home, "✓ 모두 확인")
-
-    def test_badge_shows_99_plus_over_limit(self):
-        self.assertEqual(decision_status.badge_text(99), "99")
-        self.assertEqual(decision_status.badge_text(100), "99+")
-
-    def test_team_with_host_only_shows_clear_marker(self):
-        self.team.members.remove(self.alpha, self.beta, self.gamma)
-        home = self._home()
-        self.assertEqual(home.context["rows"][0]["pending"], 0)
-        self.assertContains(home, "✓ 모두 확인")
-
-    def test_other_meetings_agreements_are_not_mixed_in(self):
-        other = Meeting.objects.create(
-            team=self.team, title="other", host=self.host,
-            processing_status=Meeting.STATUS_DONE, transcript="전사본",
-        )
-        other_decision = self._decision(order=0, status=Decision.STATUS_PUBLISHED, meeting=other)
-        self._ack(self.alpha, [other_decision])
-        counts = decision_status.pending_count_for_meetings([self.meeting, other])
-        self.assertEqual(counts[self.meeting.id], 3)
-        self.assertEqual(counts[other.id], 2)
-
-    def test_member_pages_contain_no_other_member_names(self):
-        self._ack(self.alpha, [self.d1])
-        client = Client()
-        client.force_login(self.alpha)
-        for url in (
-            reverse("meeting_list", args=[self.team.id]),
-            reverse("meeting_detail", args=[self.meeting.id]),
-            reverse("decision_ack", args=[self.meeting.id]),
-        ):
-            response = client.get(url)
-            self.assertEqual(response.status_code, 200)
-            body = response.content.decode()
-            for name in ("dec-beta", "dec-gamma", "dechost"):
-                self.assertNotIn(name, body, "%s 응답에 %s가 노출됨" % (url, name))
-
-    def test_meeting_list_query_count_does_not_grow_with_meetings(self):
-        self._ack(self.alpha, [self.d1])
-        url = reverse("meeting_list", args=[self.team.id])
-        with CaptureQueriesContext(connection) as one_meeting:
-            self.assertEqual(self.client.get(url).status_code, 200)
-        for i in range(4):
-            extra = Meeting.objects.create(
-                team=self.team, title="m%d" % i, host=self.host,
-                processing_status=Meeting.STATUS_DONE, transcript="전사본",
-            )
-            self._decision(order=0, status=Decision.STATUS_PUBLISHED, meeting=extra)
-        with CaptureQueriesContext(connection) as five_meetings:
-            response = self.client.get(url)
-        self.assertEqual(len(response.context["rows"]), 5)
-        self.assertEqual(len(five_meetings.captured_queries), len(one_meeting.captured_queries))
+    def test_only_the_host_sees_the_participant_picker(self):
+        meeting = Meeting.objects.create(team=self.team, title="m", host=self.host)
+        url = reverse("meeting_detail", args=[meeting.id])
+        self.assertContains(self.client.get(url), 'value="set_participants"')
+        self.client.force_login(self.alpha)
+        self.assertNotContains(self.client.get(url), 'value="set_participants"')
