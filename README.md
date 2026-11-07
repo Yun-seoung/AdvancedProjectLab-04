@@ -3,15 +3,15 @@
 회의 녹음을 올리면 회의록을 정리하고, 팀원들이 서로 다르게 이해한 부분을 짚어주는 서비스입니다.
 
 - 녹음 업로드(파일 업로드 + 마이크 직접 녹음) → 네이버 CLOVA Speech로 전사 (매월 무료 20분을 다 쓰거나 호출이 실패하면 Groq Whisper API로, 그마저 없거나 실패하면 로컬 Whisper로 자동 전환, Windows/Mac 모두 지원) → 상용 LLM(Gemini API)으로 회의록 요약 (실패 시 로컬 LLM(Ollama)으로 자동 전환)
-- 회의 원문에서 실행 명세(누가·무엇을·언제까지·완료 기준)를 뽑고, 빈칸이나 모호어가 있으면 경고를 달아 진행자에게 보여줌. 진행자가 항목마다 확정하거나 '아직 미정'으로 넘긴 뒤 팀원 전원에게 공개
+- 회의 원문에서 결정 사항(누가·무엇을·언제까지·완료 기준)를 뽑고, 빈칸이나 모호어가 있으면 경고를 달아 진행자에게 보여줌. 진행자가 항목마다 확정하거나 '아직 미정'으로 넘긴 뒤 팀원 전원에게 공개
 - 팀원은 항목마다 [확인했어요] / [제 이해와 달랐어요]를 남기고, 전원이 응답한 뒤에만 항목별 집계를 공개해 어긋난 항목을 익명으로 확인
-- 익명 질문(질문한 본인만 답변을 볼 수 있음), 팀 초대 코드, 다크 모드 등 지원
+- 익명 질문(질문한 본인만 답변을 볼 수 있음), 팀 초대 코드 등 지원
 
 ## 데이터 프라이버시
 
 회의 녹음 전사(STT)는 네이버 CLOVA Speech를 설정하면 **녹음 파일이 네이버 클라우드 서버로 전송**되고, Groq를 설정하면(CLOVA 다음 순위) **녹음 파일이 Groq 서버로 전송**됩니다. 이번 달 CLOVA 무료 사용량을 다 썼거나 호출이 실패한 녹음, Groq도 없거나 실패한 녹음, 그리고 둘 다 설정하지 않은 경우에는 로컬 Whisper(faster-whisper 또는 mlx-whisper)로 처리되어 녹음 파일이 외부로 나가지 않습니다. 민감한 회의는 CLOVA·Groq 설정 없이 로컬 Whisper만으로 실행하는 것을 권장합니다.
 
-회의록 요약, 결정 명세 추출, 대화창 답변은 상용 LLM 서비스(Gemini API)로 처리되며, 실패 시 로컬 모델(Ollama)을 통해 처리됩니다(`OLLAMA_MODEL`을 설정한 경우).
+회의록 요약, 결정 사항 추출, 대화창 답변은 상용 LLM 서비스(Gemini API)로 처리되며, 실패 시 로컬 모델(Ollama)을 통해 처리됩니다(`OLLAMA_MODEL`을 설정한 경우).
 Gemini를 사용하면 **전사본과 회의록 내용이 Google 서버로 전송**됩니다. 무료 API 키는 입력 데이터가 Google 서비스 개선에 사용될 수 있으므로, 민감한 회의는 Gemini 설정 없이 Ollama만으로 실행하는 것을 권장합니다.
 
 ## 실행 방법
@@ -50,8 +50,8 @@ FASTER_WHISPER_MODEL=large-v3-turbo        # CLOVA·Groq 모두 없거나 실패
 | `GEMINI_TIMEOUT` | (선택) Gemini 응답 최대 대기 시간(초), 기본 60. 응답이 없으면 다음 Gemini 모델로(마지막 모델은 한 번 더 기다림), 모두 안 되면 Groq → Ollama로 넘어감 |
 | `GROQ_LLM_MODEL` | (선택) `GROQ_API_KEY`와 함께 있으면 Gemini 다음, Ollama 앞 단계로 Groq의 LLM을 씀(전사와 같은 키). 모델 ID는 Groq 콘솔의 무료 모델 목록에서 확인 |
 | `GEMINI_COOLDOWN` | (선택) 실패한 Gemini 모델을 건너뛰는 시간(초), 기본 600. 모든 모델을 건너뛰는 중이면 바로 다음 단계(Groq → Ollama)를 씀(둘 다 없으면 다시 시도). `0`이면 매번 모든 모델을 시도 |
-| `OLLAMA_MODEL` | Gemini 설정이 없으면 Ollama만 사용, 있으면 Gemini 실패 시 예비로 사용. [Ollama](https://ollama.com) 설치 후 `ollama pull gemma3:4b` (GPU 메모리 4GB 노트북에서 결정 컴파일 비교 시 가장 나았음) |
-| `OLLAMA_TIMEOUT` | (선택) Ollama 응답 대기 시간(초), 기본 300. 큰 모델로 긴 회의를 컴파일하면 늘림 |
+| `OLLAMA_MODEL` | Gemini 설정이 없으면 Ollama만 사용, 있으면 Gemini 실패 시 예비로 사용. [Ollama](https://ollama.com) 설치 후 `ollama pull gemma3:4b` (GPU 메모리 4GB 노트북에서 결정 사항 추출 비교 시 가장 나았음) |
+| `OLLAMA_TIMEOUT` | (선택) Ollama 응답 대기 시간(초), 기본 300. 큰 모델로 긴 회의를 추출하면 늘림 |
 | `CLOVA_SPEECH_INVOKE_URL`, `CLOVA_SPEECH_SECRET_KEY` | 둘 다 있으면 네이버 CLOVA Speech로 전사. 이번 달 무료 사용량이 남아 있을 때만 호출 |
 | `CLOVA_SPEECH_FREE_MINUTES` | (선택) 한 달에 CLOVA로 보낼 최대 분량(분), 기본 20(Free 플랜 무료 제공량). 유료(Basic) 플랜이면 크게 올려서 사용 |
 | `CLOVA_SPEECH_DIARIZATION` | (선택) `1`이면 화자 구분을 켜서 전사본을 "화자 A: …" 줄로 나눔. Basic 플랜에서는 화자인식이 따로 과금됨 |

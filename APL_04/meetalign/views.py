@@ -103,7 +103,7 @@ def _meeting_rows(meetings):
         pending = pending_counts.get(meeting.id)
         rows.append({
             "meeting": meeting,
-            # 확정 명세가 공개되지 않은 회의(처리 중, 진행자 검토 전, 전부 미결정)는
+            # 확정된 결정이 공개되지 않은 회의(처리 중, 진행자 검토 전, 전부 미결정)는
             # 배지 자체를 숨긴다.
             "decision_open": pending is not None,
             "pending": pending,
@@ -188,7 +188,7 @@ def meeting_detail(request, meeting_id):
         return redirect("meeting_result", meeting_id=meeting.id)
     return render(request, "meetalign/meeting_detail.html", {
         "meeting": meeting, "stt_status": services.stt_status_text(),
-        # 결정 컴파일러(실험): 지난 회의의 미결정 안건. 읽기만 하므로 위 POST 흐름은 건드리지 않는다.
+        # 결정 사항 추출 기능(실험): 지난 회의의 미결정 안건. 읽기만 하므로 위 POST 흐름은 건드리지 않는다.
         # '처리됨' 버튼은 별도 URL(decision_carryover_resolve)로 보낸다.
         "carryover_decisions": decision_compiler.carryover_decisions(meeting),
     })
@@ -293,16 +293,16 @@ def record_file(request, meeting_id):
 
 
 # ---------------------------------------------------------------------------
-# 결정 컴파일러. 회의 원문에서 뽑은 실행 명세를 진행자가 확정해 공개하고, 팀원이
+# 결정 사항 추출 기능. 회의 원문에서 뽑은 결정 사항을 진행자가 확정해 공개하고, 팀원이
 # 항목마다 확인 여부를 남기는 흐름이다.
 # ---------------------------------------------------------------------------
 
 
 def _decision_meeting(request, meeting_id):
-    """결정 컴파일러를 쓸 수 있는 회의만 통과시킨다.
+    """결정 사항 추출 기능을 쓸 수 있는 회의만 통과시킨다.
 
     팀 밖 사용자는 _meeting()이 404로 막고, 회의록이 아직 완성되지 않은 회의는 여기서 404다
-    — 컴파일할 전사 원문이 없는 회의에 링크를 노출하지 않기 위함(템플릿 쪽도 같은 조건).
+    — 추출할 녹취 원문이 없는 회의에 링크를 노출하지 않기 위함(템플릿 쪽도 같은 조건).
     """
     meeting = _meeting(request, meeting_id)
     if meeting.processing_status != Meeting.STATUS_DONE:
@@ -311,13 +311,13 @@ def _decision_meeting(request, meeting_id):
 
 
 def _reset_decisions(meeting):
-    """컴파일 결과를 전부 지운다. 공개된 뒤에는 거부한다.
+    """추출 결과를 전부 지운다. 공개된 뒤에는 거부한다.
 
     팀원이 이미 확인한 내용이 사라지면 안 되기 때문이다. 공개를 되돌리려면 먼저 '공개 취소'로
     draft로 내려야 한다(확인 기록이 하나도 없을 때만 가능).
     """
     if meeting.decisions.exclude(status=Decision.STATUS_DRAFT).exists():
-        return "이미 공개된 항목이 있어 명세를 지울 수 없습니다. '공개 취소'를 먼저 눌러 주세요."
+        return "이미 공개된 항목이 있어 결정 사항을 지울 수 없습니다. '공개 취소'를 먼저 눌러 주세요."
     meeting.decisions.all().delete()
     return None
 
@@ -325,7 +325,7 @@ def _reset_decisions(meeting):
 def _unpublish_decisions(meeting):
     """공개를 되돌려 draft로 내린다 — 공개 직후 "잘못 눌렀다"를 수습하는 통로.
 
-    팀원이 한 명이라도 확인을 남겼으면 거부한다. 그 뒤에 명세가 바뀌면 팀원이 확인한 내용과
+    팀원이 한 명이라도 확인을 남겼으면 거부한다. 그 뒤에 결정 사항이 바뀌면 팀원이 확인한 내용과
     달라지는데, 그건 공개 취소가 아니라 '확정 문장 수정'(revise)이 다룰 일이다.
     """
     published = meeting.decisions.exclude(status=Decision.STATUS_DRAFT)
@@ -342,7 +342,7 @@ def _planned_choice(request, decision):
 
     읽기만 하고 쓰지 않는다 — 한 제출 안의 모든 선택을 먼저 검증한 뒤 한꺼번에 적용하기
     위함이다. 그러지 않으면 뒤쪽 항목이 거부당했는데 앞쪽의 '이 결정 빼기'는 이미 커밋되어,
-    진행자가 되돌릴 방법이 없다(다시 컴파일하면 다른 선택도 전부 사라진다).
+    진행자가 되돌릴 방법이 없다(다시 추출하면 다른 선택도 전부 사라진다).
     """
     raw = request.POST.get("choice_%d" % decision.id, "")
     if not raw:
@@ -423,7 +423,7 @@ def _save_decision_edits(request, meeting):
 
 
 def _publish_decisions(meeting):
-    """"확정 명세 공개" — draft 항목을 팀원에게 공개한다.
+    """"확정된 결정 공개" — draft 항목을 팀원에게 공개한다.
 
     경고가 붙었는데 진행자가 아직 고르지 않은 항목이 하나라도 있으면 거부한다(화면의 버튼도
     같은 조건으로 비활성화된다).
@@ -431,7 +431,7 @@ def _publish_decisions(meeting):
     drafts = list(meeting.decisions.filter(status=Decision.STATUS_DRAFT))
     if not drafts:
         if not meeting.decisions.exists():
-            return "모든 결정을 뺐습니다. 다시 컴파일해 주세요."
+            return "모든 결정을 뺐습니다. 다시 추출해 주세요."
         return "공개할 항목이 없습니다."
     blockers = decision_compiler.publish_blockers(drafts)
     if blockers:
@@ -502,7 +502,7 @@ def _current_choice(decision, interpretations):
 
 @login_required
 def decision_review(request, meeting_id):
-    """진행자 전용. 컴파일 → 명세·경고 확인과 수정 → 항목별 확정 → "확정 명세 공개"."""
+    """진행자 전용. 추출 → 결정 사항·경고 확인과 수정 → 항목별 확정 → "확정된 결정 공개"."""
     meeting = _decision_meeting(request, meeting_id)
     _require_host(meeting, request.user)
     error = None
@@ -665,7 +665,7 @@ def _save_ack(request, meeting):
 
 @login_required
 def decision_ack(request, meeting_id):
-    """팀원 확인 화면. 공개된 확정 명세마다 [확인했어요] / [제 이해와 달랐어요]를 고른다.
+    """팀원 확인 화면. 공개된 결정마다 [확인했어요] / [제 이해와 달랐어요]를 고른다.
 
     진행자는 확인 대상이 아니라 진행자 화면으로 보낸다. 공개 전(draft) 항목은
     published_decisions()가 아예 돌려주지 않으므로 응답에 담기지 않는다.

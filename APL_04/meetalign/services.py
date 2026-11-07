@@ -36,12 +36,12 @@ GEMINI_RETRY_STATUS = (429, 500, 503)
 GEMINI_RETRIES = 1
 GEMINI_RETRY_DELAY_SECONDS = 2
 # GEMINI_MODEL에 쉼표로 여러 모델을 적으면 앞에서부터 시도한다(무료 한도는 모델마다 따로라서, 한 모델의 하루 한도를
-# 다 써도 다음 모델은 쓸 수 있다). 재시도까지 실패한 모델은 이 시간 동안 건너뛴다 — 결정 컴파일처럼 한 번에 여러 번
+# 다 써도 다음 모델은 쓸 수 있다). 재시도까지 실패한 모델은 이 시간 동안 건너뛴다 — 결정 사항 추출처럼 한 번에 여러 번
 # 부르는 작업이 호출마다 같은 실패를 기다리지 않게 하기 위함. 모두 건너뛰는 중이면 Ollama로 바로 간다(Ollama가 없으면
 # 건너뛰기를 무시하고 다시 시도한다). GEMINI_COOLDOWN(초)으로 조정, 0이면 끈다.
 GEMINI_DEFAULT_COOLDOWN_SECONDS = 600
 _gemini_skip_until = {}
-# Ollama 응답 대기(초). 4GB GPU에서 gemma3:4b가 결정 컴파일에 2~3분 걸려서 120초로는 잘렸다. OLLAMA_TIMEOUT으로 조정.
+# Ollama 응답 대기(초). 4GB GPU에서 gemma3:4b가 결정 사항 추출에 2~3분 걸려서 120초로는 잘렸다. OLLAMA_TIMEOUT으로 조정.
 TIMEOUT_SECONDS = 300
 # 한국어/영어 외 문자(일본어 가나, 중국어 한자 등)가 섞여나오는 LLM 출력을 걸러낸다.
 _FOREIGN_SCRIPT = re.compile(r"[぀-ヿ一-鿿]")
@@ -437,12 +437,12 @@ def stt_status_text():
     fallback = _fallback_stt_label()
     if not _clova_enabled():
         if fallback and _diarization_enabled():
-            return "전사 엔진: %s · 화자 분리(로컬)" % fallback
-        return "전사 엔진: %s" % fallback if fallback else None
+            return "음성 인식: %s · 말한 사람 구분(내 컴퓨터)" % fallback
+        return "음성 인식: %s" % fallback if fallback else None
     used, limit = clova_used_seconds(), _clova_limit_seconds()
-    status = "전사 엔진: CLOVA Speech · 이번 달 무료 사용량 %s/%d분" % (_format_minutes(used), limit // 60)
+    status = "음성 인식: CLOVA Speech · 이번 달 무료 사용량 %s/%d분" % (_format_minutes(used), limit // 60)
     if used >= limit:
-        return status + (" (소진 → %s로 전사)" % fallback if fallback else " (소진 — 로컬 모델이 없어 전사가 실패합니다)")
+        return status + (" (소진 → %s로 전환)" % fallback if fallback else " (소진 — 내 컴퓨터용 음성 인식 모델이 없어 글로 옮기지 못합니다)")
     return status + (" (소진 시 %s로 전환)" % fallback if fallback else "")
 
 
@@ -640,7 +640,7 @@ def summarize(transcript):
 
 def chat_reply(meeting, text, history=None):
     if not (_enabled() and meeting.record):
-        return "(가짜 LLM 응답) '%s'에 대한 답변입니다." % text
+        return "(테스트용 가짜 AI 응답) '%s'에 대한 답변입니다." % text
     history_block = ""
     if history:
         lines = ["%s: %s" % ("나" if role == "user" else "AI", msg) for role, msg in history]
@@ -652,9 +652,9 @@ def chat_reply(meeting, text, history=None):
     try:
         result = _generate_clean(prompt)
     except OSError:
-        return "(LLM 연결 실패: Gemini API 키나 Ollama 실행 상태를 확인하세요)"
+        return "(AI 연결 실패: API 키나 내 컴퓨터의 AI(Ollama) 실행 상태를 확인하세요)"
     if result is None:
-        return "(LLM 응답 언어 오류: 다시 시도해 주세요)"
+        return "(AI 응답 언어 오류: 다시 시도해 주세요)"
     return result
 
 
