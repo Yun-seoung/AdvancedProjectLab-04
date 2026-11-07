@@ -28,6 +28,15 @@
   {% endif %}
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
+  {# 읽지 않은 결정 알림 — 진행자가 결정을 공개했거나 공개 뒤에 고쳤다. 결정 확인 화면을 열면 사라진다. #}
+  {% if decision_notice %}
+  <div class="notice" style="border-color:var(--accent);background:var(--accent-soft)">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;margin-top:1px"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+    <span><b>{% if decision_notice == notice_revised %}이 회의의 결정이 수정됐어요.{% else %}이 회의의 결정이 공개됐어요.{% endif %}</b>
+      <a href="{% url 'decision_ack' meeting.id %}">결정 확인하기 ›</a></span>
+  </div>
+  {% endif %}
+
   {# 결정 확인: 지난 회의에서 미결정으로 남은 안건. 진행자가 "처리됨"을 누를 때까지 계속 보인다. #}
   {% if carryover_decisions %}
   <div class="notice" style="flex-direction:column;align-items:stretch">
@@ -197,7 +206,7 @@
         {% if meeting.host_id == user.id %}
         <div class="meta">결정을 정리하고, 모호한 항목을 한 줄로 확정해 팀원에게 공개합니다</div>
         {% else %}
-        <div class="meta">진행자가 확정한 내용이 내 이해와 같은지 확인합니다</div>
+        <div class="meta">진행자가 확정해 공개한 결정과 그 근거가 된 원문을 봅니다</div>
         {% endif %}
       </div>
     </div>
@@ -229,4 +238,20 @@
     <a class="btn sm secondary" href="{% url 'inbox' meeting.id %}">열기</a>
   </li>
 </ul>
+{% if meeting.host_id == user.id %}
+<details class="card" style="margin-top:28px">
+  <summary style="cursor:pointer;font-weight:700">참석자 · 결정 알림 받는 사람 ({{ participant_ids|length }}명)</summary>
+  <form method="post">{% csrf_token %}
+    {% include "meetalign/_participant_picker.html" %}
+    <button name="action" value="set_participants" class="btn sm secondary">참석자 저장</button>
+  </form>
+</details>
+<form method="post" style="margin-top:28px">{% csrf_token %}
+  <button name="action" value="delete_meeting" class="btn ghost" style="color:var(--danger)"
+    onclick="return confirm('회의 \'{{ meeting.title }}\'를 삭제할까요? 녹음, 회의록, 답변이 모두 함께 삭제되며 되돌릴 수 없습니다.');">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>
+    회의 삭제
+  </button>
+</form>
+{% endif %}
 {% endblock %}

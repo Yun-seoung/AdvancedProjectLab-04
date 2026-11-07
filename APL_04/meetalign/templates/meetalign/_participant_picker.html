@@ -1,0 +1,29 @@
+{% comment %}
+  참석자 고르기(회의 만들기 화면, 회의 화면의 진행자 전용 칸 공용).
+  컨텍스트: team_members(팀 멤버 목록), participant_ids(체크해 둘 user id 집합), host_id(진행자 — 항상 참석, 끌 수 없음).
+  결정 공개·수정 알림은 여기서 고른 사람에게만 간다.
+{% endcomment %}
+<fieldset class="field participant-picker">
+  <span class="label">참석자</span>
+  <span class="muted participant-hint">결정이 공개되거나 수정되면 체크한 사람에게만 알림이 가요. 체크하지 않은 팀원도 회의록과 결정은 볼 수 있어요.</span>
+  <div class="participant-list">
+    {% for member in team_members %}
+    <label class="participant-option">
+      {% if member.id == host_id %}
+      <input type="checkbox" checked disabled>
+      <input type="hidden" name="participants" value="{{ member.id }}">
+      {{ member.username }} <span class="muted">(진행자)</span>
+      {% else %}
+      <input type="checkbox" name="participants" value="{{ member.id }}"{% if member.id in participant_ids %} checked{% endif %}>
+      {{ member.username }}
+      {% endif %}
+    </label>
+    {% endfor %}
+  </div>
+</fieldset>
+<style>
+  .participant-picker { border:0; padding:0; }
+  .participant-hint { font-size:.8rem; }
+  .participant-list { display:flex; flex-wrap:wrap; gap:8px 16px; }
+  .participant-option { display:inline-flex; align-items:center; gap:6px; font-weight:500; color:var(--ink); }
+</style>

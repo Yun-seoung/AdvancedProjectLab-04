@@ -40,6 +40,10 @@ class Meeting(models.Model):
     record = models.TextField(blank=True)
     transcript = models.TextField(blank=True)
     processing_status = models.CharField(max_length=20, blank=True, default="")
+    # 이 회의에 참석한 팀원. 결정 공개·수정 알림을 받는 범위다(meetalign.notifications).
+    # 비어 있으면(기능 도입 전에 만든 회의) 팀 멤버 전원을 참석자로 본다. 회의를 볼 수 있는
+    # 권한은 여전히 팀 멤버십이 정한다 — 참석하지 않은 팀원도 회의록과 결정은 볼 수 있다.
+    participants = models.ManyToManyField(settings.AUTH_USER_MODEL, blank=True, related_name="attended_meetings")
 
     def __str__(self):
         return self.title
@@ -189,11 +193,14 @@ class Decision(models.Model):
     # 그 부분만 빈칸 표시로 바꾸면 '직접 쓰기'의 출발점으로 쓸 만한 문장. 담당자·기한처럼
     # AI가 이미 정한 부분은 살리고 못 정한 부분만 채우면 되게 한다. 없으면 빈 문자열.
     draft_hint = models.TextField(blank=True, default="")
+    # AI가 '명확'이라고 본 결정의 근거가 된 전사 원문 문장. 확인이 필요한 결정은 후보마다
+    # 근거(Interpretation.evidence)가 따로 있어 여기를 비워 둔다. 결정 확인 화면의 전사 원본
+    # 창에서 이 문장을 찾아 하이라이트한다.
+    evidence = models.TextField(blank=True, default="")
     # 진행자가 '아직 미정'으로 넘긴 항목. 공개 시점에 status=undecided가 된다.
     marked_undecided = models.BooleanField(default=False)
-    # 공개 뒤에 확정 문장이 수정된 항목. 팀원 화면에 "내용이 수정되었어요"를 띄우는 데 쓴다.
-    # 수정 시 그 항목의 확인 기록(DecisionAgreement)은 모두 지워지므로, 다시 확인한 사람에게는
-    # 안내가 사라진다(안내는 '내 확인 기록이 없을 때'만 뜬다).
+    # 공개 뒤에 확정 문장이 수정된 항목. 팀원 화면에 "수정됨" 표시를 붙이는 데 쓴다.
+    # 수정하면 팀원에게 알림(Notification)이 간다.
     revised = models.BooleanField(default=False)
     # 미결정으로 이월된 안건을 진행자가 "처리됨"으로 닫은 시각. null이면 이후 회의 화면에 계속 보인다.
     carryover_resolved_at = models.DateTimeField(null=True, blank=True)
@@ -337,3 +344,38 @@ class Checkpoint(models.Model):
 
     def __str__(self):
         return "%s - %s" % (self.decision_id, self.verdict)
+
+
+class Notification(models.Model):
+    """참석자에게 보내는 결정 확인 알림. 진행자가 확정 문장을 공개하거나, 공개 뒤에 고치면 진행자를
+    뺀 참석자마다 생긴다(한 사람에게 회의당 하나 — meetalign.notifications).
+
+    상단 메뉴의 알림 아이콘·알림 목록, 회의 목록 배지, 회의 화면 안내가 모두 '읽지 않은 알림'
+    (read_at이 비어 있는 행)을 본다. 팀원이 그 회의의 결정 확인 화면을 열면 그 회의의 알림은
+    읽은 것으로 보고 지운다. read_at은 그 전에 읽음 처리만 해 두던 행을 가려내려고 남겨 둔 칸이다.
+    """
+
+    KIND_PUBLISHED = "published"
+    KIND_REVISED = "revised"
+    KIND_CHOICES = [
+        (KIND_PUBLISHED, "새 결정 공개"),
+        (KIND_REVISED, "결정 수정"),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notifications")
+    meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE, related_name="notifications")
+    kind = models.CharField(max_length=12, choices=KIND_CHOICES)
+    message = models.CharField(max_length=300)
+    created_at = models.DateTimeField(auto_now_add=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["user", "read_at"])]
+
+    @property
+    def is_unread(self):
+        return self.read_at is None
+
+    def __str__(self):
+        return "%s → %s: %s" % (self.meeting_id, self.user_id, self.kind)
