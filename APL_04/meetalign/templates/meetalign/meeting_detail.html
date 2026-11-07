@@ -114,6 +114,8 @@
           <svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="10"/></svg>
           마이크로 녹음하기
         </button>
+        {# 녹음이 시작되면 보인다. 녹음 버튼은 일시정지·이어서 녹음을 맡고, 끝내는 것은 이 버튼이다. #}
+        <button type="button" id="record-stop" class="btn sm secondary" style="display:none">■ 녹음 중지</button>
         <span id="record-timer" class="muted" style="display:none">0:00</span>
       </div>
       <audio id="record-preview" controls style="display:none;width:100%;margin-bottom:10px"></audio>
@@ -121,7 +123,7 @@
       <p class="muted" style="margin:4px 0 0">마이크 녹음은 localhost 또는 https 주소에서만 동작합니다. 일반 http로 다른 기기에서 접속했다면 파일을 올려 주세요.</p>
     </div>
     <div class="row">
-      <button name="action" value="submit">
+      <button id="record-submit" name="action" value="submit">
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h12M13 6l6 6-6 6"/></svg>
         녹음 제출하고 회의록 만들기
       </button>
@@ -133,16 +135,28 @@
   <script>
   (function () {
     var toggleBtn = document.getElementById("record-toggle");
+    var stopBtn = document.getElementById("record-stop");
     var timerEl = document.getElementById("record-timer");
     var preview = document.getElementById("record-preview");
     var fileInput = document.getElementById("recording");
+    var submitBtn = document.getElementById("record-submit");
     if (!toggleBtn || !navigator.mediaDevices || !window.MediaRecorder) {
       if (toggleBtn) toggleBtn.style.display = "none";
+      if (stopBtn) stopBtn.style.display = "none";
       return;
     }
 
+    // 일시정지를 지원하지 않는 브라우저에서는 중지 버튼을 띄우지 않고, 녹음 버튼이 예전처럼 중지까지 겸한다.
+    var canPause = typeof MediaRecorder.prototype.pause === "function" &&
+                   typeof MediaRecorder.prototype.resume === "function";
+
     var mediaRecorder = null;
     var chunks = [];
+    var timerInterval = null;
+    // 타이머는 벽시계가 아니라 실제로 녹음된 길이를 센다. elapsedMs는 지금까지 녹음된 누적 시간이고,
+    // segmentStart는 현재 녹음 중인 구간이 시작된 시각이다. 일시정지한 시간은 어디에도 더해지지 않는다.
+    var elapsedMs = 0;
+    var segmentStart = 0;
 
     function formatTime(totalSeconds) {
       var m = Math.floor(totalSeconds / 60);
@@ -150,18 +164,42 @@
       return m + ":" + (s < 10 ? "0" : "") + s;
     }
 
-    toggleBtn.addEventListener("click", function () {
+    function isActive() {
+      return mediaRecorder && (mediaRecorder.state === "recording" || mediaRecorder.state === "paused");
+    }
+
+    function recordedMs() {
       if (mediaRecorder && mediaRecorder.state === "recording") {
-        mediaRecorder.stop();
+        return elapsedMs + (Date.now() - segmentStart);
+      }
+      return elapsedMs;
+    }
+
+    function paintTimer() {
+      var paused = mediaRecorder && mediaRecorder.state === "paused";
+      timerEl.textContent = formatTime(Math.floor(recordedMs() / 1000)) + (paused ? " (일시정지)" : "");
+    }
+
+    function paintButtons() {
+      if (!isActive()) {
+        stopBtn.style.display = "none";
         return;
       }
+      stopBtn.style.display = canPause ? "inline-flex" : "none";
+      if (mediaRecorder.state === "paused") {
+        toggleBtn.textContent = "▶ 이어서 녹음";
+      } else {
+        toggleBtn.textContent = canPause ? "⏸ 일시정지" : "■ 녹음 중지";
+      }
+    }
+
+    function start() {
       navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
         chunks = [];
+        elapsedMs = 0;
         mediaRecorder = new MediaRecorder(stream);
-        var startTime = Date.now();
-        var timerInterval = setInterval(function () {
-          timerEl.textContent = formatTime(Math.floor((Date.now() - startTime) / 1000));
-        }, 1000);
+        segmentStart = Date.now();
+        timerInterval = setInterval(paintTimer, 1000);
 
         mediaRecorder.addEventListener("dataavailable", function (e) {
           if (e.data.size > 0) chunks.push(e.data);
@@ -169,6 +207,7 @@
         mediaRecorder.addEventListener("stop", function () {
           stream.getTracks().forEach(function (track) { track.stop(); });
           clearInterval(timerInterval);
+          timerInterval = null;
           timerEl.style.display = "none";
           var blob = new Blob(chunks, { type: mediaRecorder.mimeType || "audio/webm" });
           var file = new File([blob], "recording.webm", { type: blob.type });
@@ -177,18 +216,54 @@
           fileInput.files = dataTransfer.files;
           preview.src = URL.createObjectURL(blob);
           preview.style.display = "block";
-          toggleBtn.textContent = "다시 녹음하기";
+          toggleBtn.textContent = "● 다시 녹음하기";
+          stopBtn.style.display = "none";
         });
 
         mediaRecorder.start();
-        timerEl.textContent = "0:00";
-        timerEl.style.display = "inline";
-        toggleBtn.textContent = "■ 녹음 중지";
         preview.style.display = "none";
+        timerEl.style.display = "inline";
+        paintTimer();
+        paintButtons();
       }).catch(function (err) {
         alert("마이크 접근 권한이 필요합니다: " + err.message);
       });
+    }
+
+    toggleBtn.addEventListener("click", function () {
+      if (mediaRecorder && mediaRecorder.state === "recording") {
+        if (!canPause) {
+          mediaRecorder.stop();
+          return;
+        }
+        elapsedMs += Date.now() - segmentStart;
+        mediaRecorder.pause();
+        paintButtons();
+        paintTimer();
+        return;
+      }
+      if (mediaRecorder && mediaRecorder.state === "paused") {
+        segmentStart = Date.now();
+        mediaRecorder.resume();
+        paintButtons();
+        paintTimer();
+        return;
+      }
+      start();
     });
+
+    stopBtn.addEventListener("click", function () {
+      if (isActive()) mediaRecorder.stop();
+    });
+
+    // 녹음 중이나 일시정지 중에는 파일이 아직 만들어지지 않았다. 그대로 제출하면 빈 채로 올라간다.
+    if (submitBtn) {
+      submitBtn.addEventListener("click", function (e) {
+        if (!isActive()) return;
+        e.preventDefault();
+        alert("녹음을 먼저 중지해 주세요. 중지해야 녹음 파일이 만들어집니다.");
+      });
+    }
   })();
   </script>
   {% endif %}
