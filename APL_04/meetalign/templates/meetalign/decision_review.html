@@ -1,10 +1,4 @@
 {% extends "meetalign/base.html" %}
-{% block note %}
-<li>모호 여부는 AI가 판단한다. 규칙(decision_compiler.safety_warnings)은 AI가 '명확'이라고 한 항목의 확정 문장과 원문 근거만 되짚는 안전망이고, 확인 항목 수에 상한은 없다.</li>
-<li>후보의 근거 문장이 전사 원문에 없으면 저장 단계에서 버려진다. 후보는 진행자 참고용이며 팀원에게는 보이지 않는다.</li>
-<li>공개 전에는 팀원 화면에 확정 문장이 아예 담기지 않는다. 확인이 필요한 항목을 하나라도 처리하지 않으면 공개 버튼이 막힌다.</li>
-<li>공개 뒤 확정 문장을 고치면 그 항목의 팀원 확인 기록이 모두 지워지고 다시 받는다.</li>
-{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
@@ -20,15 +14,15 @@
   <div class="item-icon" style="margin-bottom:16px">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h7"/><path d="m17 15 2 2 3-3"/></svg>
   </div>
-  <h2 class="section-title">결정 컴파일 실행</h2>
+  <h2 class="section-title">결정 사항 추출</h2>
   <p class="muted" style="margin:-4px 0 14px">
-    전사 원문에서 결정을 찾아 그대로 공개될 확정 문장으로 옮기고, 다르게 이해될 수 있는
+    녹취 원문에서 결정을 찾아 그대로 공개될 확정 문장으로 옮기고, 다르게 이해될 수 있는
     항목에는 후보 2~3개를 붙여 진행자가 고르게 합니다.
   </p>
   <form method="post">{% csrf_token %}
     <button name="action" value="compile">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h12M13 6l6 6-6 6"/></svg>
-      결정 컴파일 실행
+      결정 사항 추출
     </button>
   </form>
 </div>
@@ -45,7 +39,7 @@
     {% if editable %}
     <form method="post">{% csrf_token %}
       <button name="action" value="reset" class="btn sm ghost" style="color:var(--danger)"
-        onclick="return confirm('컴파일 결과를 모두 지우고 처음부터 다시 할까요?');">결정 지우고 다시 컴파일</button>
+        onclick="return confirm('추출 결과를 모두 지우고 처음부터 다시 할까요?');">결정 지우고 다시 추출</button>
     </form>
     {% elif can_unpublish %}
     <form method="post">{% csrf_token %}
