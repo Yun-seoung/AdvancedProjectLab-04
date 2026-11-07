@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Checkpoint, Decision, DecisionAgreement, Interpretation
+from .models import Checkpoint, Decision, DecisionAgreement, Interpretation, Notification
 
 # 결정 컴파일러(실험 기능)만 관리자에 등록한다. 기존 모델은 지금까지와 같이 등록하지 않는다.
 
@@ -37,3 +37,9 @@ class DecisionAgreementAdmin(admin.ModelAdmin):
 class CheckpointAdmin(admin.ModelAdmin):
     list_display = ("id", "decision", "user", "verdict")
     list_filter = ("verdict",)
+
+
+@admin.register(Notification)
+class NotificationAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "meeting", "kind", "created_at", "read_at")
+    list_filter = ("kind",)

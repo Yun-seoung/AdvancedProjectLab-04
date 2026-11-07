@@ -2,6 +2,7 @@ from datetime import timedelta
 
 from django.utils import timezone
 
+from . import notifications
 from .models import Meeting
 
 
@@ -13,3 +14,10 @@ def due_soon(request):
         team__members=request.user, deadline=timezone.localdate() + timedelta(days=1)
     ).select_related("team")
     return {"due_soon": meetings}
+
+
+def notification_count(request):
+    """상단 메뉴 알림 아이콘에 붙는 '읽지 않은 결정 알림' 개수."""
+    if not request.user.is_authenticated:
+        return {}
+    return {"unread_notifications": notifications.unread_count(request.user)}

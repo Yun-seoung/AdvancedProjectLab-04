@@ -1,0 +1,248 @@
+{% comment %}
+  결정 확인 화면(진행자·팀원) 공용 부품: 한 문항씩 넘겨 보기 + 전사 원본 창.
+
+  쓰는 쪽 템플릿이 지켜야 할 약속:
+  - 문항마다 <section class="decision-step" data-decision-id="결정 id">로 감싼다. 이 부품이 한 번에 하나만 보여준다.
+    자바스크립트가 꺼져 있으면 모든 문항이 그대로 다 보인다(숨김은 스크립트가 켤 때만 건다).
+  - 문항 안에서 전사 원본 창을 여는 곳에 data-open-transcript를 붙인다. 특정 후보의 근거로 바로 가려면
+    data-evidence-label="후보 A"처럼 하이라이트 꼬리표를 함께 준다.
+  - 컨텍스트: meeting(전사 원문 meeting.transcript), evidence_data({결정 id: [{start, end, label, primary}, ...]}),
+    step_key(문항 위치를 기억할 저장 키 앞부분 — 진행자·팀원 화면이 서로 덮어쓰지 않게).
+{% endcomment %}
+<style>
+  /* 이전·다음(그리고 진행자 화면의 저장·공개) 버튼은 화면 아래쪽 같은 자리에 고정한다 — 문항 길이에
+     따라 버튼이 위아래로 움직이면 연달아 넘길 때마다 버튼을 다시 찾아야 한다.
+     스크립트가 이 줄을 body 바로 아래로 옮긴다. 카드처럼 transform·animation이 걸린 조상 안에 있으면
+     position:fixed가 화면이 아니라 그 조상을 기준으로 붙기 때문이다.
+     본문 폭(main.container 최대 800px, 안쪽 여백 20px)에 맞춰 가운데 둔다. */
+  .step-nav {
+    position:fixed; z-index:15; left:50%; bottom:16px; transform:translateX(-50%);
+    width:min(760px, calc(100vw - 32px)); box-sizing:border-box;
+    display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px 16px;
+    padding:10px 14px; background:var(--surface); border:1px solid var(--line);
+    border-radius:14px; box-shadow:var(--shadow);
+  }
+  .step-nav[hidden], .step-move[hidden] { display:none; }
+  .step-move, .step-actions { display:flex; align-items:center; gap:10px; }
+  .step-move { flex:1 1 auto; justify-content:space-between; }
+  .step-actions { flex:0 0 auto; margin-left:auto; }
+  .step-nav button { margin:0; }
+  /* 고정된 버튼 줄이 본문 마지막 줄을 가리지 않게 줄 높이만큼 아래 여백을 둔다(스크립트가 높이를 잰다). */
+  body.has-step-nav main.container { padding-bottom:var(--step-nav-space, 120px); }
+  .step-counter { font-weight:700; color:var(--ink-soft); font-variant-numeric:tabular-nums; }
+  .decision-step.step-hidden { display:none; }
+  [data-open-transcript] { cursor:pointer; }
+  .open-transcript-hint { font-size:.8rem; color:var(--brand); font-weight:600; white-space:nowrap; }
+
+  .transcript-panel {
+    position:fixed; z-index:20; top:64px; right:0; bottom:0; width:min(46vw, 560px);
+    display:flex; flex-direction:column; background:var(--surface);
+    border-left:1px solid var(--line); box-shadow:var(--shadow);
+  }
+  .transcript-panel[hidden] { display:none; }
+  .transcript-head {
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+    padding:12px 16px; border-bottom:1px solid var(--line);
+  }
+  .transcript-head h2 { font-size:1rem; }
+  .transcript-head .sub { font-size:.8rem; color:var(--muted); }
+  .transcript-close {
+    flex:0 0 auto; width:34px; height:34px; border-radius:999px; border:1px solid var(--line);
+    background:var(--surface); color:var(--ink-soft); font-size:1.1rem; line-height:1; cursor:pointer;
+  }
+  .transcript-close:hover { border-color:var(--line-strong); color:var(--ink); }
+  .transcript-note { padding:8px 16px; font-size:.82rem; color:var(--muted); background:var(--surface-sunken); }
+  .transcript-note[hidden] { display:none; }
+  .transcript-body {
+    position:relative; flex:1 1 auto; overflow-y:auto; padding:16px 18px 40vh; white-space:pre-wrap;
+    font-size:.95rem; line-height:1.75; cursor:grab; overscroll-behavior:contain;
+  }
+  .transcript-body.dragging { cursor:grabbing; user-select:none; }
+  .evidence-mark {
+    background:var(--accent-soft); color:var(--ink); border-bottom:2px solid var(--accent);
+    border-radius:3px; padding:0 1px;
+  }
+  .evidence-mark.focused { outline:2px solid var(--accent); outline-offset:1px; }
+  /* 같은 근거 문장이 원문에 또 나오는 자리 — 대표 자리보다 옅게. */
+  .evidence-mark.repeat { background:transparent; border-bottom-style:dashed; }
+  .evidence-label {
+    display:inline-block; margin-right:4px; padding:0 6px; border-radius:999px; vertical-align:1px;
+    background:var(--accent); color:#fff; font-size:.7rem; font-weight:800; white-space:nowrap;
+  }
+  /* 넓은 화면에서는 본문을 왼쪽으로 비켜 원본 창과 나란히 보이게 한다. */
+  @media (min-width: 1100px) {
+    body.transcript-open main.container { margin-right:calc(min(46vw, 560px) + 16px); margin-left:auto; }
+    /* 원본 창이 열리면 본문이 왼쪽으로 비키므로 버튼 줄도 남은 폭의 가운데로 옮긴다. */
+    body.transcript-open .step-nav {
+      left:calc((100vw - min(46vw, 560px)) / 2);
+      width:min(760px, calc(100vw - min(46vw, 560px) - 48px));
+    }
+  }
+  @media (max-width: 1099px) {
+    .transcript-panel { width:100vw; top:56px; }
+  }
+</style>
+
+<aside class="transcript-panel" id="transcript-panel" hidden aria-label="전사 원본">
+  <div class="transcript-head">
+    <div>
+      <h2>전사 원본</h2>
+      <div class="sub" id="transcript-title">근거가 된 문장을 표시했어요. 끌어서 위아래 맥락을 볼 수 있어요.</div>
+    </div>
+    <button type="button" class="transcript-close" id="transcript-close" aria-label="전사 원본 닫기">&times;</button>
+  </div>
+  <div class="transcript-note" id="transcript-note" hidden>이 결정의 근거 문장을 원문에서 찾지 못했어요. 원문 전체를 보여줍니다.</div>
+  <div class="transcript-note" id="transcript-repeat-note" hidden>같은 문장이 원문에 여러 번 나와요. 진하게 칠한 곳이 이 결정과 가장 관련 있어 보이는 자리이고, 점선은 같은 문장이 또 나온 자리예요.</div>
+  <div class="transcript-body" id="transcript-body"></div>
+</aside>
+{{ meeting.transcript|json_script:"transcript-text" }}
+{{ evidence_data|json_script:"evidence-data" }}
+<script>
+(function () {
+  var steps = Array.prototype.slice.call(document.querySelectorAll(".decision-step"));
+  var nav = document.getElementById("step-nav");
+  var prev = document.getElementById("step-prev");
+  var next = document.getElementById("step-next");
+  var counter = document.getElementById("step-counter");
+  var storageKey = "{{ step_key|escapejs }}";
+  var current = 0;
+  var scrollOnShow = false;  // 처음 그릴 때는 스크롤을 건드리지 않는다.
+
+  function saveStep(index) {
+    try { sessionStorage.setItem(storageKey, String(index)); } catch (e) {}
+  }
+  function loadStep() {
+    try { return parseInt(sessionStorage.getItem(storageKey), 10); } catch (e) { return NaN; }
+  }
+
+  // ---- 한 문항씩 넘겨 보기 ----
+  function show(index) {
+    if (!steps.length) return;
+    current = Math.max(0, Math.min(index, steps.length - 1));
+    steps.forEach(function (step, i) { step.classList.toggle("step-hidden", i !== current); });
+    if (counter) counter.textContent = (current + 1) + " / " + steps.length;
+    if (prev) prev.disabled = current === 0;
+    if (next) next.disabled = current === steps.length - 1;
+    saveStep(current);
+    // 넘긴 문항의 첫머리가 화면 위로 지나가 있으면 첫머리로 올린다(버튼은 제자리에 있다).
+    var top = steps[current].getBoundingClientRect().top;
+    if (scrollOnShow && top < 72) window.scrollBy(0, top - 80);
+    // 원본 창이 열려 있으면 새 문항의 근거로 따라간다.
+    if (!panel.hidden) openFor(steps[current].getAttribute("data-decision-id"), null);
+  }
+
+  // ---- 전사 원본 창 ----
+  var panel = document.getElementById("transcript-panel");
+  var body = document.getElementById("transcript-body");
+  var note = document.getElementById("transcript-note");
+  var repeatNote = document.getElementById("transcript-repeat-note");
+  var transcript = JSON.parse(document.getElementById("transcript-text").textContent || '""') || "";
+  var evidence = JSON.parse(document.getElementById("evidence-data").textContent || "{}") || {};
+
+  function render(spans) {
+    body.textContent = "";
+    var cursor = 0;
+    spans.forEach(function (span) {
+      if (span.start > cursor) body.appendChild(document.createTextNode(transcript.slice(cursor, span.start)));
+      if (span.label) {
+        var tag = document.createElement("span");
+        tag.className = "evidence-label";
+        tag.textContent = span.label;
+        body.appendChild(tag);
+      }
+      var mark = document.createElement("mark");
+      // primary가 false인 구간은 같은 근거 문장이 또 나온 자리다(예전 데이터처럼 값이 없으면 대표로 본다).
+      mark.className = span.primary === false ? "evidence-mark repeat" : "evidence-mark";
+      mark.setAttribute("data-label", span.label || "");
+      mark.textContent = transcript.slice(span.start, span.end);
+      body.appendChild(mark);
+      cursor = span.end;
+    });
+    body.appendChild(document.createTextNode(transcript.slice(cursor)));
+  }
+
+  function scrollToMark(mark) {
+    body.querySelectorAll(".evidence-mark.focused").forEach(function (m) { m.classList.remove("focused"); });
+    if (!mark) { body.scrollTop = 0; return; }
+    mark.classList.add("focused");
+    // 본문(.transcript-body)이 기준 위치라 offsetTop이 곧 본문 안에서의 높이다. 근거를 위쪽 1/3에 둔다.
+    body.scrollTop = Math.max(0, mark.offsetTop - body.clientHeight / 3);
+  }
+
+  function openFor(decisionId, label) {
+    var spans = evidence[decisionId] || [];
+    render(spans);
+    note.hidden = spans.length > 0;
+    repeatNote.hidden = !spans.some(function (span) { return span.primary === false; });
+    panel.hidden = false;
+    document.body.classList.add("transcript-open");
+    // 대표 자리로 간다 — 같은 문장이 또 나온 자리(.repeat)는 고르지 않는다.
+    var marks = Array.prototype.slice.call(body.querySelectorAll(".evidence-mark:not(.repeat)"));
+    var target = marks[0] || null;
+    if (label) {
+      marks.forEach(function (m) {
+        if ((m.getAttribute("data-label") || "").split(" · ").indexOf(label) >= 0) target = m;
+      });
+    }
+    scrollToMark(target);
+  }
+
+  function close() {
+    panel.hidden = true;
+    document.body.classList.remove("transcript-open");
+  }
+
+  document.addEventListener("click", function (event) {
+    var opener = event.target.closest("[data-open-transcript]");
+    if (!opener) return;
+    // 라디오·입력칸·버튼을 누를 때는 고르는 동작이 우선이다 — 원본 창은 열지 않는다.
+    if (event.target.closest("input, textarea, button, a, summary, select")) return;
+    var step = opener.closest(".decision-step");
+    if (!step) return;
+    openFor(step.getAttribute("data-decision-id"), opener.getAttribute("data-evidence-label"));
+  });
+  document.getElementById("transcript-close").addEventListener("click", close);
+  document.addEventListener("keydown", function (event) {
+    if (event.key === "Escape" && !panel.hidden) close();
+  });
+
+  // 마우스로 끌어서 위아래로 넘겨 본다(터치는 원래 스크롤이 된다).
+  var drag = null;
+  body.addEventListener("pointerdown", function (event) {
+    if (event.pointerType !== "mouse" || event.button !== 0) return;
+    drag = { y: event.clientY, top: body.scrollTop, moved: false };
+  });
+  window.addEventListener("pointermove", function (event) {
+    if (!drag) return;
+    var dy = event.clientY - drag.y;
+    if (Math.abs(dy) > 3) { drag.moved = true; body.classList.add("dragging"); }
+    if (drag.moved) body.scrollTop = drag.top - dy;
+  });
+  window.addEventListener("pointerup", function () {
+    drag = null;
+    body.classList.remove("dragging");
+  });
+
+  if (steps.length) {
+    var move = nav ? nav.querySelector(".step-move") : null;
+    var hasActions = !!(nav && nav.querySelector("[data-step-actions]"));
+    // 문항이 하나뿐이면 이전·다음은 숨기되, 저장·공개 버튼이 있으면 줄은 남긴다.
+    if (move) move.hidden = steps.length < 2;
+    if (nav) {
+      nav.hidden = steps.length < 2 && !hasActions;
+      document.body.appendChild(nav);
+    }
+    document.body.classList.toggle("has-step-nav", !!nav && !nav.hidden);
+    function reserveSpace() {
+      if (nav && !nav.hidden) document.body.style.setProperty("--step-nav-space", (nav.offsetHeight + 40) + "px");
+    }
+    reserveSpace();
+    window.addEventListener("resize", reserveSpace);
+    if (prev) prev.addEventListener("click", function () { show(current - 1); });
+    if (next) next.addEventListener("click", function () { show(current + 1); });
+    var saved = loadStep();
+    show(isNaN(saved) ? 0 : saved);
+    scrollOnShow = true;
+  }
+})();
+</script>

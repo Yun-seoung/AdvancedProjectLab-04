@@ -1,5 +1,5 @@
 {% extends "meetalign/base.html" %}
-{% block note %}<li>회의는 제목과 마감일로 만든다. 마감일은 선택 사항이다.</li>{% endblock %}
+{% block note %}<li>회의는 제목과 마감일로 만든다. 마감일은 선택 사항이다.</li><li>참석자로 고른 팀원에게만 결정 알림이 간다.</li>{% endblock %}
 {% block container_class %} narrow{% endblock %}
 {% block content %}
 <div class="page-head"><h1><a href="{% url 'meeting_list' team.id %}" class="crumb-link">{{ team.name }}</a> <span class="crumb-sep">/</span> 회의 만들기</h1></div>
@@ -13,6 +13,7 @@
       <input id="title" name="title" placeholder="예: 로그인 화면 시안 회의"></div>
     <div class="field"><label for="deadline">마감일 (선택)</label>
       <input id="deadline" type="date" name="deadline"></div>
+    {% include "meetalign/_participant_picker.html" %}
     <button type="submit" class="block" style="margin-top:6px">회의 만들기</button>
   </form>
 </div>

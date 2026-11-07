@@ -1,13 +1,14 @@
 """결정 컴파일러(실험 기능) — 확정 문장 후보를 만들고 진행자가 고르게 한다.
 
 AI를 한 번 부른다. 전사 원문을 보내고 결정마다
-  [안건 한 줄 · 모호 여부 · 왜 갈리나 · 확정 문장 후보 2~3개 · 원문 근거 · 추천]
+  [안건 한 줄 · 모호 여부 · 왜 갈리나 · 원문 근거 · AI가 가장 추천하는 확정 문장 하나]
 을 한 응답으로 받는다(parse_items).
 
-- 모호한 결정: AI가 "왜 다르게 이해할 수 있나" 한 줄과 그대로 공개될 확정 문장 후보 2~3개를
-  만든다. 진행자는 읽고 탭 한 번으로 고른다. 근거가 전사 원문에 실제로 없는 후보는 버린다.
-  근거가 가장 강한 후보 하나에 'AI 추천' 배지가 붙지만 미리 선택해 두지는 않는다 —
-  진행자가 읽고 직접 골라야 모호함이 실제로 정리되기 때문이다.
+- 모호한 결정: AI가 "왜 다르게 이해할 수 있나" 한 줄과 그대로 공개될 확정 문장을 가장 추천하는
+  것 하나만 만든다(MAX_INTERPRETATIONS = 1). 생성한 문장에는 원문 근거를 따로 붙이지 않는다 —
+  원문 근거는 결정 하나에 하나(Decision.evidence)이고 전사 원본 창의 하이라이트에만 쓴다.
+  추천 문장을 미리 선택해 두지는 않는다 — 진행자가 읽고 직접 골라야 모호함이 실제로 정리되기
+  때문이다. 진행자가 아무것도 고르지 않고 공개하면 그 결정은 빠진다(views._save_decision_edits).
 - 명확한 결정: AI가 확정 문장 하나를 쓰고, 진행자 탭 없이 공개 목록에 들어간다.
 - 규칙 안전망(safety_warnings): AI가 '명확'이라 한 항목만 되짚는다. 확정 문장이나 원문 근거에
   모호어·날짜·숫자 충돌이 있거나 확정 문장에 "그쪽/그분" 같은 지시어가 남아 있으면 확인
@@ -41,12 +42,13 @@ import re
 from django.db import IntegrityError, transaction
 
 from . import services
-from .models import Decision, DecisionAgreement, Interpretation
+from .models import Decision, Interpretation
 
 # 한 회의에서 받을 결정 수 상한(LLM이 회의록을 잘게 쪼개는 경우 방지).
 MAX_DECISIONS = 12
-# 결정 하나에 보여줄 확정 문장 후보 수 상한.
-MAX_INTERPRETATIONS = 3
+# 결정 하나에 보여줄 AI 확정 문장 수. 가장 추천하는 하나만 보여준다 — 후보 여러 개를 읽고 비교하는
+# 것이 진행자에게 가장 큰 부담이었고, 고르지 않는 것은 '직접 쓰기'로 언제든 대신할 수 있다.
+MAX_INTERPRETATIONS = 1
 # 파싱 실패 시 같은 프롬프트로 한 번 더 보내고, 그래도 안 되면 실패 처리한다.
 PARSE_RETRIES = 1
 # 확인이 필요한 결정 수에는 상한을 두지 않는다. 모호 판정이 AI로 넘어간 뒤에 서버가 앞쪽
@@ -96,23 +98,15 @@ FAKE_DECISIONS = [
         "topic": "로그 보관 기간",
         "ambiguous": True,
         "why": "\"한 달 정도면 충분\"이 30일인지 90일인지 갈립니다",
-        "candidates": [
-            {"text": "민수가 12월 5일까지 로그 보관 기간을 30일로 바꾸고, 스테이징 로그가 30일 뒤 지워지는 것을 확인한다",
-             "evidence": "로그는 일단 한 달 정도면 충분할 것 같은데요", "recommended": True},
-            {"text": "민수가 12월 5일까지 로그 보관 기간을 90일로 바꾸고, 감사 로그 3개월 요건을 문서에 남긴다",
-             "evidence": "감사 때문에 분기 단위로 봐야 한다고 들었어요"},
-        ],
+        "evidence": "로그는 일단 한 달 정도면 충분할 것 같은데요",
+        "candidate": "민수가 12월 5일까지 로그 보관 기간을 30일로 바꾸고, 스테이징 로그가 30일 뒤 지워지는 것을 확인한다",
     },
     {
         "topic": "QA 범위",
         "ambiguous": True,
         "why": "\"담당 화면\"이 각자 만든 화면인지 배포에 포함된 화면 전체인지 갈립니다",
-        "candidates": [
-            {"text": "각 담당자가 12월 8일까지 본인이 만든 화면만 QA하고, 결과를 팀 채널에 한 줄로 남긴다",
-             "evidence": "담당 화면은 각자 보는 게 빠를 것 같아요", "recommended": True},
-            {"text": "영희가 12월 8일까지 이번 배포에 포함된 화면 전체를 QA하고, 발견한 문제를 이슈로 등록한다",
-             "evidence": "이번 배포는 화면이 엮여 있어서 전체를 한 번 봐야 해요"},
-        ],
+        "evidence": "담당 화면은 각자 보는 게 빠를 것 같아요",
+        "candidate": "각 담당자가 12월 8일까지 본인이 만든 화면만 QA하고, 결과를 팀 채널에 한 줄로 남긴다",
     },
     {
         "topic": "배포 스크립트 정리",
@@ -275,25 +269,23 @@ def _compile_prompt(source):
         "  why에 원문에서 무엇이 빠졌거나 부딪혀서 어떻게 다르게 이해할 수 있는지를 한 줄로 구체적으로 쓰되, 원인이 된 "
         "전사본 표현을 따옴표로 그대로 인용해라(예: \"'한 달 정도면 충분'이 30일인지 90일인지 갈립니다\"). 점검표 "
         "번호(\"1번에 해당\" 등)는 쓰지 마라 — 진행자 화면에 그대로 보인다. 누가 틀렸다는 식으로 쓰지 마라.\n"
-        "  candidates에 진행자가 고를 수 있는 '그대로 공개될 확정 문장'을 2~3개 쓴다. 각 후보는 빠진 부분을 "
-        "서로 다른 방향으로 채운 실행 문장이다(예: 기한이 없으면 서로 다른 기한, 충돌이면 일정을 옮기는 안과 그 "
-        "사람이 늦게 오는 안). 원문에 없는 날짜·이름을 지어내지 말고, 원문에 나온 날짜·요일·시간·장소 안에서만 "
-        "고른다. 채울 근거가 원문에 전혀 없으면 \"~은 다음 회의 전까지 단톡방에서 정한다\"처럼 정하는 방법을 "
-        "확정하는 문장을 쓴다.\n"
+        "  candidate에 진행자에게 가장 추천하는 '그대로 공개될 확정 문장' 하나만 쓴다. 빠진 부분을 원문 흐름상 "
+        "가장 그럴듯한 쪽으로 채운 실행 문장이다. 원문에 없는 날짜·이름을 지어내지 말고, 원문에 나온 날짜·요일·"
+        "시간·장소 안에서만 고른다. 채울 근거가 원문에 전혀 없으면 \"~은 다음 회의 전까지 단톡방에서 정한다\"처럼 "
+        "정하는 방법을 확정하는 문장을 쓴다.\n"
         "ambiguous: false 항목:\n"
-        "  final에 '그대로 공개될 확정 문장' 하나를 쓴다. candidates는 쓰지 않는다.\n\n"
+        "  final에 '그대로 공개될 확정 문장' 하나를 쓴다. candidate는 쓰지 않는다.\n\n"
         "확정 문장(final, candidates의 text) 규칙: 그 문장이 팀원에게 그대로 공개된다. 누가·무엇을·언제까지가 "
         "문장 안에 들어간 실행 문장으로 쓴다. \"~라는 뜻\", \"A일 수도 B일 수도\" 같은 해설체로 쓰지 마라. 어느 "
-        "후보가 맞는지 쓰지 마라 — 고르는 것은 회의 진행자다.\n"
+        "쪽이 맞는지 해설하지 마라 — 확정하는 것은 회의 진행자다.\n"
         "결론을 다음으로 미루기로 한 안건(\"내일 다시 얘기\", \"일단 보류\" 등)은 둘 중 하나를 고른 것처럼 쓰지 "
-        "마라. ambiguous: true로 두고, candidates 가운데 하나는 아직 정해지지 않았다는 사실 그대로를 반영해 쓴다.\n"
-        "evidence 규칙: 그 문장의 근거가 된 전사본 원문 구절을 토씨 하나 틀리지 않고 그대로 복사해서 써라(짧게 "
-        "한 구절). 원문에 없는 구절을 쓰면 그 후보는 버려진다.\n"
-        "recommended 규칙: 원문 근거가 가장 강한 후보 하나에만 true를 붙인다.\n"
+        "마라. ambiguous: true로 두고, candidate는 아직 정해지지 않았다는 사실 그대로를 반영해 쓴다.\n"
+        "evidence 규칙: 항목마다 그 결정이 나온 전사본 원문 구절을 토씨 하나 틀리지 않고 그대로 복사해서 써라(짧게 "
+        "한 구절). 확정 문장의 근거가 아니라 회의 원문에서 이 안건이 나온 자리다.\n"
         "ambiguous 항목이 많으면, 회의에서 가장 중요한 5개에만 ambiguous를 붙여라.\n\n"
         "반드시 아래 JSON 배열 형식으로만 답하라. 설명이나 코드블록 표시 없이 JSON만 출력하라:\n"
         '[{"topic": "안건 한 줄", "ambiguous": true, "why": "왜 갈릴 수 있나", '
-        '"candidates": [{"text": "확정 문장", "evidence": "근거가 된 원문 문장", "recommended": true}]}, '
+        '"evidence": "이 안건이 나온 원문 문장", "candidate": "가장 추천하는 확정 문장"}, '
         '{"topic": "안건 한 줄", "ambiguous": false, "final": "확정 문장", "evidence": "근거가 된 원문 문장"}]\n\n'
         "전사본:\n" + source
     )
@@ -354,58 +346,75 @@ def _draft_hint_text(text):
     return text
 
 
-def _parse_candidates(raw_candidates, normalized_source):
-    """후보 배열 → ([{"text","evidence","recommended"}, ...], draft_hint).
+def _parse_candidates(raw_candidates):
+    """AI 추천 문장 → ([{"text","evidence","recommended"}] 최대 MAX_INTERPRETATIONS개, draft_hint).
 
-    - 객체가 아닌 항목(문자열만 온 경우)은 조용히 버린다. 한 항목의 형식이 틀렸다고 회의
-      전체를 실패시키지 않는다.
-    - 확정 문장에 모호어·지시어(AMBIGUOUS_PHRASES, REFERENT_PHRASES)가 그대로 남은 후보는
-      선택지에서 버린다. 모호함을 없애야 할 후보가 그 모호함을 그대로 되풀이하면("적당히
-      올린다") 고를 의미가 없다 — safety_warnings가 '명확' 항목의 확정 문장에 적용하는 것과
-      같은 기준이다. 버리기 전에 그 문장을 draft_hint로 하나만 남겨 둔다(_draft_hint_text) —
-      완전히 버리지 않고 '직접 쓰기'의 출발점으로 재활용한다.
-    - 근거가 원문에 없는 후보는 버린다. evidence가 빈 문자열이면 검증을 건너뛴다
-      (가짜 응답 모드에는 대조할 원문이 없다).
-    - 추천은 처음 하나만 인정한다 — 화면의 'AI 추천' 배지는 하나여야 읽는 순서가 생긴다.
+    새 형식은 문자열 하나("candidate")지만, 예전 형식처럼 후보 배열("candidates")이 와도 읽는다 —
+    모델이 지시를 어기고 여러 개를 보내는 일이 흔하다. 그때는 recommended가 붙은 것을 먼저,
+    나머지는 온 순서대로 보고 쓸 수 있는 첫 문장 하나만 남긴다.
+
+    - 객체도 문자열도 아닌 항목은 조용히 버린다. 한 항목의 형식이 틀렸다고 회의 전체를
+      실패시키지 않는다.
+    - 확정 문장에 모호어·지시어(AMBIGUOUS_PHRASES, REFERENT_PHRASES)가 그대로 남은 문장은
+      고를 의미가 없으므로 버린다 — safety_warnings가 '명확' 항목의 확정 문장에 적용하는 것과
+      같은 기준이다. 버리기 전에 그 문장을 draft_hint로 하나만 남겨 '직접 쓰기'의 출발점으로 쓴다.
+    - 생성한 문장에는 원문 근거를 붙이지 않는다(evidence는 늘 빈 문자열). 근거 검증으로 문장을
+      버리지도 않는다 — 근거는 결정 하나에 하나(item["evidence"])다.
     """
-    results = []
-    recommended_taken = False
-    draft_hint = ""
+    if isinstance(raw_candidates, str):
+        raw_candidates = [raw_candidates]
+    entries = []
     for item in raw_candidates if isinstance(raw_candidates, list) else []:
-        if not isinstance(item, dict):
-            continue
-        text = str(item.get("text", "")).strip()
+        if isinstance(item, str):
+            entries.append((item.strip(), False))
+        elif isinstance(item, dict):
+            entries.append((str(item.get("text", "")).strip(), bool(item.get("recommended"))))
+    # 정렬이 안정적이라 추천끼리·비추천끼리는 온 순서가 유지된다.
+    entries.sort(key=lambda entry: not entry[1])
+    results = []
+    draft_hint = ""
+    for text, _ in entries:
         if not text:
             continue
         if any(phrase in text for phrase in AMBIGUOUS_PHRASES + REFERENT_PHRASES):
             if not draft_hint:
                 draft_hint = _draft_hint_text(text)
             continue
-        evidence = str(item.get("evidence", "")).strip()
-        if normalized_source is not None and evidence and services._normalize_for_match(evidence) not in normalized_source:
-            continue
-        if any(text == kept["text"] for kept in results):
-            continue
-        recommended = bool(item.get("recommended")) and not recommended_taken
-        recommended_taken = recommended_taken or recommended
-        results.append({"text": text, "evidence": evidence, "recommended": recommended})
+        results.append({"text": text, "evidence": "", "recommended": True})
         if len(results) >= MAX_INTERPRETATIONS:
             break
     return results, draft_hint
 
 
+def _legacy_candidate_evidence(raw_candidates, normalized_source):
+    """예전 형식(후보마다 evidence)으로 답했을 때 결정의 근거로 쓸 첫 후보 근거.
+
+    결정 단위 evidence가 비어 있을 때만 쓴다. 원문을 들고 있으면 원문에서 찾은 것만 쓴다 —
+    근거는 전사 원본 창 하이라이트와 '보류' 자동 감지(_looks_deferred)에 쓰이기 때문이다.
+    """
+    for item in raw_candidates if isinstance(raw_candidates, list) else []:
+        if not isinstance(item, dict):
+            continue
+        evidence = str(item.get("evidence", "")).strip()
+        if evidence and (normalized_source is None or services._normalize_for_match(evidence) in normalized_source):
+            return evidence
+    return ""
+
+
 def parse_items(raw, source_text=None):
-    """LLM 응답 → [{"topic","ambiguous","why","final","evidence","candidates"}, ...].
+    """LLM 응답 → [{"topic","ambiguous","why","final","evidence","candidates","draft_hint"}, ...].
 
     한 번의 호출로 받은 응답을 전부 여기서 읽는다. 항목 하나의 형식이 틀렸다고 나머지를
     버리지 않는다 — 읽을 수 없는 조각만 비워서 넘기고, 그 항목은 진행자가 직접 쓰거나 다음
     회의로 넘기게 된다.
 
     - topic이 비면 그 항목은 결정이 될 수 없으므로 버린다.
-    - 모호 항목(ambiguous=True)은 candidates만 쓰고 final/evidence를 버린다. 반대로 명확
-      항목은 final/evidence만 쓰고 candidates를 버린다 — 공개 기준이 둘이 되지 않게.
+    - 모호 항목(ambiguous=True)은 AI 추천 문장(candidates, 최대 1개)만 쓰고 final을 버린다.
+      반대로 명확 항목은 final만 쓰고 추천 문장을 버린다 — 공개 기준이 둘이 되지 않게.
+      evidence(그 결정이 나온 원문 구절)는 둘 다 받는다.
     - source_text가 주어지면 근거를 원문과 대조한다. 명확 항목의 근거가 원문에 없으면
-      final을 비워 돌려주고(호출자가 '확인 필요'로 올린다), 후보는 그 후보만 버린다.
+      final을 비워 돌려주고(호출자가 '확인 필요'로 올린다), 모호 항목은 근거만 비운다(하이라이트할
+      자리가 없을 뿐 추천 문장은 그대로 쓸 수 있다).
     - 근거 문장이 겹치는 항목은 중복으로 보고 먼저 나온 것만 남긴다(_dedupe_items) — 같은
       전사 문장을 topic만 바꿔 두 번 만들어내는 LLM 응답을 걸러낸다.
     """
@@ -422,14 +431,19 @@ def parse_items(raw, source_text=None):
             continue
         ambiguous = bool(row.get("ambiguous"))
         final = "" if ambiguous else str(row.get("final", "")).strip()
-        evidence = "" if ambiguous else str(row.get("evidence", "")).strip()
+        evidence = str(row.get("evidence", "")).strip() or (
+            _legacy_candidate_evidence(row.get("candidates"), normalized_source) if ambiguous else ""
+        )
+        evidence_found = normalized_source is None or (
+            bool(evidence) and services._normalize_for_match(evidence) in normalized_source
+        )
         # 원문을 들고 검증하는 중이라면, 근거가 없는 확정 문장은 "원문에 있다"고 볼 수 없다.
-        # (후보 쪽의 빈 근거는 가짜 응답 모드 통로로 남긴다 — _parse_candidates 참고.)
-        if final and normalized_source is not None and (
-            not evidence or services._normalize_for_match(evidence) not in normalized_source
-        ):
+        if final and not evidence_found:
             final = ""
-        candidates, draft_hint = _parse_candidates(row.get("candidates"), normalized_source) if ambiguous else ([], "")
+        if ambiguous and not evidence_found:
+            evidence = ""
+        raw_candidates = row.get("candidate") if row.get("candidate") is not None else row.get("candidates")
+        candidates, draft_hint = _parse_candidates(raw_candidates) if ambiguous else ([], "")
         items.append({
             "topic": topic,
             "ambiguous": ambiguous,
@@ -456,11 +470,7 @@ def _dedupe_items(items):
     seen_evidence_by_topic = {}
     deduped = []
     for item in items:
-        evidences = (
-            {services._normalize_for_match(c["evidence"]) for c in item["candidates"] if c["evidence"]}
-            if item["ambiguous"] else
-            ({services._normalize_for_match(item["evidence"])} if item["evidence"] else set())
-        )
+        evidences = {services._normalize_for_match(item["evidence"])} if item["evidence"] else set()
         prior = seen_evidence_by_topic.get(item["topic"])
         if evidences and prior and evidences & prior:
             continue
@@ -479,9 +489,8 @@ def compile_meeting(meeting):
 
     {"decisions": n, "ambiguous": n, "few_candidates": n}
     - ambiguous: 진행자가 확인해야 하는 항목 수(AI가 갈린다고 봤거나 규칙이 걸린 것)
-    - few_candidates: 확인이 필요한데 후보가 하나도 없는 항목 수. 근거 검증에서 후보가 전부
-      버려졌거나 AI가 후보를 못 만든 경우다 — 진행자는 직접 쓰기나 '다음 회의로 넘김'으로만
-      처리할 수 있다.
+    - few_candidates: 확인이 필요한데 AI 추천 문장이 없는 항목 수. AI가 문장을 못 만들었거나
+      모호어가 남아 버려진 경우다 — 진행자는 직접 쓰기나 '다음 회의로 넘김'으로만 처리할 수 있다.
 
     이미 Decision이 있는 회의는 건드리지 않는다(공개 뒤에 결정이 바뀌면 팀원이 확인한 내용과
     달라진다). 다시 컴파일하려면 호출 전에 draft 상태인 Decision을 지워야 한다.
@@ -512,11 +521,10 @@ def compile_meeting(meeting):
 def _looks_deferred(item):
     """결론을 다음으로 미루기로 한 근거 문장인가(DEFERRAL_PHRASES).
 
-    모호 항목은 후보들의 근거를, 명확 항목은 그 근거 하나를 본다 — 둘 다 전사 원문에서 가져온
-    텍스트라 AI가 쓴 topic/why보다 믿을 수 있다.
+    그 결정이 나온 원문 구절을 본다 — 전사 원문에서 가져온 텍스트라 AI가 쓴 topic/why보다 믿을 수
+    있다.
     """
-    texts = [c["evidence"] for c in item["candidates"]] if item["ambiguous"] else [item["evidence"]]
-    return any(phrase in text for text in texts for phrase in DEFERRAL_PHRASES)
+    return any(phrase in item["evidence"] for phrase in DEFERRAL_PHRASES)
 
 
 def _save_items(meeting, items):
@@ -535,6 +543,9 @@ def _save_items(meeting, items):
                 warnings=warnings, divergence_reason=divergence_reason,
                 final_text=undecided_sentence(item["topic"]) if deferred else final_text,
                 marked_undecided=deferred, draft_hint=draft_hint,
+                # 그 결정이 나온 원문 구절 — 전사 원본 창에서 하이라이트한다. AI 추천 문장에는
+                # 근거를 따로 붙이지 않으므로 결정마다 이 하나뿐이다.
+                evidence=item["evidence"],
             )
             for candidate_order, candidate in enumerate(candidates):
                 Interpretation.objects.create(
@@ -579,7 +590,7 @@ def _resolve_item(item):
     )
     return (
         warnings, "", "",
-        [{"text": item["final"], "evidence": item["evidence"], "recommended": False}],
+        [{"text": item["final"], "evidence": "", "recommended": False}],
         draft_hint,
     )
 
@@ -587,10 +598,12 @@ def _resolve_item(item):
 # ---------------------------------------------------------------------------
 # ③ 진행자 확정 + ④ 확정 문장 공개
 #
-# 진행자는 확인이 필요한 항목마다(Decision.needs_host) [후보 선택 | 직접 쓰기 | 다음 회의로
-# 넘김 | 이 결정 빼기] 중 하나를 고른다. 확인이 필요 없는 항목은 AI가 쓴 문장이 곧 확정
-# 내용이라 고를 것이 없고(접힌 '고치기'로 바꿀 수는 있다), 공개 대상에는 똑같이 포함된다.
-# 공개를 막는 조건은 하나다 — 공개할 문장이 있는가(Decision.blocks_publish).
+# 진행자는 확인이 필요한 항목마다(Decision.needs_host) [AI 추천 문장 | 직접 쓰기 | 다음 회의로
+# 넘김 | 이 결정 빼기] 중 하나를 고른다. 확인이 필요 없는 항목은 '직접 쓰기' 칸에 AI가 쓴 문장이
+# 미리 들어 있고, 그 칸에 적힌 문장이 그대로 공개된다.
+# 모든 항목을 고르지 않아도 공개할 수 있다 — 공개할 때 고르지 않은 확인 필요 항목은 '이 결정
+# 빼기'로 처리된다(views._save_decision_edits). 공개할 문장이 없는 항목(Decision.blocks_publish)이
+# 공개되는 일은 그래서 생기지 않고, publish_blockers는 마지막 그물로만 남는다.
 # ---------------------------------------------------------------------------
 
 # 진행자 확정 라디오 버튼 value. "candidate:12" 형태.
@@ -662,10 +675,10 @@ def undecided_sentence(topic):
 
 
 def publish_blockers(decisions):
-    """공개를 막는 항목 — 확인이 필요한데 진행자가 아직 고르지 않은 것, 그리고 문장이 빈 것.
+    """공개할 문장이 없는 항목 — 확인이 필요한데 진행자가 아직 고르지 않은 것, 그리고 문장이 빈 것.
 
-    이 목록이 비어 있어야 "확정 명세 공개"를 누를 수 있다. 화면의 버튼 비활성화와 서버의
-    거부가 같은 판정을 쓰도록 여기 한 곳에서만 센다.
+    화면은 이 수를 "고르지 않으면 빠지는 항목"으로 보여주고, 공개할 때 views가 이 항목들을
+    '이 결정 빼기'로 처리한다. 그 뒤에도 남아 있으면 서버가 공개를 거부한다(마지막 그물).
 
     문장 유무를 함께 보는 이유: 팀원 화면은 final_text 하나만 보여주므로 문장이 없으면 번호만
     있는 빈 줄이 공개된다. AI가 모호 판정을 하면서 이유를 비워 보내거나, 이번 재설계 전에
@@ -693,12 +706,10 @@ def publish_decisions(meeting):
 
 
 def revise_final_text(decision, text):
-    """공개된 항목의 확정 문장을 고친다.
+    """공개된 항목의 확정 문장을 고치고 revised를 세운다 — 팀원 화면에서 "수정됨"으로 표시한다.
 
-    그 항목의 확인 기록(DecisionAgreement)을 모두 지우고 revised를 세운다 — 팀원이 확인한
-    문장과 내용이 달라졌으므로 다시 받아야 하고, revised가 있어야 팀원 화면에서 "처음 보는
-    항목"과 "내용이 바뀐 항목"을 구별해 안내할 수 있다.
-    지워진 확인 기록 수를 돌려준다.
+    팀원 알림은 호출한 쪽(views)이 보낸다. 예전 '확인했어요' 기록(DecisionAgreement)이 남아
+    있으면 바뀐 문장과 맞지 않으므로 함께 지운다. 지워진 기록 수를 돌려준다.
     """
     with transaction.atomic():
         Decision.objects.filter(pk=decision.pk).update(final_text=text, revised=True)
@@ -717,31 +728,110 @@ def published_decisions(meeting):
     return list(
         meeting.decisions
         .filter(status__in=[Decision.STATUS_PUBLISHED, Decision.STATUS_UNDECIDED])
-        .prefetch_related("agreements")
+        .prefetch_related("interpretations")
     )
 
 
-def ack_counts(decisions):
-    """진행자 화면용 공개 항목별 {decision_id: {"ack": n, "differ": m, "comments": [...]}}.
+# ---------------------------------------------------------------------------
+# 전사 원본 창 — 근거 문장의 위치
+# ---------------------------------------------------------------------------
 
-    user는 아예 조회하지 않는다 — 누가 '달랐어요'를 골랐는지, 의견을 누가 썼는지는 결과 어디에도
-    담기지 않는다. 미결정 항목은 읽기 전용이라 세지 않는다.
+
+def _match_index(text):
+    """대조용 문자열과 원래 위치 목록. 공백·문장부호를 지우고 남은 글자마다 원문 위치를 기억한다.
+
+    근거 문장은 원문과 공백·부호가 조금씩 달라도 같은 문장으로 본다(_normalize_for_match와 같은
+    기준을 부호까지 넓혔다) — STT 전사본은 쉼표·말줄임표가 들쭉날쭉해서다.
     """
-    published_ids = [decision.id for decision in decisions if decision.status == Decision.STATUS_PUBLISHED]
-    counts = {decision_id: {"ack": 0, "differ": 0, "comments": []} for decision_id in published_ids}
-    rows = DecisionAgreement.objects.filter(decision_id__in=published_ids).values_list("decision_id", "kind", "comment")
-    for decision_id, kind, comment in rows:
-        row = counts[decision_id]
-        if kind == DecisionAgreement.KIND_DIFFER:
-            row["differ"] += 1
-            if comment:
-                row["comments"].append(comment)
-        else:
-            row["ack"] += 1
-    for row in counts.values():
-        # 저장 순서대로 보여주면 시점으로 작성자를 짐작할 수 있어서 가나다순으로 섞는다.
-        row["comments"].sort()
-    return counts
+    kept, positions = [], []
+    for index, char in enumerate(text):
+        if char.isalnum():
+            kept.append(char)
+            positions.append(index)
+    return "".join(kept), positions
+
+
+# 같은 근거 문장이 원문에 여러 번 나올 때, 각 자리 앞뒤로 이만큼(공백·부호를 뺀 글자 수)을 보고
+# 결정 내용과 얼마나 겹치는지 잰다.
+CONTEXT_WINDOW = 80
+
+
+def _bigrams(text):
+    return {text[i:i + 2] for i in range(len(text) - 1)}
+
+
+def _occurrences(haystack, needle):
+    """대조용 문자열에서 needle이 나오는 시작 위치 전부(겹쳐 나오는 것도 센다)."""
+    found, at = [], haystack.find(needle)
+    while at >= 0:
+        found.append(at)
+        at = haystack.find(needle, at + 1)
+    return found
+
+
+def _ranked_spans(source, evidence, context=""):
+    """근거 문장이 원문에서 나오는 모든 (시작, 끝) 위치. 첫 번째가 대표 위치다.
+
+    한 번만 나오면 그 자리다. 여러 번 나오면 각 자리 앞뒤 CONTEXT_WINDOW 글자가 context(그 결정의
+    안건·확정 문장)와 두 글자 단위로 얼마나 겹치는지 보고 가장 많이 겹치는 자리를 대표로 앞에
+    둔다 — "좋아요", "그렇게 하죠"처럼 짧은 맞장구는 회의 내내 되풀이되므로 처음 나온 자리를
+    고르면 엉뚱한 대목을 가리키기 쉽다. 점수가 같으면 먼저 나온 자리를 대표로 둔다.
+    """
+    if not source or not evidence:
+        return []
+    haystack, positions = _match_index(source)
+    needle, _ = _match_index(evidence)
+    if not needle:
+        return []
+    starts = _occurrences(haystack, needle)
+    if len(starts) > 1:
+        wanted = _bigrams(_match_index(context)[0])
+        def score(at):
+            window = haystack[max(0, at - CONTEXT_WINDOW):at] + haystack[at + len(needle):at + len(needle) + CONTEXT_WINDOW]
+            return len(_bigrams(window) & wanted)
+        starts.sort(key=lambda at: -score(at))  # 정렬이 안정적이라 동점이면 먼저 나온 자리가 앞에 남는다.
+    return [(positions[at], positions[at + len(needle) - 1] + 1) for at in starts]
+
+
+def evidence_span(source, evidence, context=""):
+    """근거 문장의 대표 위치 (시작, 끝). 못 찾으면 None.
+
+    끝 위치는 마지막 글자 바로 뒤라서 source[start:end]가 그 구간이다. 여러 번 나오면
+    context(그 결정의 안건·확정 문장)와 가장 가까운 자리를 고른다(_ranked_spans).
+    """
+    spans = _ranked_spans(source, evidence, context)
+    return spans[0] if spans else None
+
+
+def evidence_spans(source, evidences, context=""):
+    """[{"start", "end", "label", "primary"}, ...] — 화면에서 하이라이트할 구간. 원문에서 찾은 것만, 겹치지 않게.
+
+    evidences는 [(label, 근거 문장), ...]이다. label은 화면에서 어느 후보의 근거인지 표시하는 데
+    쓴다(예: "후보 A"). 같은 구간이 여러 후보의 근거면 한 번만 담고 꼬리표를 합친다.
+
+    근거 문장이 원문에 여러 번 나오면 모든 자리를 담되, context와 가장 가까운 대표 자리만
+    primary=True다. 화면은 대표 자리로 스크롤하고 나머지는 옅게 칠한다 — 고른 자리가 틀렸어도
+    사람이 다른 후보 자리를 볼 수 있게 하려는 것이다.
+    """
+    spans = {}
+    for label, evidence in evidences:
+        for rank, span in enumerate(_ranked_spans(source, evidence, context)):
+            entry = spans.setdefault(span, {"labels": [], "primary": False})
+            if label and label not in entry["labels"]:
+                entry["labels"].append(label)
+            entry["primary"] = entry["primary"] or rank == 0
+    merged = []
+    # 같은 자리에서 시작하면 긴 구간(문장 전체)을 먼저 둔다.
+    for (start, end), entry in sorted(spans.items(), key=lambda item: (item[0][0], -item[0][1])):
+        span = {"start": start, "end": end, "label": " · ".join(entry["labels"]), "primary": entry["primary"]}
+        # 서로 걸쳐 있는 구간은 하나만 남긴다 — 하이라이트가 겹치면 화면에서 경계가 사라진다.
+        # 대표 자리가 아닌 쪽이 대표 자리를 가리지 않도록, 앞의 것이 대표가 아니고 뒤의 것이 대표면 바꾼다.
+        if merged and start < merged[-1]["end"]:
+            if span["primary"] and not merged[-1]["primary"]:
+                merged[-1] = span
+            continue
+        merged.append(span)
+    return merged
 
 
 # ---------------------------------------------------------------------------

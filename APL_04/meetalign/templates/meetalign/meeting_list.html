@@ -30,12 +30,8 @@
       </div>
     </div>
     <div class="item-actions">
-      {% if row.decision_open %}
-        {% if row.pending %}
-        <span class="pending-badge" title="{{ row.tooltip }}" aria-label="{{ row.tooltip }}">{{ row.badge }}</span>
-        {% else %}
-        <span class="pending-clear" title="모두 결정을 확인했어요">✓ 모두 확인</span>
-        {% endif %}
+      {% if row.notice %}
+      <a class="pending-badge" href="{% url 'decision_ack' m.id %}" title="{{ row.notice_label }} — 눌러서 결정 확인" aria-label="{{ row.notice_label }} 결정 확인하기" style="cursor:pointer;color:#fff">{{ row.notice_label }}</a>
       {% endif %}
       <a class="btn sm secondary" href="{% url 'meeting_detail' m.id %}">입장</a>
     </div>

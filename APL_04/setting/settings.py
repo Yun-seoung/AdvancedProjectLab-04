@@ -11,6 +11,7 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 import os
+import sys
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
@@ -81,6 +82,7 @@ TEMPLATES = [
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
                 'meetalign.context_processors.due_soon',
+                'meetalign.context_processors.notification_count',
             ],
         },
     },
@@ -117,6 +119,12 @@ AUTH_PASSWORD_VALIDATORS = [
         'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
     },
 ]
+
+# `manage.py test`에서만 빠른 해셔를 쓴다. 기본 PBKDF2(150만 회)는 해싱 한 번에 0.8초쯤 걸려서,
+# setUp마다 create_user를 여러 번 부르는 테스트 400여 개가 그 시간의 대부분을 비밀번호 해싱에 썼다.
+# 실제 서버(runserver·wsgi)는 이 분기를 타지 않으므로 저장되는 비밀번호의 강도는 그대로다.
+if len(sys.argv) > 1 and sys.argv[1] == 'test':
+    PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']
 
 
 # Internationalization
