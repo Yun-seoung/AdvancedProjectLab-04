@@ -365,6 +365,16 @@ class LocalLLMTests(TestCase):
         self.assertIn("결정: A안으로 진행", gen.call_args[0][0])
         self.assertIn("무엇을 정했나?", gen.call_args[0][0])
 
+    def test_chat_reply_allows_general_knowledge_explanations(self):
+        """모르는 용어·기술을 물으면 회의록에 없어도 일반 지식으로 답하도록 지시한다 —
+        회의 내용 질문에 대한 할루시네이션 억제(회의록 근거 요구)는 그대로 둔 채, 용어 설명
+        질문만 풀어준다."""
+        with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="답") as gen:
+            services.chat_reply(self.meeting, "쿠버네티스가 뭐야?")
+        prompt = gen.call_args[0][0]
+        self.assertIn("[일반 지식]", prompt)
+        self.assertIn("회의록 내용만 근거로 답하라", prompt)
+
     def test_chat_reply_includes_conversation_history(self):
         history = [("user", "언제까지야?"), ("assistant", "다음 주 금요일입니다.")]
         with patch.dict(os.environ, {"OLLAMA_MODEL": "m1"}), patch.object(services, "_generate", return_value="네 맞습니다") as gen:
