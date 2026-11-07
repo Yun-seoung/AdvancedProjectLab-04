@@ -1,8 +1,4 @@
 {% extends "meetalign/base.html" %}
-{% block note %}
-<li>녹음 파일은 실제로 서버에 저장되고, 로그인한 회의 멤버만 받을 수 있다.</li>
-<li>제출 → 회의록 생성 화면, 종료 → 이 화면에 머문다.</li>
-{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
@@ -10,8 +6,17 @@
       {% if meeting.ended %}<span class="badge ended">종료</span>{% endif %}
       {% if meeting.is_due_tomorrow %}<span class="badge due">마감 D-1</span>{% endif %}
     </h1>
-    {% if meeting.deadline %}<div class="sub">마감 {{ meeting.deadline|date:"Y년 m월 d일" }}</div>{% endif %}
+    {% if meeting.deadline %}<div class="deadline-chip{% if meeting.is_due_tomorrow %} soon{% endif %}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M8 3v4M16 3v4M3 10h18"/></svg>마감 {{ meeting.deadline|date:"Y년 m월 d일" }}</div>{% endif %}
   </div>
+  {% if meeting.host_id == user.id %}
+  <form method="post" style="margin:0">{% csrf_token %}
+    <button name="action" value="delete_meeting" class="btn ghost" style="color:var(--danger)"
+      onclick="return confirm('회의 \'{{ meeting.title }}\'를 삭제할까요? 녹음, 회의록, 답변이 모두 함께 삭제되며 되돌릴 수 없습니다.');">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>
+      회의 삭제
+    </button>
+  </form>
+  {% endif %}
 </div>
 
 <div class="card elevated">
@@ -22,6 +27,15 @@
   </div>
   {% endif %}
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+  {# 읽지 않은 결정 알림 — 진행자가 결정을 공개했거나 공개 뒤에 고쳤다. 결정 확인 화면을 열면 사라진다. #}
+  {% if decision_notice %}
+  <div class="notice" style="border-color:var(--accent);background:var(--accent-soft)">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto;margin-top:1px"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+    <span><b>{% if decision_notice == notice_revised %}이 회의의 결정이 수정됐어요.{% else %}이 회의의 결정이 공개됐어요.{% endif %}</b>
+      <a href="{% url 'decision_ack' meeting.id %}">결정 확인하기 ›</a></span>
+  </div>
+  {% endif %}
 
   {# 결정 확인: 지난 회의에서 미결정으로 남은 안건. 진행자가 "처리됨"을 누를 때까지 계속 보인다. #}
   {% if carryover_decisions %}
@@ -62,7 +76,7 @@
             </span>
             <div class="item-text">
               <span class="title">{{ rec.filename }}</span>
-              {% if rec.status == "processing" %}<span class="badge processing">전사 중</span>
+              {% if rec.status == "processing" %}<span class="badge processing">글로 옮기는 중</span>
               {% elif rec.status == "done" %}<span class="badge done">완료</span>
               {% else %}<span class="badge failed">실패</span>{% endif %}
               <div class="meta">{{ rec.created_at|date:"Y.m.d H:i" }}</div>
@@ -88,6 +102,7 @@
     <div class="notice" style="background:var(--surface-sunken);color:var(--ink-soft);border-color:var(--line)">
       회의가 종료되었습니다. 녹음 업로드와 익명 질문은 더 이상 받지 않습니다.
     </div>
+    <div class="row" style="margin-top:12px"><a class="btn secondary" href="{% url 'summary' meeting.id %}">회의 요약</a></div>
   {% else %}
   <h2 class="section-title">{% if meeting.recordings.all %}녹음 추가 업로드{% else %}회의 녹음{% endif %}</h2>
   {% if stt_status %}<p class="muted" style="margin:-4px 0 10px">{{ stt_status }}</p>{% endif %}
@@ -110,6 +125,7 @@
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M5 12h12M13 6l6 6-6 6"/></svg>
         녹음 제출하고 회의록 만들기
       </button>
+      <a class="btn secondary" href="{% url 'summary' meeting.id %}">회의 요약</a>
       <button name="action" value="end" class="secondary"
         onclick="return confirm('회의를 종료할까요? 종료 후에는 녹음 업로드와 익명 질문이 막힙니다.');">회의 종료</button>
     </div>
@@ -180,6 +196,27 @@
 
 <h2 class="section-title">이 회의 둘러보기</h2>
 <ul class="plain">
+  {# 결정 확인. 회의록이 완성된 회의에서만 보인다. 진행자는 확정 화면, 팀원은 확인 화면. #}
+  {% if meeting.processing_status == "done" %}
+  <li class="item">
+    <div class="item-main">
+      <span class="item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h7"/><path d="m17 15 2 2 3-3"/></svg></span>
+      <div class="item-text">
+        <span class="title">결정 확인</span>
+        {% if meeting.host_id == user.id %}
+        <div class="meta">결정을 정리하고, 모호한 항목을 한 줄로 확정해 팀원에게 공개합니다</div>
+        {% else %}
+        <div class="meta">진행자가 확정해 공개한 결정과 그 근거가 된 원문을 봅니다</div>
+        {% endif %}
+      </div>
+    </div>
+    {% if meeting.host_id == user.id %}
+    <a class="btn sm secondary" href="{% url 'decision_review' meeting.id %}">열기</a>
+    {% else %}
+    <a class="btn sm secondary" href="{% url 'decision_ack' meeting.id %}">열기</a>
+    {% endif %}
+  </li>
+  {% endif %}
   <li class="item">
     <div class="item-main">
       <span class="item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5a8.4 8.4 0 0 1-8.9 8.4 8.6 8.6 0 0 1-3.7-.8L3 20l1-5a8.5 8.5 0 0 1-1-4.1A8.4 8.4 0 0 1 11.9 2a8.4 8.4 0 0 1 9 8.4Z"/></svg></span>
@@ -200,36 +237,15 @@
     </div>
     <a class="btn sm secondary" href="{% url 'inbox' meeting.id %}">열기</a>
   </li>
-  <li class="item">
-    <div class="item-main">
-      <span class="item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 3h7l5 5v13H7z"/><path d="M14 3v5h5M9 13h6M9 17h6"/></svg></span>
-      <span class="title">회의 요약</span>
-    </div>
-    <a class="btn sm secondary" href="{% url 'summary' meeting.id %}">보기</a>
-  </li>
-  {# 결정 확인. 회의록이 완성된 회의에서만 보인다. 진행자는 확정 화면, 팀원은 확인 화면. #}
-  {% if meeting.processing_status == "done" %}
-  <li class="item">
-    <div class="item-main">
-      <span class="item-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h10M4 17h7"/><path d="m17 15 2 2 3-3"/></svg></span>
-      <div class="item-text">
-        <span class="title">결정 확인</span>
-        {% if meeting.host_id == user.id %}
-        <div class="meta">결정을 실행 명세로 옮기고, 모호한 항목을 한 줄로 확정해 팀원에게 공개합니다</div>
-        {% else %}
-        <div class="meta">진행자가 확정한 내용이 내 이해와 같은지 확인합니다</div>
-        {% endif %}
-      </div>
-    </div>
-    {% if meeting.host_id == user.id %}
-    <a class="btn sm secondary" href="{% url 'decision_review' meeting.id %}">열기</a>
-    {% else %}
-    <a class="btn sm secondary" href="{% url 'decision_ack' meeting.id %}">열기</a>
-    {% endif %}
-  </li>
-  {% endif %}
 </ul>
 {% if meeting.host_id == user.id %}
+<details class="card" style="margin-top:28px">
+  <summary style="cursor:pointer;font-weight:700">참석자 · 결정 알림 받는 사람 ({{ participant_ids|length }}명)</summary>
+  <form method="post">{% csrf_token %}
+    {% include "meetalign/_participant_picker.html" %}
+    <button name="action" value="set_participants" class="btn sm secondary">참석자 저장</button>
+  </form>
+</details>
 <form method="post" style="margin-top:28px">{% csrf_token %}
   <button name="action" value="delete_meeting" class="btn ghost" style="color:var(--danger)"
     onclick="return confirm('회의 \'{{ meeting.title }}\'를 삭제할까요? 녹음, 회의록, 답변이 모두 함께 삭제되며 되돌릴 수 없습니다.');">

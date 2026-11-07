@@ -1,14 +1,24 @@
 {% extends "meetalign/base.html" %}
-{% block note %}<li>회의방은 팀 단위이며, 회의를 선택해 입장한다.</li>{% endblock %}
 {% block content %}
 <div class="page-head">
   <div>
     <h1><a href="{% url 'index' %}" class="crumb-link">홈</a> <span class="crumb-sep">/</span> {{ team.name }}</h1>
   </div>
-  <a class="btn" href="{% url 'meeting_create' team.id %}">
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
-    회의 만들기
-  </a>
+  <div class="row" style="gap:8px">
+    {% if team.created_by_id == user.id %}
+    <form method="post" style="margin:0">{% csrf_token %}
+      <button name="action" value="delete_team" class="btn ghost" style="color:var(--danger)"
+        onclick="return confirm('팀 \'{{ team.name }}\'을(를) 삭제할까요? 팀의 모든 회의와 기록이 함께 삭제되며 되돌릴 수 없습니다.');">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>
+        팀 삭제
+      </button>
+    </form>
+    {% endif %}
+    <a class="btn" href="{% url 'meeting_create' team.id %}">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+      회의 만들기
+    </a>
+  </div>
 </div>
 <div class="notice" id="invite-code-notice" style="align-items:center;flex-wrap:wrap">
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:0 0 auto"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M3 9.5 12 14l9-4.5"/></svg>
@@ -30,12 +40,8 @@
       </div>
     </div>
     <div class="item-actions">
-      {% if row.decision_open %}
-        {% if row.pending %}
-        <span class="pending-badge" title="{{ row.tooltip }}" aria-label="{{ row.tooltip }}">{{ row.badge }}</span>
-        {% else %}
-        <span class="pending-clear" title="모두 결정을 확인했어요">✓ 모두 확인</span>
-        {% endif %}
+      {% if row.notice %}
+      <a class="pending-badge" href="{% url 'decision_ack' m.id %}" title="{{ row.notice_label }} — 눌러서 결정 확인" aria-label="{{ row.notice_label }} 결정 확인하기" style="cursor:pointer;color:#fff">{{ row.notice_label }}</a>
       {% endif %}
       <a class="btn sm secondary" href="{% url 'meeting_detail' m.id %}">입장</a>
     </div>
@@ -44,13 +50,4 @@
   <li class="empty"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 11V6a1 1 0 0 1 1-1h14a1 1 0 0 1 1 1v5"/><path d="M4 11h4.5a1 1 0 0 1 .9.55L10.5 14h3l1.1-2.45a1 1 0 0 1 .9-.55H20"/><path d="M4 11v6a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-6"/></svg>아직 회의가 없습니다. 첫 회의를 만들어 보세요.</li>
 {% endfor %}
 </ul>
-{% if team.created_by_id == user.id %}
-<form method="post" style="margin-top:28px">{% csrf_token %}
-  <button name="action" value="delete_team" class="btn ghost" style="color:var(--danger)"
-    onclick="return confirm('팀 \'{{ team.name }}\'을(를) 삭제할까요? 팀의 모든 회의와 기록이 함께 삭제되며 되돌릴 수 없습니다.');">
-    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2L4 6"/></svg>
-    팀 삭제
-  </button>
-</form>
-{% endif %}
 {% endblock %}

@@ -40,6 +40,10 @@ class Meeting(models.Model):
     record = models.TextField(blank=True)
     transcript = models.TextField(blank=True)
     processing_status = models.CharField(max_length=20, blank=True, default="")
+    # 이 회의에 참석한 팀원. 결정 공개·수정 알림을 받는 범위다(meetalign.notifications).
+    # 비어 있으면(기능 도입 전에 만든 회의) 팀 멤버 전원을 참석자로 본다. 회의를 볼 수 있는
+    # 권한은 여전히 팀 멤버십이 정한다 — 참석하지 않은 팀원도 회의록과 결정은 볼 수 있다.
+    participants = models.ManyToManyField(settings.AUTH_USER_MODEL, blank=True, related_name="attended_meetings")
 
     def __str__(self):
         return self.title
@@ -116,11 +120,11 @@ class Question(models.Model):
 
 
 # ---------------------------------------------------------------------------
-# 결정 컴파일러.
+# 결정 사항 추출 기능.
 #
-# 흐름: 회의 원문에서 '실행 명세'를 뽑고(①), 모호한 항목마다 해석 후보를 만들어(②)
+# 흐름: 회의 원문에서 '결정 사항'를 뽑고(①), 모호한 항목마다 해석 후보를 만들어(②)
 # 진행자에게만 참고로 보여준다. 진행자가 항목마다 확정하거나 '아직 미정'으로 넘기고(③),
-# "확정 명세 공개"를 누르면 팀원 전원에게 보인다(④). 팀원은 항목마다 확인했는지 또는
+# "확정된 결정 공개"를 누르면 팀원 전원에게 보인다(④). 팀원은 항목마다 확인했는지 또는
 # 자기 이해와 달랐는지를 남긴다(⑤).
 #
 # ※ 블라인드 투표 모드(보류): 팀원 전원이 해석을 블라인드로 동시 선택하고 집계로 판정하는
@@ -138,7 +142,7 @@ class Decision(models.Model):
 
     what은 안건 한 줄, final_text는 팀원에게 그대로 공개되는 문장이다. who·due_text·
     done_criteria·confirm_state는 이번 재설계 전 레코드를 보존하려고 남겨 둔 칸이고 신규
-    컴파일에서는 채우지 않는다 — 공개 기준이 둘이 되지 않게 하려는 것이다.
+    추출에서는 채우지 않는다 — 공개 기준이 둘이 되지 않게 하려는 것이다.
 
     AI가 다르게 이해될 수 있다고 본 항목은 divergence_reason이 차고, 규칙 안전망이 걸린
     항목은 warnings가 찬다. 둘 중 하나라도 있으면(has_warning) 진행자가 확인해야 공개된다.
@@ -189,11 +193,14 @@ class Decision(models.Model):
     # 그 부분만 빈칸 표시로 바꾸면 '직접 쓰기'의 출발점으로 쓸 만한 문장. 담당자·기한처럼
     # AI가 이미 정한 부분은 살리고 못 정한 부분만 채우면 되게 한다. 없으면 빈 문자열.
     draft_hint = models.TextField(blank=True, default="")
+    # AI가 '명확'이라고 본 결정의 근거가 된 전사 원문 문장. 확인이 필요한 결정은 후보마다
+    # 근거(Interpretation.evidence)가 따로 있어 여기를 비워 둔다. 결정 확인 화면의 전사 원본
+    # 창에서 이 문장을 찾아 하이라이트한다.
+    evidence = models.TextField(blank=True, default="")
     # 진행자가 '아직 미정'으로 넘긴 항목. 공개 시점에 status=undecided가 된다.
     marked_undecided = models.BooleanField(default=False)
-    # 공개 뒤에 확정 문장이 수정된 항목. 팀원 화면에 "내용이 수정되었어요"를 띄우는 데 쓴다.
-    # 수정 시 그 항목의 확인 기록(DecisionAgreement)은 모두 지워지므로, 다시 확인한 사람에게는
-    # 안내가 사라진다(안내는 '내 확인 기록이 없을 때'만 뜬다).
+    # 공개 뒤에 확정 문장이 수정된 항목. 팀원 화면에 "수정됨" 표시를 붙이는 데 쓴다.
+    # 수정하면 팀원에게 알림(Notification)이 간다.
     revised = models.BooleanField(default=False)
     # 미결정으로 이월된 안건을 진행자가 "처리됨"으로 닫은 시각. null이면 이후 회의 화면에 계속 보인다.
     carryover_resolved_at = models.DateTimeField(null=True, blank=True)
@@ -247,7 +254,7 @@ class Interpretation(models.Model):
     해석이 아니라 완성된 문장이다 — 진행자가 고르면 그 문장이 복사되어 final_text가 되고
     팀원에게 그대로 공개된다. 그래서 누가·무엇을·언제까지·완료 기준이 문장 안에 들어 있어야 한다.
 
-    evidence는 전사 원문에 그대로 등장하는 문장이어야 하며, 지어낸 근거가 붙은 후보는 저장
+    evidence는 녹취 원문에 그대로 등장하는 문장이어야 하며, 지어낸 근거가 붙은 후보는 저장
     단계에서 버린다(공백을 무시한 뒤 원문에 그 문장이 실제로 있는지 비교한다).
     정답은 없다 — recommended는 근거가 가장 강한 하나를 가리키는 배지일 뿐이고, 미리 선택해
     두지 않는다. 후보 목록 자체는 진행자에게만 보여주고 팀원에게는 보여주지 않는다.
@@ -275,7 +282,7 @@ class Interpretation(models.Model):
 
 
 class DecisionAgreement(models.Model):
-    """공개된 확정 명세에 대한 팀원별 확인 기록.
+    """공개된 결정에 대한 팀원별 확인 기록.
 
     kind=ack는 "확인했어요", kind=differ는 "제 이해와 달랐어요"다. comment는 differ에
     덧붙이는 한 줄 의견(선택)이다.
@@ -312,8 +319,8 @@ class DecisionAgreement(models.Model):
 
 
 class Checkpoint(models.Model):
-    """착수 체크포인트(Phase E). 공개된 확정 명세에서 본인이 담당자인 항목에 "완료 모습 한 줄"을
-    쓰면, AI가 확정 명세와 대조해 '맞음 / 차이 있음(이유 한 줄)'을 돌려준다."""
+    """착수 체크포인트(Phase E). 공개된 결정에서 본인이 담당자인 항목에 "완료 모습 한 줄"을
+    쓰면, AI가 확정된 결정과 대조해 '맞음 / 차이 있음(이유 한 줄)'을 돌려준다."""
 
     VERDICT_MATCH = "match"
     VERDICT_DIFF = "diff"
@@ -337,3 +344,38 @@ class Checkpoint(models.Model):
 
     def __str__(self):
         return "%s - %s" % (self.decision_id, self.verdict)
+
+
+class Notification(models.Model):
+    """참석자에게 보내는 결정 확인 알림. 진행자가 확정 문장을 공개하거나, 공개 뒤에 고치면 진행자를
+    뺀 참석자마다 생긴다(한 사람에게 회의당 하나 — meetalign.notifications).
+
+    상단 메뉴의 알림 아이콘·알림 목록, 회의 목록 배지, 회의 화면 안내가 모두 '읽지 않은 알림'
+    (read_at이 비어 있는 행)을 본다. 팀원이 그 회의의 결정 확인 화면을 열면 그 회의의 알림은
+    읽은 것으로 보고 지운다. read_at은 그 전에 읽음 처리만 해 두던 행을 가려내려고 남겨 둔 칸이다.
+    """
+
+    KIND_PUBLISHED = "published"
+    KIND_REVISED = "revised"
+    KIND_CHOICES = [
+        (KIND_PUBLISHED, "새 결정 공개"),
+        (KIND_REVISED, "결정 수정"),
+    ]
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="notifications")
+    meeting = models.ForeignKey(Meeting, on_delete=models.CASCADE, related_name="notifications")
+    kind = models.CharField(max_length=12, choices=KIND_CHOICES)
+    message = models.CharField(max_length=300)
+    created_at = models.DateTimeField(auto_now_add=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [models.Index(fields=["user", "read_at"])]
+
+    @property
+    def is_unread(self):
+        return self.read_at is None
+
+    def __str__(self):
+        return "%s → %s: %s" % (self.meeting_id, self.user_id, self.kind)
