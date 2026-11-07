@@ -194,6 +194,32 @@ class PrototypeFlowTests(TestCase):
         r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
         self.assertNotContains(r, "record-toggle")
 
+    def test_mic_recording_offers_pause_and_separate_stop(self):
+        r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
+        self.assertContains(r, "record-stop")
+        self.assertContains(r, "일시정지")
+        self.assertContains(r, "이어서 녹음")
+        self.assertContains(r, ".pause()")
+        self.assertContains(r, ".resume()")
+
+    def test_pause_controls_gone_once_meeting_ended(self):
+        self.meeting.ended = True
+        self.meeting.save()
+        r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
+        self.assertNotContains(r, "record-stop")
+        self.assertNotContains(r, "이어서 녹음")
+
+    def test_timer_accumulates_instead_of_wall_clock(self):
+        # 일시정지 중에도 시간이 올라가지 않도록 누적 방식으로 계산해야 한다.
+        r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
+        self.assertContains(r, "elapsedMs")
+        self.assertContains(r, "segmentStart")
+
+    def test_submit_blocked_while_still_recording(self):
+        # 녹음을 중지하지 않고 제출하면 빈 파일이 올라가므로 먼저 막는다.
+        r = self.client.get(reverse("meeting_detail", args=[self.meeting.id]))
+        self.assertContains(r, "녹음을 먼저 중지해 주세요")
+
     def test_summary_shows_saved_record(self):
         self.meeting.record = "결정: A안으로 진행"
         self.meeting.save()
