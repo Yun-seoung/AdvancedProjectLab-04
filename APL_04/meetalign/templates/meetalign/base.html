@@ -83,6 +83,14 @@
   .page-head h1 .crumb-link:hover { background:var(--brand); color:var(--brand-ink); text-decoration:none; }
   .page-head h1 .crumb-sep { display:none; }
   .page-head .sub { color:var(--muted); font-size:.92rem; margin-top:4px; }
+  .deadline-chip {
+    display:inline-flex; align-items:center; gap:7px; margin-top:8px; padding:6px 14px;
+    border:1.5px solid var(--line-strong); border-radius:999px; background:var(--surface);
+    color:var(--ink); font-size:1rem; font-weight:700;
+  }
+  .deadline-chip svg { color:var(--brand); flex:0 0 auto; }
+  .deadline-chip.soon { border-color:var(--accent); background:var(--accent-soft); color:var(--accent); }
+  .deadline-chip.soon svg { color:var(--accent); }
 
   h2.section-title { font-size:1rem; margin:26px 0 12px; color:var(--ink-soft); font-weight:700; }
   h2.section-title:first-child { margin-top:0; }
