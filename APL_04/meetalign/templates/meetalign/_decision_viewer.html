@@ -33,6 +33,10 @@
   .decision-step.step-hidden { display:none; }
   [data-open-transcript] { cursor:pointer; }
   .open-transcript-hint { font-size:.8rem; color:var(--brand); font-weight:600; white-space:nowrap; }
+  /* 문항 아래 '더 보기' — AI가 만들지 않은 내용(원문 근거·경고·다른 선택지)을 기본으로 접어 둔다. */
+  .step-more { margin-top:4px; }
+  .step-more > summary { cursor:pointer; padding:6px 0; list-style-position:inside; }
+  .step-more-body { display:flex; flex-direction:column; gap:8px; border-top:1px solid var(--line); padding-top:10px; margin-top:6px; }
 
   .transcript-panel {
     position:fixed; z-index:20; top:64px; right:0; bottom:0; width:min(46vw, 560px);
@@ -243,6 +247,53 @@
     var saved = loadStep();
     show(isNaN(saved) ? 0 : saved);
     scrollOnShow = true;
+
+    // ---- 고르면 바로 다음 문항으로 ----
+    // data-auto-advance 선택지(AI 추천 문장 · 다음 회의로 넘김 · 이 결정 빼기)를 고르면 잠깐 뒤 다음 문항으로
+    // 넘어간다 — 고른 표시를 눈으로 확인할 틈을 둔다. 마지막 문항에서는 넘어갈 곳이 없으니 그대로 둔다.
+    // '직접 쓰기'는 글을 써야 하므로 넘어가지 않고 입력칸으로 커서를 옮긴다.
+    var ADVANCE_DELAY_MS = 350;
+    var pending = null;
+    function advanceFrom(step) {
+      var index = steps.indexOf(step);
+      if (index !== current || current >= steps.length - 1) return;
+      clearTimeout(pending);
+      pending = setTimeout(function () {
+        if (current === index) show(current + 1);
+      }, ADVANCE_DELAY_MS);
+    }
+    document.addEventListener("change", function (event) {
+      var input = event.target;
+      if (!input.matches || !input.matches('input[type="radio"]')) return;
+      var step = input.closest(".decision-step");
+      if (!step) return;
+      if (input.hasAttribute("data-auto-advance")) {
+        advanceFrom(step);
+      } else if (input.hasAttribute("data-custom-choice")) {
+        clearTimeout(pending);
+        var box = step.querySelector('[name="custom_text_' + input.name.replace("choice_", "") + '"]');
+        if (box) box.focus();
+      }
+    });
+    // 입력칸에서 Enter — 폼을 제출하는 대신 다음 문항으로 넘어간다(저장·공개는 아래 버튼으로만).
+    document.addEventListener("keydown", function (event) {
+      var box = event.target;
+      if (event.key !== "Enter" || event.isComposing || !box.matches || !box.matches("[data-advance-on-enter]")) return;
+      event.preventDefault();
+      var step = box.closest(".decision-step");
+      if (step && steps.indexOf(step) === current && current < steps.length - 1) show(current + 1);
+    });
+    // 입력칸에 글을 쓰기 시작하면 '직접 쓰기'를 고른 것으로 본다(라디오를 따로 누르지 않아도 되게).
+    document.addEventListener("input", function (event) {
+      var box = event.target;
+      if (!box.matches || !box.matches("[data-advance-on-enter]")) return;
+      var step = box.closest(".decision-step");
+      var custom = step && step.querySelector('input[data-custom-choice][name="choice_' + box.name.replace("custom_text_", "") + '"]');
+      if (custom && !custom.checked && box.value.trim()) {
+        custom.checked = true;
+        custom.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
   }
 })();
 </script>

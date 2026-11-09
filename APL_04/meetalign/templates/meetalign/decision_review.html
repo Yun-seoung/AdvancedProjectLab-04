@@ -75,26 +75,29 @@
       {% if row.decision.divergence_reason %}
       <div style="font-weight:600;font-size:.9rem">{{ row.decision.divergence_reason }}</div>
       {% endif %}
-      {% if row.decision.evidence %}
-      <div class="meta" data-open-transcript data-evidence-label="근거">원문: "{{ row.decision.evidence }}" <span class="open-transcript-hint">원문에서 보기</span></div>
-      {% if row.evidence_context %}<div class="meta">앞뒤 맥락: "{{ row.evidence_context }}"</div>{% endif %}
-      {% endif %}
-      {% if row.warning_rows %}
-      <div class="record" style="font-size:.88rem">
-        {% for warning in row.warning_rows %}
-        <div>· {{ warning.text }}</div>
-        {% if warning.context %}<div class="meta" style="margin:2px 0 4px 14px">원문 맥락: "{{ warning.context }}"</div>{% endif %}
-        {% endfor %}
-      </div>
-      {% endif %}
 
       {% if editable %}
-      <div style="border-top:1px solid var(--line);padding-top:12px">
-        <span class="label" style="font-size:.86rem;font-weight:700;color:var(--ink-soft)">어느 문장으로 공개할까요?</span>
-        <span class="badge failed" style="margin-left:6px" data-unsettled-for="choice_{{ row.decision.id }}"{% if not row.blocking %} hidden{% endif %}>고르지 않으면 빠져요</span>
-        {% include "meetalign/_decision_choices.html" with carried=False %}
+      <div data-choice-name="choice_{{ row.decision.id }}">
+        <div style="border-top:1px solid var(--line);padding-top:12px">
+          <span class="label" style="font-size:.86rem;font-weight:700;color:var(--ink-soft)">어느 문장으로 공개할까요?</span>
+          <span class="badge failed" style="margin-left:6px" data-unsettled-for="choice_{{ row.decision.id }}"{% if not row.blocking %} hidden{% endif %}>고르지 않으면 빠져요</span>
+          <div style="margin-top:8px">
+            {% include "meetalign/_decision_choices.html" with carried=False part="ai" %}
+            {% if not row.interpretations %}
+            <div class="meta">AI 추천 문장이 없습니다. 아래 '더 보기'에서 직접 쓰거나 다음 회의로 넘길 수 있고, 고르지 않으면 공개할 때 빠집니다.</div>
+            {% endif %}
+          </div>
+        </div>
+        <details class="step-more"{% if row.choice == choice_custom %} open{% endif %}>
+          <summary class="meta">더 보기 — 원문 근거 · 직접 쓰기 · 다음 회의로 넘김 · 이 결정 빼기</summary>
+          <div class="step-more-body">
+            {% include "meetalign/_decision_evidence.html" %}
+            {% include "meetalign/_decision_choices.html" with carried=False part="rest" %}
+          </div>
+        </details>
       </div>
-      {% elif row.interpretations %}
+      {% else %}
+      {% if row.interpretations %}
       <div>
         <span class="label" style="font-size:.86rem;font-weight:700;color:var(--ink-soft)">AI 추천 문장 (진행자 참고용)</span>
         <ul class="plain" style="margin-top:8px">
@@ -104,41 +107,50 @@
         </ul>
       </div>
       {% endif %}
-      {% if editable and not row.interpretations %}
-      <div class="meta">AI 추천 문장이 없습니다. 직접 쓰거나 다음 회의로 넘길 수 있고, 고르지 않으면 공개할 때 빠집니다.</div>
+      {% if row.decision.evidence or row.warning_rows %}
+      <details class="step-more">
+        <summary class="meta">더 보기 — 원문 근거</summary>
+        <div class="step-more-body">{% include "meetalign/_decision_evidence.html" %}</div>
+      </details>
+      {% endif %}
       {% endif %}
 
     {% elif row.group == "clear" %}
-      {% if row.decision.evidence %}<div class="meta" data-open-transcript data-evidence-label="근거">근거: "{{ row.decision.evidence }}" <span class="open-transcript-hint">원문에서 보기</span></div>{% endif %}
       {% if editable %}
-      {# 그대로 공개 항목은 이 '직접 쓰기' 칸의 문장이 공개된다. 칸에는 AI가 쓴 문장이 미리 들어 있다. #}
-      <div class="field" style="margin:0;border-top:1px solid var(--line);padding-top:12px">
-        <label for="custom_text_{{ row.decision.id }}">직접 쓰기 — 이 칸의 문장이 그대로 공개돼요</label>
-        <input type="text" id="custom_text_{{ row.decision.id }}" name="custom_text_{{ row.decision.id }}" value="{{ row.custom_text }}"
-          data-clear-text data-original="{{ row.decision.final_text }}">
-      </div>
-      <details data-choice-name="choice_{{ row.decision.id }}" data-optional-choice>
-        <summary class="meta" style="cursor:pointer">다른 처리 (다음 회의로 넘김 · 이 결정 빼기)</summary>
-        <div style="border-top:1px solid var(--line);padding-top:8px;margin-top:8px">
+      {# 그대로 공개 항목은 '직접 쓰기' 칸의 문장이 공개된다. 칸에는 AI가 쓴 문장(위 제목 아래 문장)이 미리 들어 있다. #}
+      <details class="step-more" data-choice-name="choice_{{ row.decision.id }}" data-optional-choice>
+        <summary class="meta">더 보기 — 원문 근거 · 직접 쓰기 · 다음 회의로 넘김 · 이 결정 빼기</summary>
+        <div class="step-more-body">
+          {% include "meetalign/_decision_evidence.html" %}
+          <div class="field" style="margin:0">
+            <label for="custom_text_{{ row.decision.id }}">직접 쓰기 — 이 칸의 문장이 그대로 공개돼요</label>
+            <input type="text" id="custom_text_{{ row.decision.id }}" name="custom_text_{{ row.decision.id }}" value="{{ row.custom_text }}"
+              data-clear-text data-advance-on-enter data-original="{{ row.decision.final_text }}">
+          </div>
           <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
-            <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_undecided }}" style="width:auto;margin-top:3px">
+            <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_undecided }}" style="width:auto;margin-top:3px" data-auto-advance>
             <span><b>다음 회의로 넘김</b> — 이 회의에서 결론이 나지 않았다</span>
           </label>
           <label class="meta" style="display:flex;gap:9px;align-items:flex-start;padding:7px 0">
-            <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_drop }}" style="width:auto;margin-top:3px" data-drop-value="{{ choice_drop }}">
+            <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_drop }}" style="width:auto;margin-top:3px" data-drop-value="{{ choice_drop }}" data-auto-advance>
             <span>이 결정 빼기 — 회의에 없던 결정이에요</span>
           </label>
           <button type="button" class="btn sm ghost" data-clear-choice="choice_{{ row.decision.id }}">선택 취소 — 위 문장으로 공개</button>
         </div>
+      </details>
+      {% elif row.decision.evidence %}
+      <details class="step-more">
+        <summary class="meta">더 보기 — 원문 근거</summary>
+        <div class="step-more-body">{% include "meetalign/_decision_evidence.html" %}</div>
       </details>
       {% endif %}
 
     {% else %}
       <div class="meta">이 항목은 공개되지 않고 다음 회의의 "지난 회의 미결정 안건"으로 넘어갑니다.</div>
       {% if editable %}
-      <details>
-        <summary class="meta" style="cursor:pointer">다시 고르기</summary>
-        <div style="border-top:1px solid var(--line);padding-top:12px;margin-top:8px">
+      <details class="step-more" data-choice-name="choice_{{ row.decision.id }}">
+        <summary class="meta">다시 고르기</summary>
+        <div class="step-more-body">
           {% include "meetalign/_decision_choices.html" with carried=True %}
         </div>
       </details>

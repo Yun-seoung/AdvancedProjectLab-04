@@ -1,0 +1,16 @@
+{% comment %}
+  결정 화면 '더 보기' 안의 원문 근거 — 그 결정이 나온 녹취 원문 구절, 앞뒤 맥락, 규칙이 짚은 경고.
+  AI가 만든 내용이 아니라서 문항 아래에 접어 둔다. 누르면 녹취 원문 창이 그 자리로 열린다.
+{% endcomment %}
+{% if row.decision.evidence %}
+<div class="meta" data-open-transcript data-evidence-label="근거">원문: "{{ row.decision.evidence }}" <span class="open-transcript-hint">원문에서 보기</span></div>
+{% if row.evidence_context %}<div class="meta">앞뒤 맥락: "{{ row.evidence_context }}"</div>{% endif %}
+{% endif %}
+{% if row.warning_rows %}
+<div class="record" style="font-size:.88rem">
+  {% for warning in row.warning_rows %}
+  <div>· {{ warning.text }}</div>
+  {% if warning.context %}<div class="meta" style="margin:2px 0 4px 14px">원문 맥락: "{{ warning.context }}"</div>{% endif %}
+  {% endfor %}
+</div>
+{% endif %}
