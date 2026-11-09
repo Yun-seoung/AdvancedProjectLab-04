@@ -1,34 +1,43 @@
 {% comment %}
   진행자 화면에서 한 결정의 확정 방법 고르기 — [AI 추천 문장 | 직접 쓰기 | 다음 회의로 넘김 | 이 결정 빼기].
-  AI 추천 문장은 하나뿐이고 원문 근거를 따로 붙이지 않는다(근거는 결정마다 하나 — 문항 위쪽에 보인다).
+  part로 나눠 그린다 — AI가 만든 선택지는 늘 보이고, 나머지는 문항 아래 '더 보기'에 접혀 있기 때문이다.
+  - part="ai": AI 추천 문장만
+  - part="rest": 직접 쓰기 · 다음 회의로 넘김 · 이 결정 빼기
+  - part 없음: 전부(다음 회의로 넘긴 결정의 '다시 고르기')
+  두 부분의 라디오는 같은 name이라 한 묶음으로 동작한다. 공개 버튼 스크립트가 세는 data-choice-name은
+  이 부품이 아니라 쓰는 쪽이 두 부분을 감싼 요소에 붙인다.
+  data-auto-advance가 붙은 선택지를 고르면 다음 문항으로 넘어간다(_decision_viewer). '직접 쓰기'는 글을 써야
+  하므로 넘어가지 않고 입력칸으로 커서를 옮기며, 입력칸에서 Enter를 누르면 다음 문항으로 간다.
   carried=True(다음 회의로 넘길 결정)면 '다음 회의로 넘김'이 미리 골라져 있고 후보는 고르지 않은 상태로 보인다.
 {% endcomment %}
-<div style="margin-top:8px" data-choice-name="choice_{{ row.decision.id }}">
+{% if part != "rest" %}
   {% for interpretation in row.interpretations %}
   <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
-    <input type="radio" name="choice_{{ row.decision.id }}" value="{{ interpretation.choice_value }}" style="width:auto;margin-top:3px"
+    <input type="radio" name="choice_{{ row.decision.id }}" value="{{ interpretation.choice_value }}" style="width:auto;margin-top:3px" data-auto-advance
       {% if interpretation.chosen and not carried %}checked{% endif %}>
     <span>
       <span>{{ interpretation.text }}</span>{% if not carried %}<span class="badge processing" style="margin-left:6px;vertical-align:1px;white-space:nowrap">{% if interpretation.recommended %}AI 추천{% else %}AI 문장{% endif %}</span>{% endif %}
     </span>
   </label>
   {% endfor %}
+{% endif %}
+{% if part != "ai" %}
   <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
-    <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_custom }}" style="width:auto;margin-top:3px"
+    <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_custom }}" style="width:auto;margin-top:3px" data-custom-choice
       {% if row.choice == choice_custom and not carried %}checked{% endif %}>
     <span style="flex:1 1 auto">
       <b>직접 쓰기</b>
-      <input type="text" name="custom_text_{{ row.decision.id }}" value="{% if not carried %}{{ row.custom_text }}{% endif %}"
+      <input type="text" name="custom_text_{{ row.decision.id }}" value="{% if not carried %}{{ row.custom_text }}{% endif %}" data-advance-on-enter
         placeholder="{% if row.decision.draft_hint %}참고: {{ row.decision.draft_hint }}{% else %}예: 민수가 금요일 18시까지 배포 스크립트를 정리하고 스테이징에서 한 번 돌려 본다{% endif %}" style="margin-top:6px">
     </span>
   </label>
   <label style="display:flex;gap:9px;align-items:flex-start;padding:7px 0;font-weight:500">
-    <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_undecided }}" style="width:auto;margin-top:3px"
+    <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_undecided }}" style="width:auto;margin-top:3px" data-auto-advance
       {% if carried or row.choice == choice_undecided %}checked{% endif %}>
     <span><b>다음 회의로 넘김</b> — 이 회의에서 결론이 나지 않았다</span>
   </label>
   <label class="meta" style="display:flex;gap:9px;align-items:flex-start;padding:7px 0">
-    <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_drop }}" style="width:auto;margin-top:3px" data-drop-value="{{ choice_drop }}">
+    <input type="radio" name="choice_{{ row.decision.id }}" value="{{ choice_drop }}" style="width:auto;margin-top:3px" data-drop-value="{{ choice_drop }}" data-auto-advance>
     <span>이 결정 빼기 — 회의에 없던 결정이에요</span>
   </label>
-</div>
+{% endif %}

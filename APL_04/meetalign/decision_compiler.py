@@ -839,13 +839,41 @@ def evidence_spans(source, evidences, context=""):
 # ---------------------------------------------------------------------------
 
 
+# 미결정 사유를 하나도 찾지 못했을 때 보여줄 문구.
+CARRYOVER_DEFAULT_REASON = "이번 회의에서 결론이 나지 않았어요"
+
+
+def carryover_reason(decision):
+    """이월 안건의 미결정 사유 한 줄 — AI가 본 '왜 갈리나', 없으면 첫 경고, 둘 다 없으면 기본 문구."""
+    if decision.divergence_reason:
+        return decision.divergence_reason
+    if decision.warnings:
+        return decision.warnings[0]
+    return CARRYOVER_DEFAULT_REASON
+
+
+def _participant_names(meeting):
+    """그 회의의 참석자 이름 — 진행자를 맨 앞에, 나머지는 이름순.
+
+    참석자를 고르지 않은 회의(기능 도입 전에 만든 회의 포함)는 알림 범위와 같은 규칙으로 팀 멤버
+    전원을 참석자로 본다(notifications._recipients). prefetch된 목록만 써서 회의마다 쿼리가 늘지 않게 한다.
+    """
+    people = list(meeting.participants.all()) or list(meeting.team.members.all())
+    people.sort(key=lambda user: (user.pk != meeting.host_id, user.username))
+    return [user.username for user in people]
+
+
 def carryover_decisions(meeting):
     """이 회의보다 먼저 만들어진 같은 팀 회의의 미결정 안건 중 아직 '처리됨'이 안 된 것.
 
     진행자가 '처리됨'을 누를 때까지(carryover_resolved_at이 채워질 때까지) 이후 회의마다
     계속 보인다 — 한 번 보고 사라지면 묻히기 때문이다.
+
+    화면에 쓰는 임시 속성을 붙여 돌려준다(저장되지 않는다).
+    - participant_names: 그 안건이 나온 회의의 참석자 이름 목록(상단 "회의명 (참석자)")
+    - undecided_reason: 미결정 사유 한 줄(하단 "안건 – 미결정 사유")
     """
-    return list(
+    decisions = list(
         Decision.objects
         .filter(
             meeting__team_id=meeting.team_id,
@@ -853,6 +881,11 @@ def carryover_decisions(meeting):
             status=Decision.STATUS_UNDECIDED,
             carryover_resolved_at__isnull=True,
         )
-        .select_related("meeting")
+        .select_related("meeting", "meeting__team")
+        .prefetch_related("meeting__participants", "meeting__team__members")
         .order_by("meeting__created_at", "order", "id")
     )
+    for decision in decisions:
+        decision.participant_names = _participant_names(decision.meeting)
+        decision.undecided_reason = carryover_reason(decision)
+    return decisions

@@ -3024,13 +3024,51 @@ class DecisionCarryoverTests(TestCase):
         url = reverse("decision_carryover_resolve", args=[self.second.id, stranger.id])
         self.assertEqual(self._login(self.host).post(url).status_code, 404)
 
-    def test_carryover_banner_never_shows_who_voted(self):
-        # 진행자 화면에는 참석자 칸이 있어 팀원 이름이 나온다 — 이월 안건 배너 안만 본다.
-        html = self._login(self.host).get(self.detail_url).content.decode()
+    def _banner(self, user=None):
+        """이월 안건 배너 부분만 — 진행자 화면에는 참석자 칸도 있어 팀원 이름이 따로 나온다."""
+        html = self._login(user or self.host).get(self.detail_url).content.decode()
         start = html.index("지난 회의 미결정 안건")
-        banner = html[start:html.index("</ul>", start)]
-        self.assertIn("처리됨", banner)
-        self.assertNotIn(self.member.username, banner)
+        return html[start:html.index("</ul>", start)]
+
+    def test_each_item_shows_the_meeting_and_its_participants_on_top(self):
+        # 참석자를 고르지 않은 회의는 팀 멤버 전원 — 진행자가 맨 앞이다.
+        self.assertIn("첫 회의 (hostuser, memberuser)", self._banner())
+
+    def test_chosen_participants_are_shown_instead_of_the_whole_team(self):
+        self.first.participants.set([self.host])
+        self.assertIn("첫 회의 (hostuser)</div>", self._banner())
+
+    def test_the_bottom_line_is_the_item_and_its_reason(self):
+        # AI 사유가 없으면 첫 경고를 사유로 쓴다.
+        self.assertIn("배포 범위 정하기 – 완료 기준 빈칸", self._banner())
+
+    def test_the_ai_reason_comes_first(self):
+        Decision.objects.filter(pk=self.undecided.pk).update(divergence_reason="범위가 사람마다 달라요")
+        self.assertIn("배포 범위 정하기 – 범위가 사람마다 달라요", self._banner())
+
+    def test_a_default_reason_is_used_when_there_is_none(self):
+        Decision.objects.filter(pk=self.undecided.pk).update(warnings=[], divergence_reason="")
+        self.assertIn("배포 범위 정하기 – %s" % decision_compiler.CARRYOVER_DEFAULT_REASON, self._banner())
+
+    def test_members_see_the_same_format_without_the_resolve_button(self):
+        banner = self._banner(self.member)
+        self.assertIn("첫 회의 (hostuser, memberuser)", banner)
+        self.assertNotIn("처리됨", banner)
+
+    def test_more_carried_items_do_not_add_queries(self):
+        client = self._login(self.host)
+        client.get(self.detail_url)
+        with CaptureQueriesContext(connection) as few:
+            client.get(self.detail_url)
+        for i in range(4):
+            earlier = Meeting.objects.create(team=self.team, title="회의 %d" % i, host=self.host)
+            Meeting.objects.filter(pk=earlier.pk).update(created_at=self.first.created_at)
+            earlier.participants.set([self.host, self.member])
+            Decision.objects.create(meeting=earlier, order=0, what="안건 %d" % i, status=Decision.STATUS_UNDECIDED)
+        with CaptureQueriesContext(connection) as many:
+            r = client.get(self.detail_url)
+        self.assertContains(r, "안건 3")
+        self.assertEqual(len(few), len(many))
 
 
 class DecisionModelTests(TestCase):
@@ -3578,6 +3616,73 @@ class DecisionConfirmTests(TestCase):
         # 회의에 결정이 하나도 남지 않았으면 "공개할 항목이 없다"가 아니라 그 사실을 말해야 한다.
         self.assertContains(self.client.post(self.url, {"action": "publish"}),
                             "모든 결정을 뺐습니다")
+
+    # ---- 화면 구성: AI가 만든 부분만 보이고 나머지는 '더 보기'에 접혀 있다 ----
+
+    def test_no_template_comment_leaks_onto_the_page(self):
+        """{# #} 주석은 한 줄 안에서만 주석이다 — 두 줄로 쓰면 화면에 글자로 그대로 찍힌다."""
+        self.assertNotIn("{#", self.client.get(self.url).content.decode())
+        template_dir = os.path.join(os.path.dirname(__file__), "templates", "meetalign")
+        for name in sorted(os.listdir(template_dir)):
+            with open(os.path.join(template_dir, name), encoding="utf-8") as f:
+                for number, line in enumerate(f, 1):
+                    if "{#" in line:
+                        self.assertIn("#}", line[line.index("{#"):], "%s:%d" % (name, number))
+
+    def _step_html(self, decision):
+        html = self.client.get(self.url).content.decode()
+        start = html.index('data-decision-id="%d"' % decision.id)
+        return html[start:html.index("</section>", start)]
+
+    def test_only_the_ai_sentence_is_visible_for_a_warned_item(self):
+        decision = self.warned[0]
+        step = self._step_html(decision)
+        more = step.index('<details class="step-more"')
+        candidate = decision.interpretations.get()
+        # AI 추천 문장은 '더 보기' 바깥(위)에 있다.
+        self.assertLess(step.index('value="%s"' % self._candidate_value(candidate)), more)
+        # 원문 근거와 다른 선택지는 '더 보기' 안에 있다.
+        for marker in ('value="%s"' % decision_compiler.CHOICE_CUSTOM,
+                       'value="%s"' % decision_compiler.CHOICE_UNDECIDED,
+                       'value="%s"' % decision_compiler.CHOICE_DROP,
+                       '원문: "'):
+            self.assertGreater(step.index(marker), more, marker)
+
+    def test_the_more_section_is_collapsed_by_default(self):
+        for decision in self.warned + self.plain:
+            step = self._step_html(decision)
+            tag = step[step.index('<details class="step-more"'):]
+            self.assertNotIn(" open", tag[:tag.index(">")], decision.what)
+
+    def test_the_more_section_opens_when_a_hidden_choice_is_already_picked(self):
+        """직접 쓴 문장을 저장해 둔 항목은 고른 것이 가려지지 않게 '더 보기'를 펼쳐 둔다."""
+        decision = self.warned[0]
+        self.client.post(self.url, {
+            "action": "save", "choice_%d" % decision.id: decision_compiler.CHOICE_CUSTOM,
+            "custom_text_%d" % decision.id: "직접 쓴 문장",
+        })
+        step = self._step_html(decision)
+        tag = step[step.index('<details class="step-more"'):]
+        self.assertIn(" open", tag[:tag.index(">")])
+
+    def test_a_clear_items_ai_sentence_is_visible_and_its_box_is_folded(self):
+        plain = self.plain[0]
+        step = self._step_html(plain)
+        more = step.index('<details class="step-more"')
+        self.assertLess(step.index(plain.final_text), more)
+        self.assertGreater(step.index('name="custom_text_%d"' % plain.id), more)
+
+    def test_picking_choices_are_marked_to_move_to_the_next_item(self):
+        decision = self.warned[0]
+        step = self._step_html(decision)
+        for value in (self._candidate_value(decision.interpretations.get()),
+                      decision_compiler.CHOICE_UNDECIDED, decision_compiler.CHOICE_DROP):
+            tag = step[step.index('value="%s"' % value):]
+            self.assertIn("data-auto-advance", tag[:tag.index(">")], value)
+        # '직접 쓰기'는 글을 써야 하므로 넘어가지 않는다.
+        tag = step[step.index('value="%s"' % decision_compiler.CHOICE_CUSTOM):]
+        self.assertNotIn("data-auto-advance", tag[:tag.index(">")])
+        self.assertIn("data-custom-choice", tag[:tag.index(">")])
 
     def test_items_without_warnings_are_ready_with_no_choice(self):
         plain = self.plain[0]

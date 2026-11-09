@@ -49,8 +49,9 @@
       <li style="padding:9px 0;border-top:1px solid var(--line)">
         <div class="row" style="justify-content:space-between;gap:10px">
           <div class="item-text">
-            <span class="title">{{ decision.what }}</span>
-            <div class="meta">{{ decision.meeting.title }} · {{ decision.published_text }}</div>
+            {# 상단: 회의명 (참석자) · 하단: 미결정 안건 – 미결정 사유 #}
+            <div class="meta" style="margin:0 0 2px">{{ decision.meeting.title }}{% if decision.participant_names %} ({{ decision.participant_names|join:", " }}){% endif %}</div>
+            <span class="title">{{ decision.what }} – {{ decision.undecided_reason }}</span>
           </div>
           {% if meeting.host_id == user.id %}
           <form method="post" action="{% url 'decision_carryover_resolve' meeting.id decision.id %}">{% csrf_token %}
